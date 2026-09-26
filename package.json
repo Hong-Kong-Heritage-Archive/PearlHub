@@ -1,0 +1,23 @@
+{
+  "name": "pearlhub-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit tests/application tests/contracts",
+    "test:integration": "vitest run tests/integration"
+  },
+  "dependencies": {
+    "pg": "^8.16.3",
+    "semver": "^7.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "@types/pg": "^8.15.5",
+    "@types/semver": "^7.7.1",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
