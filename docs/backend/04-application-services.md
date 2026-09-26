@@ -61,10 +61,11 @@ Steps:
 3. establish `fork` lineage
 4. copy the selected source content/version according to the application command
 5. never mutate the source
+6. copy dependency declarations to the new Artifact Version without copying dependency resolutions
 
 ## CloneArtifact
 
-Create a new Artifact from source content without creating PearlHub lineage.
+Create a new Artifact from source content and dependency declarations without creating PearlHub lineage. Dependency resolutions are not copied.
 
 ## DeleteArtifact
 

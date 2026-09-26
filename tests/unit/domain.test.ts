@@ -3,6 +3,7 @@ import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Dependency } from "../../src/domain/dependency.js";
 import { DomainError } from "../../src/domain/errors.js";
+import { parsePearlContent } from "../../src/domain/pearl.js";
 
 describe("Artifact", () => {
   it("keeps identity immutable and tombstones without discarding its snapshot", () => {
@@ -83,5 +84,21 @@ describe("SemVer domain values", () => {
       declaredRange: "not-a-range",
       createdAt: new Date(),
     })).toThrowError(DomainError);
+  });
+});
+
+describe("Pearl content", () => {
+  it("validates the canonical structure and JSON-compatible content", () => {
+    expect(parsePearlContent({ version: "2.4.3", skill: {}, knowledge: [] })).toMatchObject({ version: "2.4.3", skill: {}, knowledge: [] });
+    expect(() => parsePearlContent({ version: "2.4.3", skill: [], knowledge: [] })).toThrowError(DomainError);
+    expect(() => parsePearlContent({ version: "2.4.3", skill: {}, knowledge: {} })).toThrowError(DomainError);
+    expect(() => parsePearlContent({ version: "2.4.3", skill: {}, knowledge: [], extra: undefined })).toThrowError(DomainError);
+  });
+
+  it("rejects missing Skill or Knowledge and invalid version metadata", () => {
+    expect(() => parsePearlContent({ version: "2.4.3", knowledge: [] })).toThrowError(DomainError);
+    expect(() => parsePearlContent({ version: "2.4.3", skill: {} })).toThrowError(DomainError);
+    expect(() => parsePearlContent({ version: 2, skill: {}, knowledge: [] })).toThrowError(DomainError);
+    expect(() => parsePearlContent({ version: "v2", skill: {}, knowledge: [] })).toThrowError(expect.objectContaining({ code: "INVALID_SEMVER" }));
   });
 });

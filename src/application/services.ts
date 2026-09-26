@@ -4,6 +4,7 @@ import { Artifact, type ArtifactVisibility } from "../domain/artifact.js";
 import { ArtifactVersion } from "../domain/artifact-version.js";
 import { Dependency } from "../domain/dependency.js";
 import { DomainError } from "../domain/errors.js";
+import { parsePearlContent } from "../domain/pearl.js";
 import { createForkLineage, type CompatibilityReport, type DependencyResolution, type Provenance } from "../domain/records.js";
 import type {
   ArtifactContentStore,
@@ -77,6 +78,7 @@ abstract class CopyArtifactService {
     protected readonly artifacts: ArtifactRepository,
     protected readonly versions: ArtifactVersionRepository,
     protected readonly contentStore: ArtifactContentStore,
+    protected readonly dependencies: DependencyRepository,
     protected readonly access: AccessPolicy,
     protected readonly ids: IdGenerator = uuidGenerator,
     protected readonly clock: Clock = systemClock,
@@ -100,6 +102,9 @@ abstract class CopyArtifactService {
     const work = async () => {
       await this.artifacts.create(artifact);
       await this.versions.create(copiedVersion);
+      for (const dependency of await this.dependencies.findForVersion(sourceVersion.id)) {
+        await this.dependencies.create(Dependency.create({ id: this.ids.next(), artifactVersionId: copiedVersion.id, targetArtifactId: dependency.targetArtifactId, declaredRange: dependency.declaredRange, createdAt: at }));
+      }
       await afterCreate?.(artifact);
     };
     if (this.transactions) await this.transactions.run(work); else await work();
@@ -108,8 +113,8 @@ abstract class CopyArtifactService {
 }
 
 export class ForkArtifactService extends CopyArtifactService {
-  constructor(artifacts: ArtifactRepository, versions: ArtifactVersionRepository, contentStore: ArtifactContentStore, private readonly lineage: LineageRepository, access: AccessPolicy, ids = uuidGenerator, clock = systemClock, transactions?: TransactionManager) {
-    super(artifacts, versions, contentStore, access, ids, clock, transactions);
+  constructor(artifacts: ArtifactRepository, versions: ArtifactVersionRepository, contentStore: ArtifactContentStore, dependencies: DependencyRepository, private readonly lineage: LineageRepository, access: AccessPolicy, ids = uuidGenerator, clock = systemClock, transactions?: TransactionManager) {
+    super(artifacts, versions, contentStore, dependencies, access, ids, clock, transactions);
   }
 
   async execute(input: { actorId: string; sourceArtifactId: string; name: string; slug: string; sourceVersionId?: string }): Promise<Artifact> {
@@ -148,13 +153,13 @@ export class ImportGitHubService {
   constructor(private readonly source: GitHubSource, private readonly artifacts: ArtifactRepository, private readonly versions: ArtifactVersionRepository, private readonly contentStore: ArtifactContentStore, private readonly provenances: ProvenanceRepository, private readonly ids = uuidGenerator, private readonly clock = systemClock, private readonly transactions?: TransactionManager) {}
   async execute(input: { actorId: string; sourceUrl: string; name: string; slug: string }): Promise<{ artifact: Artifact; version: ArtifactVersion }> {
     const fetched = await this.source.fetch(input.sourceUrl);
-    if (!isPearlContent(fetched.content)) throw new DomainError("IMPORT_INVALID_FORMAT", "GitHub source is not valid Pearl content.");
-    const canonical = canonicalize(fetched.content as Record<string, unknown>);
+    const pearl = parsePearlContent(fetched.content);
+    const canonical = canonicalize(pearl);
     const hash = `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
     const location = await this.contentStore.put(canonical, hash);
     const now = this.clock.now();
     const artifact = Artifact.create({ id: this.ids.next(), ownerId: input.actorId, name: input.name, slug: input.slug, visibility: "private", createdAt: now });
-    const version = ArtifactVersion.create({ id: this.ids.next(), artifactId: artifact.id, version: "1.0.0", contentHash: hash, contentLocation: location, createdAt: now, publishedAt: now });
+    const version = ArtifactVersion.create({ id: this.ids.next(), artifactId: artifact.id, version: pearl.version, contentHash: hash, contentLocation: location, createdAt: now, publishedAt: now });
     const provenance: Provenance = { id: this.ids.next(), artifactVersionId: version.id, sourceType: "github", sourceUrl: input.sourceUrl, sourceRef: fetched.ref, importedAt: now };
     const work = async () => { await this.artifacts.create(artifact); await this.versions.create(version); await this.provenances.create(provenance); };
     if (this.transactions) await this.transactions.run(work); else await work();
@@ -202,10 +207,6 @@ export function canonicalize(value: unknown): string {
     return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => `${JSON.stringify(key)}:${canonicalize(child)}`).join(",")}}`;
   }
   return JSON.stringify(value);
-}
-
-function isPearlContent(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value) && "skill" in value && "knowledge" in value;
 }
 
 async function authorizeRead(access: AccessPolicy, actorId: string, artifact: Artifact): Promise<void> {

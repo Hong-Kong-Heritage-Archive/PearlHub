@@ -136,8 +136,10 @@ It must not create a Fork lineage relationship.
 
 ## Pearl Content
 
-The canonical Pearl content contains the Pearl's Skill and Knowledge.
+The canonical Pearl content is a JSON object with a SemVer 2.x `version`, a `skill` object, and a `knowledge` array. Nested Skill and Knowledge fields are extensible JSON; this contract does not define additional field-level requirements.
 
 For v0.1, Skill is an Artifact/Embedded Skill hybrid rather than a separate Artifact identity.
+
+The domain parser rejects non-JSON values and malformed top-level structure. GitHub-imported content without a version is rejected; no defaulting rule is defined. The GitHub source ref remains provenance metadata and is not used as the Pearl version.
 
 The domain model should not depend on a particular object-storage provider.
