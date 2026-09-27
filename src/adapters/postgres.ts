@@ -5,6 +5,7 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { Artifact, type ArtifactSnapshot } from "../domain/artifact.js";
 import { ArtifactVersion } from "../domain/artifact-version.js";
 import { Dependency } from "../domain/dependency.js";
+import { DomainError } from "../domain/errors.js";
 import type { CompatibilityReport, DependencyResolution, Lineage, Provenance } from "../domain/records.js";
 import type {
   ArtifactRepository,
@@ -19,6 +20,30 @@ import type {
 interface Queryable {
   query<Row extends QueryResultRow = QueryResultRow>(text: string, values?: any[]): Promise<QueryResult<Row>>;
 }
+
+function translateConstraints(db: Queryable): Queryable {
+  return {
+    query: async <Row extends QueryResultRow = QueryResultRow>(text: string, values?: any[]) => {
+      try {
+        return await db.query<Row>(text, values);
+      } catch (error) {
+        const postgresError = error as { code?: string; constraint?: string; message?: string };
+        if (!postgresError.code?.startsWith("23") && postgresError.code !== "55000") throw error;
+        const constraint = postgresError.constraint;
+        const code = constraint === "artifacts_owner_id_immutable" ? "ARTIFACT_OWNER_IMMUTABLE"
+          : constraint === "artifacts_name_immutable" ? "ARTIFACT_NAME_IMMUTABLE"
+            : constraint === "artifacts_slug_immutable" ? "ARTIFACT_SLUG_IMMUTABLE"
+              : constraint === "artifact_versions_immutable" || postgresError.message?.includes("published Artifact Versions are immutable") ? "VERSION_IMMUTABLE"
+                : constraint === "artifacts_owner_id_slug_key" ? "ARTIFACT_SLUG_CONFLICT"
+                  : constraint === "artifact_versions_artifact_id_version_key" ? "VERSION_ALREADY_EXISTS"
+                      : constraint?.startsWith("artifact_lineage_") ? "LINEAGE_INVALID"
+                    : "INVALID_REQUEST";
+        throw new DomainError(code, "Persistence constraint rejected the operation.", constraint ? { constraint } : {});
+      }
+    },
+  };
+}
+
 type ArtifactRow = {
   id: string; owner_id: string; name: string; slug: string; visibility: ArtifactSnapshot["visibility"];
   status: ArtifactSnapshot["status"]; created_at: Date; updated_at: Date;
@@ -43,7 +68,7 @@ function versionFromRow(row: VersionRow): ArtifactVersion {
 }
 
 export class PostgresArtifactRepository implements ArtifactRepository {
-  constructor(private readonly db: Queryable) {}
+  constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
 
   async findById(id: string): Promise<Artifact | null> {
     const result = await this.db.query<ArtifactRow>("SELECT * FROM artifacts WHERE id = $1", [id]);
@@ -70,7 +95,7 @@ export class PostgresArtifactRepository implements ArtifactRepository {
 }
 
 export class PostgresArtifactVersionRepository implements ArtifactVersionRepository {
-  constructor(private readonly db: Queryable) {}
+  constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
 
   async findById(id: string): Promise<ArtifactVersion | null> {
     const result = await this.db.query<VersionRow>("SELECT * FROM artifact_versions WHERE id = $1", [id]);
@@ -102,7 +127,7 @@ export class PostgresArtifactVersionRepository implements ArtifactVersionReposit
 }
 
 export class PostgresLineageRepository implements LineageRepository {
-  constructor(private readonly db: Queryable) {}
+  constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
   async createFork(parentArtifactId: string, childArtifactId: string): Promise<Lineage> {
     const result = await this.db.query<Lineage>(
       "INSERT INTO artifact_lineage (id,parent_artifact_id,child_artifact_id,relationship_type,created_at) VALUES ($1,$2,$3,'fork',now()) RETURNING id,parent_artifact_id AS \"parentArtifactId\",child_artifact_id AS \"childArtifactId\",relationship_type AS \"relationshipType\",created_at AS \"createdAt\"",
@@ -121,7 +146,7 @@ export class PostgresLineageRepository implements LineageRepository {
 }
 
 export class PostgresProvenanceRepository implements ProvenanceRepository {
-  constructor(private readonly db: Queryable) {}
+  constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
   async create(value: Provenance): Promise<void> {
     await this.db.query("INSERT INTO provenances (id,artifact_version_id,source_type,source_url,source_ref,imported_at) VALUES ($1,$2,$3,$4,$5,$6)", [value.id, value.artifactVersionId, value.sourceType, value.sourceUrl, value.sourceRef, value.importedAt]);
   }
@@ -132,7 +157,7 @@ export class PostgresProvenanceRepository implements ProvenanceRepository {
 }
 
 export class PostgresDependencyRepository implements DependencyRepository {
-  constructor(private readonly db: Queryable) {}
+  constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
   async findForVersion(versionId: string): Promise<Dependency[]> {
     const result = await this.db.query<{ id: string; artifact_version_id: string; target_artifact_id: string; declared_range: string; created_at: Date }>("SELECT * FROM dependencies WHERE artifact_version_id=$1", [versionId]);
     return result.rows.map((row) => Dependency.create({ id: row.id, artifactVersionId: row.artifact_version_id, targetArtifactId: row.target_artifact_id, declaredRange: row.declared_range, createdAt: row.created_at }));
@@ -151,7 +176,7 @@ export class PostgresDependencyRepository implements DependencyRepository {
 }
 
 export class PostgresCompatibilityReportRepository implements CompatibilityReportRepository {
-  constructor(private readonly db: Queryable) {}
+  constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
   async create(value: CompatibilityReport): Promise<void> {
     await this.db.query("INSERT INTO compatibility_reports (id,artifact_version_id,target_artifact_version_id,status,report,created_at) VALUES ($1,$2,$3,$4,$5,$6)", [value.id, value.artifactVersionId, value.targetArtifactVersionId, value.status, value.report, value.createdAt]);
   }
