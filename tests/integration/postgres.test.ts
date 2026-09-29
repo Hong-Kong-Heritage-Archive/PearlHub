@@ -33,6 +33,98 @@ integration("PostgreSQL persistence hardening", () => {
     await adminPool!.end();
   });
 
+  it("matches the frozen table, column, constraint, trigger, and index inventory", async () => {
+    const tables = await pool!.query<{ table_name: string }>(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_type='BASE TABLE' ORDER BY table_name",
+    );
+    expect(tables.rows.map((row) => row.table_name)).toEqual([
+      "artifact_lineage", "artifact_versions", "artifacts", "compatibility_reports",
+      "dependencies", "dependency_resolutions", "provenances", "users",
+    ]);
+
+    const columns = await pool!.query<{ table_name: string; column_name: string }>(
+      "SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema() ORDER BY table_name,column_name",
+    );
+    const actualColumns = columns.rows.reduce<Record<string, string[]>>((grouped, row) => {
+      (grouped[row.table_name] ??= []).push(row.column_name);
+      return grouped;
+    }, {});
+    const expectedColumns: Record<string, string[]> = {
+      users: ["id", "external_subject", "created_at", "updated_at"],
+      artifacts: ["id", "owner_id", "name", "slug", "visibility", "status", "created_at", "updated_at"],
+      artifact_versions: ["id", "artifact_id", "version", "content_hash", "content_location", "created_at", "published_at"],
+      artifact_lineage: ["id", "parent_artifact_id", "child_artifact_id", "relationship_type", "created_at"],
+      provenances: ["id", "artifact_version_id", "source_type", "source_url", "source_ref", "imported_at"],
+      dependencies: ["id", "artifact_version_id", "target_artifact_id", "declared_range", "created_at"],
+      dependency_resolutions: ["id", "dependency_id", "resolved_artifact_version_id", "resolved_at", "target_artifact_id"],
+      compatibility_reports: ["id", "artifact_version_id", "target_artifact_version_id", "status", "report", "created_at"],
+    };
+    expect(Object.keys(actualColumns).sort()).toEqual(Object.keys(expectedColumns).sort());
+    for (const [tableName, expected] of Object.entries(expectedColumns)) {
+      expect(actualColumns[tableName]?.sort()).toEqual(expected.sort());
+    }
+
+    const constraints = await pool!.query<{ conname: string; contype: string }>(
+      "SELECT conname,contype FROM pg_constraint JOIN pg_class ON pg_class.oid=conrelid JOIN pg_namespace ON pg_namespace.oid=pg_class.relnamespace WHERE nspname=current_schema() ORDER BY conname",
+    );
+    const expectedConstraints: [string, string][] = [
+      ["artifact_lineage_child_artifact_id_fkey", "f"],
+      ["artifact_lineage_check", "c"],
+      ["artifact_lineage_parent_artifact_id_child_artifact_id_relat_key", "u"],
+      ["artifact_lineage_parent_artifact_id_fkey", "f"],
+      ["artifact_lineage_pkey", "p"],
+      ["artifact_lineage_relationship_type_check", "c"],
+      ["artifact_versions_artifact_id_content_hash_key", "u"],
+      ["artifact_versions_artifact_id_fkey", "f"],
+      ["artifact_versions_artifact_id_version_key", "u"],
+      ["artifact_versions_id_artifact_id_key", "u"],
+      ["artifact_versions_pkey", "p"],
+      ["artifacts_name_check", "c"],
+      ["artifacts_owner_id_fkey", "f"],
+      ["artifacts_owner_id_slug_key", "u"],
+      ["artifacts_pkey", "p"],
+      ["artifacts_slug_check", "c"],
+      ["artifacts_status_check", "c"],
+      ["artifacts_tombstone_unlisted", "c"],
+      ["artifacts_visibility_check", "c"],
+      ["compatibility_reports_artifact_version_id_fkey", "f"],
+      ["compatibility_reports_pkey", "p"],
+      ["compatibility_reports_target_artifact_version_id_fkey", "f"],
+      ["dependencies_artifact_version_id_fkey", "f"],
+      ["dependencies_id_target_artifact_id_key", "u"],
+      ["dependencies_pkey", "p"],
+      ["dependencies_target_artifact_id_fkey", "f"],
+      ["dependency_resolutions_dependency_id_fkey", "f"],
+      ["dependency_resolutions_dependency_target_fkey", "f"],
+      ["dependency_resolutions_pkey", "p"],
+      ["dependency_resolutions_resolved_artifact_version_id_fkey", "f"],
+      ["dependency_resolutions_version_target_fkey", "f"],
+      ["provenances_artifact_version_id_fkey", "f"],
+      ["provenances_pkey", "p"],
+      ["users_external_subject_key", "u"],
+      ["users_pkey", "p"],
+    ];
+    const actualConstraintInventory = constraints.rows.map((row) => `${row.conname}:${row.contype}`).sort();
+    expect(actualConstraintInventory).toEqual(expectedConstraints.map(([name, type]) => `${name}:${type}`).sort());
+
+    const triggers = await pool!.query<{ tgname: string }>(
+      "SELECT tgname FROM pg_trigger JOIN pg_class ON pg_class.oid=tgrelid JOIN pg_namespace ON pg_namespace.oid=pg_class.relnamespace WHERE nspname=current_schema() AND NOT tgisinternal ORDER BY tgname",
+    );
+    expect(triggers.rows.map((row) => row.tgname)).toEqual([
+      "artifact_versions_immutable", "artifacts_identity_immutable", "artifacts_no_physical_delete", "dependency_resolutions_set_target",
+    ]);
+
+    const indexes = await pool!.query<{ indexname: string }>(
+      "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() ORDER BY indexname",
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual(expect.arrayContaining([
+      "artifacts_owner_idx", "artifacts_visibility_status_idx", "artifact_versions_artifact_idx",
+      "artifact_lineage_parent_idx", "artifact_lineage_child_idx", "provenances_version_idx",
+      "dependencies_source_idx", "dependencies_target_idx", "dependency_resolutions_dependency_idx",
+      "compatibility_reports_source_idx", "compatibility_reports_target_idx",
+    ]));
+  });
+
   async function createArtifact(ownerId: string = owners[0]!, slug: string = randomUUID(), visibility: string = "public", status: string = "active"): Promise<string> {
     const id = randomUUID();
     await pool!.query("INSERT INTO artifacts (id,owner_id,name,slug,visibility,status) VALUES ($1,$2,$3,$4,$5,$6)", [id, ownerId, `Artifact ${id}`, slug, visibility, status]);
