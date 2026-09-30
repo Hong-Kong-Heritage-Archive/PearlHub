@@ -161,6 +161,9 @@ integration("PostgreSQL persistence hardening", () => {
       query: () => pool!.query("UPDATE artifacts SET name='Changed' WHERE id=$1", [artifact.id]),
     } as never);
     await expect(immutableTriggerProbe.findById(artifact.id)).rejects.toMatchObject({ code: "ARTIFACT_NAME_IMMUTABLE", details: { sqlState: "55000", constraint: "artifacts_name_immutable" } });
+    const unexpectedError = Object.assign(new Error("connection interrupted"), { code: "08006" });
+    const unexpectedErrorProbe = new PostgresArtifactRepository({ query: async () => { throw unexpectedError; } } as never);
+    await expect(unexpectedErrorProbe.findById(artifact.id)).rejects.toBe(unexpectedError);
 
     for (const identityChange of [
       { name: "Changed name" },
@@ -266,12 +269,14 @@ integration("PostgreSQL persistence hardening", () => {
     expectDateOrder(resolutionRows.map(({ id, resolvedAt }) => ({ id, date: resolvedAt })));
     await expect(dependencies.createResolution({ id: randomUUID(), dependencyId: dependency.id, resolvedArtifactVersionId: sourceVersionId, resolvedAt: resolutionAt })).rejects.toMatchObject({ code: "INVALID_REQUEST", details: { sqlState: "23503" } });
 
-    const report: CompatibilityReport = { id: randomUUID(), artifactVersionId: sourceVersionId, targetArtifactVersionId: null, status: "compatible", report: { summary: "ok", checks: [{ name: "schema", passed: true }] }, createdAt: new Date("2026-04-04T00:00:00.000Z") };
+    const report: CompatibilityReport = { id: randomUUID(), artifactVersionId: sourceVersionId, targetArtifactVersionId: null, status: "compatible", report: { summary: "ok", score: 0.875, enabled: true, checks: [{ name: "schema", passed: true, metadata: { threshold: 2, labels: ["required", "stable"], nested: { active: false } } }] }, createdAt: new Date("2026-04-04T00:00:00.000Z") };
     const secondReport: CompatibilityReport = { ...report, id: randomUUID(), targetArtifactVersionId: targetVersionId, status: "incompatible", report: { summary: "breaking", breakingChanges: ["field removed"] }, createdAt: new Date("2026-04-04T00:00:01.000Z") };
+    const emptyReport: CompatibilityReport = { ...report, id: randomUUID(), report: {}, createdAt: new Date("2026-04-04T00:00:02.000Z") };
     await reports.create(report);
     await reports.create(secondReport);
+    await reports.create(emptyReport);
     const reportRows = await reports.findForArtifactVersion(sourceVersionId);
-    expect(reportRows).toEqual([report, secondReport]);
+    expect(reportRows).toEqual([report, secondReport, emptyReport]);
     expectDateOrder(reportRows.map(({ id, createdAt }) => ({ id, date: createdAt })));
   });
 
@@ -412,5 +417,24 @@ integration("PostgreSQL persistence hardening", () => {
     const attempts = await Promise.allSettled([createArtifact(owners[2], slug), createArtifact(owners[2], slug)]);
     expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
     expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+  });
+
+  it("allows concurrent same-slug inserts across owners and rejects one duplicate Version", async () => {
+    const slug = randomUUID();
+    const differentOwners = await Promise.allSettled([
+      createArtifact(owners[0], slug),
+      createArtifact(owners[1], slug),
+    ]);
+    expect(differentOwners.every((attempt) => attempt.status === "fulfilled")).toBe(true);
+
+    const artifactId = await createArtifact();
+    const duplicateVersions = await Promise.allSettled([
+      createVersion(artifactId, "7.0.0"),
+      createVersion(artifactId, "7.0.0"),
+    ]);
+    expect(duplicateVersions.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    const rejected = duplicateVersions.filter((attempt) => attempt.status === "rejected");
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({ reason: { code: "23505", constraint: "artifact_versions_artifact_id_version_key" } });
   });
 });

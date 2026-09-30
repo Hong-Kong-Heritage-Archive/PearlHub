@@ -3,7 +3,7 @@ import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Dependency } from "../../src/domain/dependency.js";
 import type { DependencyResolution } from "../../src/domain/records.js";
-import { CloneArtifactService, ForkArtifactService, ImportGitHubService, ResolveDependencyService } from "../../src/application/services.js";
+import { CloneArtifactService, ForkArtifactService, ImportGitHubService, PublishVersionService, ResolveDependencyService } from "../../src/application/services.js";
 import type { ArtifactRepository, ArtifactVersionRepository, DependencyRepository, LineageRepository, ProvenanceRepository, TransactionManager } from "../../src/ports/repositories.js";
 
 const fixedTime = new Date("2026-01-01T00:00:00Z");
@@ -154,6 +154,82 @@ describe("dependency resolution", () => {
     expect(result[0]?.resolvedArtifactVersionId).toBe("v243");
     expect(saved).toEqual(result);
     expect(sourceArtifact.name).toBe("Source");
+  });
+});
+
+describe("application transaction boundaries", () => {
+  function transactionTracker() {
+    let active = false;
+    let runs = 0;
+    const transactions: TransactionManager = {
+      run: async <T>(work: () => Promise<T>) => {
+        runs += 1;
+        active = true;
+        try { return await work(); } finally { active = false; }
+      },
+    };
+    return { transactions, inTransaction: () => active, runCount: () => runs };
+  }
+
+  it("wraps PublishVersion, ForkArtifact, CloneArtifact, ImportGitHub, and dependency resolutions", async () => {
+    const publishDeps = copyServices();
+    const publishTracker = transactionTracker();
+    const publishWrites: boolean[] = [];
+    const publishVersionCreate = publishDeps.versionRepo.create.bind(publishDeps.versionRepo);
+    const publishDependencyCreate = publishDeps.dependencyRepo.create.bind(publishDeps.dependencyRepo);
+    publishDeps.versionRepo.create = async (version) => { publishWrites.push(publishTracker.inTransaction()); await publishVersionCreate(version); };
+    publishDeps.dependencyRepo.create = async (dependency) => { publishWrites.push(publishTracker.inTransaction()); await publishDependencyCreate(dependency); };
+    await new PublishVersionService(publishDeps.artifactRepo, publishDeps.versionRepo, publishDeps.store, publishDeps.dependencyRepo, publishDeps.access, publishDeps.ids, { now: () => fixedTime }, publishTracker.transactions)
+      .execute({ actorId: "owner", artifactId: "source", version: "1.3.0", content: {}, dependencies: [{ targetArtifactId: "pearl-a", declaredRange: "^2.0.0" }] });
+    expect(publishTracker.runCount()).toBe(1);
+    expect(publishWrites).toEqual([true, true]);
+
+    for (const mode of ["fork", "clone"] as const) {
+      const copyDeps = copyServices();
+      const tracker = transactionTracker();
+      const writes: boolean[] = [];
+      const artifactCreate = copyDeps.artifactRepo.create.bind(copyDeps.artifactRepo);
+      const versionCreate = copyDeps.versionRepo.create.bind(copyDeps.versionRepo);
+      const dependencyCreate = copyDeps.dependencyRepo.create.bind(copyDeps.dependencyRepo);
+      copyDeps.artifactRepo.create = async (artifact) => { writes.push(tracker.inTransaction()); await artifactCreate(artifact); };
+      copyDeps.versionRepo.create = async (version) => { writes.push(tracker.inTransaction()); await versionCreate(version); };
+      copyDeps.dependencyRepo.create = async (dependency) => { writes.push(tracker.inTransaction()); await dependencyCreate(dependency); };
+      if (mode === "fork") {
+        const lineageCreate = copyDeps.lineageRepo.createFork.bind(copyDeps.lineageRepo);
+        copyDeps.lineageRepo.createFork = async (parentId, childId) => { writes.push(tracker.inTransaction()); return lineageCreate(parentId, childId); };
+        await new ForkArtifactService(copyDeps.artifactRepo, copyDeps.versionRepo, copyDeps.store, copyDeps.dependencyRepo, copyDeps.lineageRepo, copyDeps.access, copyDeps.ids, { now: () => fixedTime }, tracker.transactions)
+          .execute({ actorId: "owner", sourceArtifactId: "source", name: "Fork", slug: "fork" });
+      } else {
+        await new CloneArtifactService(copyDeps.artifactRepo, copyDeps.versionRepo, copyDeps.store, copyDeps.dependencyRepo, copyDeps.access, copyDeps.ids, { now: () => fixedTime }, tracker.transactions)
+          .execute({ actorId: "owner", sourceArtifactId: "source", name: "Clone", slug: "clone" });
+      }
+      expect(tracker.runCount()).toBe(1);
+      expect(writes.length).toBeGreaterThan(2);
+      expect(writes.every(Boolean)).toBe(true);
+    }
+
+    const importDeps = copyServices();
+    const importTracker = transactionTracker();
+    const importWrites: boolean[] = [];
+    const importArtifactCreate = importDeps.artifactRepo.create.bind(importDeps.artifactRepo);
+    const importVersionCreate = importDeps.versionRepo.create.bind(importDeps.versionRepo);
+    importDeps.artifactRepo.create = async (artifact) => { importWrites.push(importTracker.inTransaction()); await importArtifactCreate(artifact); };
+    importDeps.versionRepo.create = async (version) => { importWrites.push(importTracker.inTransaction()); await importVersionCreate(version); };
+    const provenanceRepo = { create: async () => { importWrites.push(importTracker.inTransaction()); }, findForVersion: async () => [] } as unknown as ProvenanceRepository;
+    await new ImportGitHubService({ fetch: async () => ({ content: { skill: {}, knowledge: [], version: "2.3.1" }, ref: "v2.3.1" }) }, importDeps.artifactRepo, importDeps.versionRepo, importDeps.store, provenanceRepo, importDeps.ids, { now: () => fixedTime }, importTracker.transactions)
+      .execute({ actorId: "owner", sourceUrl: "https://example.test/repo", name: "Imported", slug: "imported" });
+    expect(importTracker.runCount()).toBe(1);
+    expect(importWrites).toEqual([true, true, true]);
+
+    const resolutionTracker = transactionTracker();
+    const resolutionWrites: boolean[] = [];
+    const resolutionRepo = { createResolution: async () => { resolutionWrites.push(resolutionTracker.inTransaction()); } } as unknown as DependencyRepository;
+    const targetVersion = sourceVersion("target-v1", "1.2.0");
+    const targetVersions = { findForArtifact: async () => [targetVersion] } as unknown as ArtifactVersionRepository;
+    const dependency = Dependency.create({ id: "dependency", artifactVersionId: "source-v1", targetArtifactId: "source", declaredRange: "^1.0.0", createdAt: fixedTime });
+    await new ResolveDependencyService(resolutionRepo, targetVersions, { next: () => "resolution" }, { now: () => fixedTime }, resolutionTracker.transactions).execute({ dependencies: [dependency] });
+    expect(resolutionTracker.runCount()).toBe(1);
+    expect(resolutionWrites).toEqual([true]);
   });
 });
 

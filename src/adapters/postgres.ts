@@ -223,22 +223,54 @@ export class PostgresTransactionManager implements TransactionManager {
     if (this.currentClient.getStore()) throw new Error("Nested transactions are not supported.");
 
     const client = await this.pool.connect();
+    let discardClient: Error | boolean | undefined;
     try {
-      return await this.currentClient.run(client, async () => {
+      try {
         await client.query("BEGIN");
+      } catch (error) {
+        discardClient = error instanceof Error ? error : true;
+        throw error;
+      }
+
+      return await this.currentClient.run(client, async () => {
+        let result: T;
         try {
-          const result = await work();
-          await client.query("COMMIT");
-          return result;
-        } catch (error) {
-          await client.query("ROLLBACK");
-          throw error;
+          result = await work();
+        } catch (workError) {
+          try {
+            await client.query("ROLLBACK");
+          } catch (rollbackError) {
+            discardClient = rollbackError instanceof Error ? rollbackError : true;
+            attachDiagnostic(workError, "rollbackError", rollbackError);
+          }
+          throw workError;
         }
+
+        try {
+          await client.query("COMMIT");
+        } catch (commitError) {
+          // A failed COMMIT can have an ambiguous outcome; rollback is best-effort only.
+          try {
+            await client.query("ROLLBACK");
+          } catch (rollbackError) {
+            discardClient = rollbackError instanceof Error ? rollbackError : true;
+            attachDiagnostic(commitError, "rollbackError", rollbackError);
+          }
+          throw commitError;
+        }
+        return result;
       });
-    } catch (error) {
-      throw error;
     } finally {
-      client.release();
+      client.release(discardClient);
     }
+  }
+}
+
+function attachDiagnostic(error: unknown, key: string, diagnostic: unknown): void {
+  if ((typeof error !== "object" && typeof error !== "function") || error === null) return;
+  try {
+    Object.defineProperty(error, key, { configurable: true, value: diagnostic });
+  } catch {
+    // Preserve the original failure even when it cannot carry secondary diagnostics.
   }
 }
