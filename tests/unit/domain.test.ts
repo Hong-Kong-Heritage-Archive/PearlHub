@@ -53,6 +53,16 @@ describe("SemVer domain values", () => {
       publishedAt: new Date(),
     }).version).toBe("2.4.3");
 
+    expect(ArtifactVersion.create({
+      id: "version-build-metadata",
+      artifactId: "artifact-1",
+      version: "2.4.3-rc.1+build.7",
+      contentHash: "sha256:abc",
+      contentLocation: "content/abc",
+      createdAt: new Date(),
+      publishedAt: new Date(),
+    }).version).toBe("2.4.3-rc.1+build.7");
+
     for (const version of ["v1", "latest", "2026-09-24"]) {
       expect(() => ArtifactVersion.create({
         id: "version-1",

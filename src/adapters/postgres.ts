@@ -27,18 +27,34 @@ function translateConstraints(db: Queryable): Queryable {
       try {
         return await db.query<Row>(text, values);
       } catch (error) {
-        const postgresError = error as { code?: string; constraint?: string; message?: string };
-        if (!postgresError.code?.startsWith("23") && postgresError.code !== "55000") throw error;
+        const postgresError = error as { code?: string; constraint?: string; message?: string; detail?: string };
+        const sqlState = postgresError.code;
+        if (!sqlState?.startsWith("23") && sqlState !== "55000") throw error;
+
         const constraint = postgresError.constraint;
-        const code = constraint === "artifacts_owner_id_immutable" ? "ARTIFACT_OWNER_IMMUTABLE"
-          : constraint === "artifacts_name_immutable" ? "ARTIFACT_NAME_IMMUTABLE"
-            : constraint === "artifacts_slug_immutable" ? "ARTIFACT_SLUG_IMMUTABLE"
-              : constraint === "artifact_versions_immutable" || postgresError.message?.includes("published Artifact Versions are immutable") ? "VERSION_IMMUTABLE"
-                : constraint === "artifacts_owner_id_slug_key" ? "ARTIFACT_SLUG_CONFLICT"
-                  : constraint === "artifact_versions_artifact_id_version_key" ? "VERSION_ALREADY_EXISTS"
-                      : constraint?.startsWith("artifact_lineage_") ? "LINEAGE_INVALID"
-                    : "INVALID_REQUEST";
-        throw new DomainError(code, "Persistence constraint rejected the operation.", constraint ? { constraint } : {});
+        let code: ConstructorParameters<typeof DomainError>[0];
+        if (sqlState === "23505") {
+          code = constraint === "artifacts_owner_id_slug_key" ? "ARTIFACT_SLUG_CONFLICT"
+            : constraint === "artifact_versions_artifact_id_version_key" ? "VERSION_ALREADY_EXISTS"
+              : constraint?.startsWith("artifact_lineage_") ? "LINEAGE_INVALID"
+                : "INVALID_REQUEST";
+        } else if (sqlState === "55000") {
+          code = constraint === "artifacts_owner_id_immutable" ? "ARTIFACT_OWNER_IMMUTABLE"
+            : constraint === "artifacts_name_immutable" ? "ARTIFACT_NAME_IMMUTABLE"
+              : constraint === "artifacts_slug_immutable" ? "ARTIFACT_SLUG_IMMUTABLE"
+                : constraint === "artifact_versions_immutable" || postgresError.message?.includes("published Artifact Versions are immutable") ? "VERSION_IMMUTABLE"
+                  : "INVALID_REQUEST";
+        } else if (sqlState === "23514" && constraint?.startsWith("artifact_lineage_")) {
+          code = "LINEAGE_INVALID";
+        } else {
+          code = "INVALID_REQUEST";
+        }
+
+        throw new DomainError(code, "Persistence constraint rejected the operation.", {
+          sqlState,
+          ...(constraint ? { constraint } : {}),
+          ...(postgresError.detail ? { detail: postgresError.detail } : {}),
+        });
       }
     },
   };
@@ -71,12 +87,12 @@ export class PostgresArtifactRepository implements ArtifactRepository {
   constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
 
   async findById(id: string): Promise<Artifact | null> {
-    const result = await this.db.query<ArtifactRow>("SELECT * FROM artifacts WHERE id = $1", [id]);
+    const result = await this.db.query<ArtifactRow>("SELECT id,owner_id,name,slug,visibility,status,created_at,updated_at FROM artifacts WHERE id = $1", [id]);
     return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
   }
 
   async findByOwnerAndSlug(ownerId: string, slug: string): Promise<Artifact | null> {
-    const result = await this.db.query<ArtifactRow>("SELECT * FROM artifacts WHERE owner_id = $1 AND slug = $2", [ownerId, slug]);
+    const result = await this.db.query<ArtifactRow>("SELECT id,owner_id,name,slug,visibility,status,created_at,updated_at FROM artifacts WHERE owner_id = $1 AND slug = $2", [ownerId, slug]);
     return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
   }
 
@@ -98,22 +114,25 @@ export class PostgresArtifactVersionRepository implements ArtifactVersionReposit
   constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
 
   async findById(id: string): Promise<ArtifactVersion | null> {
-    const result = await this.db.query<VersionRow>("SELECT * FROM artifact_versions WHERE id = $1", [id]);
+    const result = await this.db.query<VersionRow>("SELECT id,artifact_id,version,content_hash,content_location,created_at,published_at FROM artifact_versions WHERE id = $1", [id]);
     return result.rows[0] ? versionFromRow(result.rows[0]) : null;
   }
 
   async findByArtifactAndVersion(artifactId: string, version: string): Promise<ArtifactVersion | null> {
-    const result = await this.db.query<VersionRow>("SELECT * FROM artifact_versions WHERE artifact_id=$1 AND version=$2", [artifactId, version]);
+    const result = await this.db.query<VersionRow>("SELECT id,artifact_id,version,content_hash,content_location,created_at,published_at FROM artifact_versions WHERE artifact_id=$1 AND version=$2", [artifactId, version]);
     return result.rows[0] ? versionFromRow(result.rows[0]) : null;
   }
 
   async findForArtifact(artifactId: string): Promise<ArtifactVersion[]> {
-    const result = await this.db.query<VersionRow>("SELECT * FROM artifact_versions WHERE artifact_id=$1", [artifactId]);
+    const result = await this.db.query<VersionRow>("SELECT id,artifact_id,version,content_hash,content_location,created_at,published_at FROM artifact_versions WHERE artifact_id=$1 ORDER BY created_at,id", [artifactId]);
     return result.rows.map(versionFromRow);
   }
 
   async findLatest(artifactId: string): Promise<ArtifactVersion | null> {
-    const versions = (await this.findForArtifact(artifactId)).sort((left, right) => semver.rcompare(left.version, right.version));
+    // PostgreSQL lexical ordering diverges from SemVer, so latest selection stays here.
+    const versions = (await this.findForArtifact(artifactId)).sort((left, right) =>
+      semver.rcompare(left.version, right.version) || (left.version < right.version ? 1 : left.version > right.version ? -1 : 0),
+    );
     return versions[0] ?? null;
   }
 
@@ -136,11 +155,11 @@ export class PostgresLineageRepository implements LineageRepository {
     return result.rows[0]!;
   }
   async getParents(artifactId: string): Promise<Lineage[]> {
-    const result = await this.db.query<Lineage>("SELECT id,parent_artifact_id AS \"parentArtifactId\",child_artifact_id AS \"childArtifactId\",relationship_type AS \"relationshipType\",created_at AS \"createdAt\" FROM artifact_lineage WHERE child_artifact_id=$1", [artifactId]);
+    const result = await this.db.query<Lineage>("SELECT id,parent_artifact_id AS \"parentArtifactId\",child_artifact_id AS \"childArtifactId\",relationship_type AS \"relationshipType\",created_at AS \"createdAt\" FROM artifact_lineage WHERE child_artifact_id=$1 ORDER BY created_at,id", [artifactId]);
     return result.rows;
   }
   async getChildren(artifactId: string): Promise<Lineage[]> {
-    const result = await this.db.query<Lineage>("SELECT id,parent_artifact_id AS \"parentArtifactId\",child_artifact_id AS \"childArtifactId\",relationship_type AS \"relationshipType\",created_at AS \"createdAt\" FROM artifact_lineage WHERE parent_artifact_id=$1", [artifactId]);
+    const result = await this.db.query<Lineage>("SELECT id,parent_artifact_id AS \"parentArtifactId\",child_artifact_id AS \"childArtifactId\",relationship_type AS \"relationshipType\",created_at AS \"createdAt\" FROM artifact_lineage WHERE parent_artifact_id=$1 ORDER BY created_at,id", [artifactId]);
     return result.rows;
   }
 }
@@ -151,7 +170,7 @@ export class PostgresProvenanceRepository implements ProvenanceRepository {
     await this.db.query("INSERT INTO provenances (id,artifact_version_id,source_type,source_url,source_ref,imported_at) VALUES ($1,$2,$3,$4,$5,$6)", [value.id, value.artifactVersionId, value.sourceType, value.sourceUrl, value.sourceRef, value.importedAt]);
   }
   async findForVersion(versionId: string): Promise<Provenance[]> {
-    const result = await this.db.query<Provenance>("SELECT id,artifact_version_id AS \"artifactVersionId\",source_type AS \"sourceType\",source_url AS \"sourceUrl\",source_ref AS \"sourceRef\",imported_at AS \"importedAt\" FROM provenances WHERE artifact_version_id=$1", [versionId]);
+    const result = await this.db.query<Provenance>("SELECT id,artifact_version_id AS \"artifactVersionId\",source_type AS \"sourceType\",source_url AS \"sourceUrl\",source_ref AS \"sourceRef\",imported_at AS \"importedAt\" FROM provenances WHERE artifact_version_id=$1 ORDER BY imported_at,id", [versionId]);
     return result.rows;
   }
 }
@@ -159,7 +178,7 @@ export class PostgresProvenanceRepository implements ProvenanceRepository {
 export class PostgresDependencyRepository implements DependencyRepository {
   constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
   async findForVersion(versionId: string): Promise<Dependency[]> {
-    const result = await this.db.query<{ id: string; artifact_version_id: string; target_artifact_id: string; declared_range: string; created_at: Date }>("SELECT * FROM dependencies WHERE artifact_version_id=$1", [versionId]);
+    const result = await this.db.query<{ id: string; artifact_version_id: string; target_artifact_id: string; declared_range: string; created_at: Date }>("SELECT id,artifact_version_id,target_artifact_id,declared_range,created_at FROM dependencies WHERE artifact_version_id=$1 ORDER BY created_at,id", [versionId]);
     return result.rows.map((row) => Dependency.create({ id: row.id, artifactVersionId: row.artifact_version_id, targetArtifactId: row.target_artifact_id, declaredRange: row.declared_range, createdAt: row.created_at }));
   }
   async create(value: Dependency): Promise<void> {
@@ -170,7 +189,7 @@ export class PostgresDependencyRepository implements DependencyRepository {
     await this.db.query("INSERT INTO dependency_resolutions (id,dependency_id,resolved_artifact_version_id,resolved_at) VALUES ($1,$2,$3,$4)", [value.id, value.dependencyId, value.resolvedArtifactVersionId, value.resolvedAt]);
   }
   async findResolutions(dependencyId: string): Promise<DependencyResolution[]> {
-    const result = await this.db.query<DependencyResolution>("SELECT id,dependency_id AS \"dependencyId\",resolved_artifact_version_id AS \"resolvedArtifactVersionId\",resolved_at AS \"resolvedAt\" FROM dependency_resolutions WHERE dependency_id=$1 ORDER BY resolved_at", [dependencyId]);
+    const result = await this.db.query<DependencyResolution>("SELECT id,dependency_id AS \"dependencyId\",resolved_artifact_version_id AS \"resolvedArtifactVersionId\",resolved_at AS \"resolvedAt\" FROM dependency_resolutions WHERE dependency_id=$1 ORDER BY resolved_at,id", [dependencyId]);
     return result.rows;
   }
 }
@@ -181,7 +200,7 @@ export class PostgresCompatibilityReportRepository implements CompatibilityRepor
     await this.db.query("INSERT INTO compatibility_reports (id,artifact_version_id,target_artifact_version_id,status,report,created_at) VALUES ($1,$2,$3,$4,$5,$6)", [value.id, value.artifactVersionId, value.targetArtifactVersionId, value.status, value.report, value.createdAt]);
   }
   async findForArtifactVersion(versionId: string): Promise<CompatibilityReport[]> {
-    const result = await this.db.query<CompatibilityReport>("SELECT id,artifact_version_id AS \"artifactVersionId\",target_artifact_version_id AS \"targetArtifactVersionId\",status,report,created_at AS \"createdAt\" FROM compatibility_reports WHERE artifact_version_id=$1", [versionId]);
+    const result = await this.db.query<CompatibilityReport>("SELECT id,artifact_version_id AS \"artifactVersionId\",target_artifact_version_id AS \"targetArtifactVersionId\",status,report,created_at AS \"createdAt\" FROM compatibility_reports WHERE artifact_version_id=$1 ORDER BY created_at,id", [versionId]);
     return result.rows;
   }
 }
@@ -200,6 +219,9 @@ export class PostgresTransactionManager implements TransactionManager {
   }
 
   async run<T>(work: () => Promise<T>): Promise<T> {
+    // Nested runs reject before checkout; repository work must use the outer transaction.
+    if (this.currentClient.getStore()) throw new Error("Nested transactions are not supported.");
+
     const client = await this.pool.connect();
     try {
       return await this.currentClient.run(client, async () => {
