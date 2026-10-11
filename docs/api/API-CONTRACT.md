@@ -60,9 +60,9 @@ Delete creates a **tombstone Pearl / Artifact**:
 - `visibility = unlisted`
 - complete immutable snapshot is retained
 - lineage is retained
-- tombstone cannot be reactivated through the API
+- normal user operations cannot restore a tombstone; an Admin may restore it through a privileged operation
 
-A previously existing tombstoned resource returns:
+A previously existing tombstoned resource returns to normal, non-admin requests:
 
 - `410 Gone`
 
@@ -206,9 +206,13 @@ Clients do not define the canonical content hash.
 
 PearlHub uses **OpenAPI 3.1**.
 
-Canonical API description:
+The canonical machine-readable API description is intended to be:
 
 `openapi.yaml`
+
+That file is not yet checked into this repository. This document records the
+contract decisions in prose and is not a substitute for the required OpenAPI 3.1
+definition.
 
 The OpenAPI definition uses:
 
@@ -251,14 +255,6 @@ Allowed values:
 
 - `active`
 - `tombstone`
-
-### Strict write schemas
-
-Write request schemas use:
-
-`additionalProperties: true`
-
-Unknown request fields are rejected.
 
 ### Pagination
 
@@ -507,12 +503,12 @@ The visibility of a Pearl does not by itself define every operation the caller c
 
 ### 5. Visibility semantics
 
-| Visibility | Anonymous | Authenticated non-owner | Owner |
-|---|---:|---:|---:|
-| `public` | Yes | Yes | Yes |
-| `unlisted` | Yes, direct access | Yes, direct access | Yes |
-| `private` | No | No | Yes |
-| `tombstone` | `410 Gone` | `410 Gone` | `410 Gone` |
+| State | Anonymous | Authenticated non-owner | Owner | Admin |
+|---|---:|---:|---:|---:|
+| `public` | Yes | Yes | Yes | Yes |
+| `unlisted` | No | Yes, with secret URL | Yes | Yes |
+| `private` | No | No | Yes | Yes |
+| `tombstone` | No | No | No | Admin inspection only |
 
 #### Public
 
@@ -522,9 +518,10 @@ Public Pearls may be discovered and read by anyone.
 
 Unlisted Pearls:
 
-- can be accessed through a known `slug` / direct URL
+- require authentication and the secret URL for direct access
 - are not included in normal discovery/list/search results
 - are not equivalent to private Pearls
+- cannot be read anonymously, even when the slug is known
 
 #### Private
 
@@ -565,7 +562,8 @@ These are separate concepts:
 - `GET /pearls/{slug}` = direct resource lookup
 - `GET /pearls` = discovery/listing
 
-An unlisted Pearl may be retrieved when its slug is known, while remaining absent from ordinary discovery.
+An unlisted Pearl may be retrieved by an authenticated caller who has its secret URL,
+while remaining absent from ordinary discovery.
 
 ### 9. Tombstones
 
@@ -576,8 +574,9 @@ A tombstoned Pearl:
 - retains lineage
 - has `status = tombstone`
 - has `visibility = unlisted`
-- cannot be reactivated through the API
-- returns `410 Gone`
+- is unreadable to normal users; non-admin reads return `410 Gone`
+- can be restored only by an Admin, preserving its identity, history, and lineage
+- cannot be restored by normal user operations
 
 ### 10. Fork / Clone ownership
 
@@ -611,7 +610,8 @@ The provider is not frozen as part of the public API contract.
 
 ## Contract Change Rule
 
-Any change to a section marked **FROZEN** is a contract change.
+Any change to a section marked **FROZEN** is a contract change. Until `openapi.yaml`
+is checked in, a prose-only update does not constitute an implemented OpenAPI contract.
 
 A contract change must:
 

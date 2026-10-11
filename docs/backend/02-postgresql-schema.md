@@ -4,6 +4,14 @@ The persistence contract is implemented by `migrations/001_initial.sql`, `migrat
 
 All primary keys are `UUID`. Timestamp columns are `TIMESTAMPTZ`; the initial migration supplies `now()` defaults where noted below. Foreign keys use PostgreSQL's default `NO ACTION` behavior, so referenced records are retained rather than cascaded away.
 
+## Rollout note
+
+Migration 003 leaves existing `users.external_subject` values unchanged and does not
+infer a provider; map legacy accounts only through reviewed, authoritative
+provider/subject-to-user mappings. Tombstone snapshots keep content hashes and locations,
+not content bytes, so restoration assumes the external content store retains immutable
+objects. PostgreSQL transactions cannot roll back that external store.
+
 ## Tables
 
 ### `users`
@@ -30,6 +38,30 @@ user identity. `users.id` remains authoritative. Migration 003 does not infer a 
 or backfill existing `external_subject` values; production backfill requires explicit,
 verified provider/subject mappings. Unmapped legacy values remain preserved in
 `users.external_subject`.
+
+#### Legacy identity rollout and backfill
+
+An existing user without a `user_identities` row will not resolve through
+`UserIdentityRepository.findUserId(provider, subject)` until a trusted mapping is
+supplied. The user's internal ID and Artifact ownership remain unchanged, but sign-in
+through the new provider/subject lookup cannot transparently identify that account.
+
+Backfill is a separate, operator-controlled rollout:
+
+1. Export provider and subject values from the authoritative identity provider. Do not
+   infer that legacy subjects belong to Firebase.
+2. Build and review an explicit mapping from each verified `(provider, subject)` pair
+   to the existing internal `users.id`. Match using trusted identity records, not email
+   equality or a guessed subject format.
+3. Quarantine unmatched or ambiguous users for explicit account-linking resolution.
+   Never merge users automatically; a duplicate `(provider, subject)` must be resolved
+   before import.
+4. Import reviewed rows into `user_identities` in a transaction, then reconcile counts,
+   uniqueness, and sampled provider lookups before enabling the new lookup path.
+5. Keep `users.external_subject` unchanged during rollout. Deprecate or remove it only
+   in a later, separately reviewed migration after all required identities are mapped.
+
+Do not import provider tokens, credentials, or API keys as part of this process.
 
 ### `artifacts`
 
