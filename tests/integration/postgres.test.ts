@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CloneArtifactService, DeleteArtifactService, ForkArtifactService } from "../../src/application/services.js";
-import { PostgresArtifactRepository, PostgresArtifactVersionRepository, PostgresCompatibilityReportRepository, PostgresDependencyRepository, PostgresLineageRepository, PostgresProvenanceRepository, PostgresTransactionManager } from "../../src/adapters/postgres.js";
+import { CloneArtifactService, DeleteArtifactService, ForkArtifactService, RestoreArtifactService } from "../../src/application/services.js";
+import { PostgresArtifactRepository, PostgresArtifactVersionRepository, PostgresCompatibilityReportRepository, PostgresDependencyRepository, PostgresLineageRepository, PostgresProvenanceRepository, PostgresTransactionManager, PostgresUserIdentityRepository } from "../../src/adapters/postgres.js";
 import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Dependency } from "../../src/domain/dependency.js";
@@ -26,6 +26,8 @@ integration("PostgreSQL persistence hardening", () => {
       await pool!.query(migration);
     }
     await pool!.query("INSERT INTO users (id, external_subject) VALUES ($1,$2),($3,$4),($5,$6)", [owners[0], "owner-a", owners[1], "owner-b", owners[2], "owner-c"]);
+    const migration = await readFile(resolve(process.cwd(), "migrations", "003_identity_mapping_and_tombstone_snapshots.sql"), "utf8");
+    await pool!.query(migration);
   });
 
   afterAll(async () => {
@@ -40,7 +42,7 @@ integration("PostgreSQL persistence hardening", () => {
     );
     expect(tables.rows.map((row) => row.table_name)).toEqual([
       "artifact_lineage", "artifact_versions", "artifacts", "compatibility_reports",
-      "dependencies", "dependency_resolutions", "provenances", "users",
+      "dependencies", "dependency_resolutions", "provenances", "tombstone_snapshots", "user_identities", "users",
     ]);
 
     const columns = await pool!.query<{ table_name: string; column_name: string }>(
@@ -54,11 +56,13 @@ integration("PostgreSQL persistence hardening", () => {
       users: ["id", "external_subject", "created_at", "updated_at"],
       artifacts: ["id", "owner_id", "name", "slug", "visibility", "status", "created_at", "updated_at"],
       artifact_versions: ["id", "artifact_id", "version", "content_hash", "content_location", "created_at", "published_at"],
-      artifact_lineage: ["id", "parent_artifact_id", "child_artifact_id", "relationship_type", "created_at"],
+      artifact_lineage: ["id", "parent_artifact_id", "child_artifact_id", "source_version_id", "relationship_type", "created_at"],
       provenances: ["id", "artifact_version_id", "source_type", "source_url", "source_ref", "imported_at"],
       dependencies: ["id", "artifact_version_id", "target_artifact_id", "declared_range", "created_at"],
       dependency_resolutions: ["id", "dependency_id", "resolved_artifact_version_id", "resolved_at", "target_artifact_id"],
       compatibility_reports: ["id", "artifact_version_id", "target_artifact_version_id", "status", "report", "created_at"],
+      tombstone_snapshots: ["id", "artifact_id", "snapshot_number", "snapshot", "created_at"],
+      user_identities: ["id", "user_id", "provider", "subject", "created_at"],
     };
     expect(Object.keys(actualColumns).sort()).toEqual(Object.keys(expectedColumns).sort());
     for (const [tableName, expected] of Object.entries(expectedColumns)) {
@@ -75,6 +79,7 @@ integration("PostgreSQL persistence hardening", () => {
       ["artifact_lineage_parent_artifact_id_fkey", "f"],
       ["artifact_lineage_pkey", "p"],
       ["artifact_lineage_relationship_type_check", "c"],
+      ["artifact_lineage_source_version_parent_fkey", "f"],
       ["artifact_versions_artifact_id_content_hash_key", "u"],
       ["artifact_versions_artifact_id_fkey", "f"],
       ["artifact_versions_artifact_id_version_key", "u"],
@@ -104,6 +109,15 @@ integration("PostgreSQL persistence hardening", () => {
       ["provenances_pkey", "p"],
       ["users_external_subject_key", "u"],
       ["users_pkey", "p"],
+      ["user_identities_pkey", "p"],
+      ["user_identities_provider_check", "c"],
+      ["user_identities_provider_subject_key", "u"],
+      ["user_identities_subject_check", "c"],
+      ["user_identities_user_id_fkey", "f"],
+      ["tombstone_snapshots_artifact_id_fkey", "f"],
+      ["tombstone_snapshots_artifact_id_snapshot_number_key", "u"],
+      ["tombstone_snapshots_pkey", "p"],
+      ["tombstone_snapshots_snapshot_number_check", "c"],
     ];
     const actualConstraintInventory = constraints.rows.map((row) => `${row.conname}:${row.contype}`).sort();
     expect(actualConstraintInventory).toEqual(expectedConstraints.map(([name, type]) => `${name}:${type}`).sort());
@@ -113,6 +127,7 @@ integration("PostgreSQL persistence hardening", () => {
     );
     expect(triggers.rows.map((row) => row.tgname)).toEqual([
       "artifact_versions_immutable", "artifacts_identity_immutable", "artifacts_no_physical_delete", "dependency_resolutions_set_target",
+      "tombstone_snapshots_no_truncate", "tombstone_snapshots_no_update_or_delete",
     ]);
 
     const indexes = await pool!.query<{ indexname: string }>(
@@ -123,7 +138,31 @@ integration("PostgreSQL persistence hardening", () => {
       "artifact_lineage_parent_idx", "artifact_lineage_child_idx", "provenances_version_idx",
       "dependencies_source_idx", "dependencies_target_idx", "dependency_resolutions_dependency_idx",
       "compatibility_reports_source_idx", "compatibility_reports_target_idx",
+      "user_identities_user_idx", "tombstone_snapshots_artifact_idx",
     ]));
+  });
+
+  it("maps provider-subject identities without guessing legacy providers", async () => {
+    const identities = new PostgresUserIdentityRepository(pool!);
+    const legacy = await pool!.query<{ id: string; external_subject: string }>(
+      "SELECT id,external_subject FROM users WHERE id=$1",
+      [owners[0]],
+    );
+    expect(legacy.rows[0]).toEqual({ id: owners[0], external_subject: "owner-a" });
+    expect(await identities.findUserId("firebase", "owner-a")).toBeNull();
+
+    const userWithTwoProviders = randomUUID();
+    const otherUser = randomUUID();
+    await pool!.query("INSERT INTO users (id) VALUES ($1),($2)", [userWithTwoProviders, otherUser]);
+    const createdAt = new Date("2026-05-01T00:00:00Z");
+    await identities.create({ id: randomUUID(), userId: userWithTwoProviders, provider: "firebase", subject: "same-subject", createdAt });
+    await identities.create({ id: randomUUID(), userId: userWithTwoProviders, provider: "oidc-example", subject: "same-subject", createdAt });
+    await identities.create({ id: randomUUID(), userId: otherUser, provider: "firebase", subject: "other-subject", createdAt });
+    expect(await identities.findUserId("firebase", "same-subject")).toBe(userWithTwoProviders);
+    expect(await identities.findUserId("oidc-example", "same-subject")).toBe(userWithTwoProviders);
+    expect(await identities.findUserId("firebase", "other-subject")).toBe(otherUser);
+    await expect(identities.create({ id: randomUUID(), userId: otherUser, provider: "firebase", subject: "same-subject", createdAt }))
+      .rejects.toMatchObject({ code: "INVALID_REQUEST", details: { sqlState: "23505", constraint: "user_identities_provider_subject_key" } });
   });
 
   async function createArtifact(ownerId: string = owners[0]!, slug: string = randomUUID(), visibility: string = "public", status: string = "active"): Promise<string> {
@@ -312,6 +351,104 @@ integration("PostgreSQL persistence hardening", () => {
     const artifacts = new PostgresArtifactRepository(pool!);
     await new DeleteArtifactService(artifacts, { canRead: async () => false, canWrite: async () => false }).execute({ actorId: owners[0]!, artifactId });
     expect((await pool!.query("SELECT status,visibility FROM artifacts WHERE id=$1", [artifactId])).rows[0]).toEqual({ status: "tombstone", visibility: "unlisted" });
+  });
+
+  it("persists immutable complete lifecycle snapshots and restores the same Artifact identity", async () => {
+    const artifactId = await createArtifact(owners[0], randomUUID(), "public");
+    const childId = await createArtifact(owners[1]);
+    const targetId = await createArtifact(owners[2]);
+    const sourceVersionId = await createVersion(artifactId, "1.0.0", "sha256:source");
+    const targetVersionId = await createVersion(targetId, "2.1.0", "sha256:target");
+    const dependencyId = randomUUID();
+    const resolutionId = randomUUID();
+    const lineage = new PostgresLineageRepository(pool!);
+    await pool!.query(
+      "INSERT INTO dependencies (id,artifact_version_id,target_artifact_id,declared_range) VALUES ($1,$2,$3,$4)",
+      [dependencyId, sourceVersionId, targetId, "^2.1.0"],
+    );
+    await pool!.query(
+      "INSERT INTO dependency_resolutions (id,dependency_id,resolved_artifact_version_id) VALUES ($1,$2,$3)",
+      [resolutionId, dependencyId, targetVersionId],
+    );
+    await pool!.query(
+      "INSERT INTO provenances (id,artifact_version_id,source_type,source_url,source_ref) VALUES ($1,$2,'github','https://example.test/repo','main')",
+      [randomUUID(), sourceVersionId],
+    );
+    await pool!.query(
+      "INSERT INTO compatibility_reports (id,artifact_version_id,status,report) VALUES ($1,$2,'compatible','{\"ok\":true}')",
+      [randomUUID(), sourceVersionId],
+    );
+    await lineage.createFork(artifactId, childId, sourceVersionId);
+
+    const artifacts = new PostgresArtifactRepository(pool!);
+    const access = { canRead: async () => true, canWrite: async () => true };
+    const fixedTime = new Date("2026-06-01T00:00:00Z");
+    const remove = new DeleteArtifactService(artifacts, access, { now: () => fixedTime });
+    const tombstoned = await remove.execute({ actorId: owners[0]!, artifactId });
+    const snapshotResult = await pool!.query<{ snapshot_number: number; snapshot: Record<string, any> }>(
+      "SELECT snapshot_number,snapshot FROM tombstone_snapshots WHERE artifact_id=$1",
+      [artifactId],
+    );
+    expect(snapshotResult.rows).toHaveLength(1);
+    const snapshot = snapshotResult.rows[0]!.snapshot;
+    expect(snapshot.format_version).toBe(1);
+    expect(snapshot.artifact).toMatchObject({ id: artifactId, owner_id: owners[0], visibility: "public", status: "active" });
+    expect(snapshot.versions).toHaveLength(1);
+    expect(snapshot.versions[0]).toMatchObject({ id: sourceVersionId, content_hash: "sha256:source", content_location: "loc" });
+    expect(snapshot.dependencies).toHaveLength(1);
+    expect(snapshot.dependencies[0]).toMatchObject({ id: dependencyId, declared_range: "^2.1.0" });
+    expect(snapshot.dependencies[0].resolutions).toMatchObject([{ id: resolutionId, resolved_artifact_version_id: targetVersionId }]);
+    expect(snapshot.provenances).toHaveLength(1);
+    expect(snapshot.compatibility_reports).toHaveLength(1);
+    expect(snapshot.lineage).toMatchObject([{ parent_artifact_id: artifactId, child_artifact_id: childId, source_version_id: sourceVersionId }]);
+    expect(tombstoned.snapshot()).toMatchObject({ id: artifactId, status: "tombstone", visibility: "unlisted" });
+
+    await expect(pool!.query("UPDATE tombstone_snapshots SET snapshot='{}' WHERE artifact_id=$1", [artifactId]))
+      .rejects.toMatchObject({ code: "55000", constraint: "tombstone_snapshots_immutable" });
+    await expect(pool!.query("DELETE FROM tombstone_snapshots WHERE artifact_id=$1", [artifactId]))
+      .rejects.toMatchObject({ code: "55000", constraint: "tombstone_snapshots_immutable" });
+    await remove.execute({ actorId: owners[0]!, artifactId });
+    expect((await pool!.query("SELECT snapshot_number,snapshot FROM tombstone_snapshots WHERE artifact_id=$1", [artifactId])).rows)
+      .toEqual([{ snapshot_number: 1, snapshot }]);
+
+    const restoreService = new RestoreArtifactService(artifacts, { canRestore: async () => false });
+    await expect(restoreService.execute({ actorId: owners[0]!, artifactId })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const restored = await new RestoreArtifactService(
+      artifacts,
+      { canRestore: async () => true },
+      { now: () => new Date("2026-06-02T00:00:00Z") },
+    ).execute({ actorId: "admin", artifactId });
+    expect(restored.snapshot()).toMatchObject({ id: artifactId, ownerId: owners[0], visibility: "public", status: "active" });
+    expect(await artifacts.findTombstoneSnapshotArtifact(artifactId)).toMatchObject({ id: artifactId, visibility: "public", status: "active" });
+    expect(await lineage.getChildren(artifactId)).toMatchObject([{ sourceVersionId, childArtifactId: childId }]);
+    expect(await new PostgresArtifactVersionRepository(pool!).findForArtifact(artifactId)).toHaveLength(1);
+
+    await remove.execute({ actorId: owners[0]!, artifactId });
+    expect((await pool!.query("SELECT snapshot_number FROM tombstone_snapshots WHERE artifact_id=$1 ORDER BY snapshot_number", [artifactId])).rows)
+      .toEqual([{ snapshot_number: 1 }, { snapshot_number: 2 }]);
+  });
+
+  it("rolls back snapshot creation and tombstoning together if snapshot persistence fails", async () => {
+    const artifactId = await createArtifact();
+    const artifacts = new PostgresArtifactRepository(pool!);
+    await pool!.query(`
+      CREATE FUNCTION reject_test_artifact_tombstone() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'forced snapshot failure'; END;
+      $$;
+      CREATE TRIGGER reject_test_artifact_tombstone
+      BEFORE UPDATE ON artifacts FOR EACH ROW
+      WHEN (NEW.status = 'tombstone')
+      EXECUTE FUNCTION reject_test_artifact_tombstone();
+    `);
+    try {
+      await expect(new DeleteArtifactService(artifacts, { canRead: async () => true, canWrite: async () => true })
+        .execute({ actorId: owners[0]!, artifactId })).rejects.toThrow("forced snapshot failure");
+    } finally {
+      await pool!.query("DROP TRIGGER reject_test_artifact_tombstone ON artifacts");
+      await pool!.query("DROP FUNCTION reject_test_artifact_tombstone()");
+    }
+    expect((await artifacts.findById(artifactId))?.status).toBe("active");
+    expect((await pool!.query("SELECT count(*)::int AS count FROM tombstone_snapshots WHERE artifact_id=$1", [artifactId])).rows[0]?.count).toBe(0);
   });
 
   it("keeps published versions immutable and rejects physical Artifact deletion", async () => {

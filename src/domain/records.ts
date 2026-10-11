@@ -11,6 +11,7 @@ export interface Lineage {
   id: string;
   parentArtifactId: string;
   childArtifactId: string;
+  sourceVersionId: string | null;
   relationshipType: "fork";
   createdAt: Date;
 }
@@ -33,9 +34,9 @@ export interface CompatibilityReport {
   createdAt: Date;
 }
 
-export function createForkLineage(parentArtifactId: string, childArtifactId: string, id: string, createdAt: Date): Lineage {
+export function createForkLineage(parentArtifactId: string, childArtifactId: string, id: string, createdAt: Date, sourceVersionId: string | null = null): Lineage {
   if (parentArtifactId === childArtifactId) {
     throw new DomainError("LINEAGE_INVALID", "An Artifact cannot be its own fork parent.");
   }
-  return { id, parentArtifactId, childArtifactId, relationshipType: "fork", createdAt: new Date(createdAt) };
+  return { id, parentArtifactId, childArtifactId, sourceVersionId, relationshipType: "fork", createdAt: new Date(createdAt) };
 }

@@ -18,6 +18,9 @@ Required operations:
 - `findByOwnerAndSlug(ownerId, slug)`
 - `create(artifact)`
 - `save(artifact)`
+- `tombstone(artifact)` — atomically persist the tombstone snapshot and lifecycle transition
+- `restore(artifact)` — restore the existing Artifact identity from a tombstone
+- `findTombstoneSnapshotArtifact(id)` — retrieve the Artifact state captured before deletion
 
 ## ArtifactVersionRepository
 
@@ -35,6 +38,17 @@ Required operations:
 - `createFork(parentArtifactId, childArtifactId)`
 - `getParents(artifactId)`
 - `getChildren(artifactId)`
+
+Fork creation also records the selected source Artifact Version when available.
+
+## UserIdentityRepository
+
+- `findUserId(provider, subject)`
+- `create(identity)`
+
+`UserId` remains the internal PearlHub identity. External identities are unique by
+`(provider, subject)`; provider-specific token verification stays in Infrastructure.
+Legacy `users.external_subject` values are not assigned a provider by migration.
 
 ## ProvenanceRepository
 

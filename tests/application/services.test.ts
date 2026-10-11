@@ -3,7 +3,7 @@ import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Dependency } from "../../src/domain/dependency.js";
 import type { DependencyResolution } from "../../src/domain/records.js";
-import { CloneArtifactService, ForkArtifactService, ImportGitHubService, PublishVersionService, ResolveDependencyService } from "../../src/application/services.js";
+import { CloneArtifactService, DeleteArtifactService, ForkArtifactService, ImportGitHubService, PublishVersionService, ResolveDependencyService, RestoreArtifactService } from "../../src/application/services.js";
 import type { ArtifactRepository, ArtifactVersionRepository, DependencyRepository, LineageRepository, ProvenanceRepository, TransactionManager } from "../../src/ports/repositories.js";
 
 const fixedTime = new Date("2026-01-01T00:00:00Z");
@@ -13,14 +13,17 @@ const sourceVersion = (id: string, version: string) => ArtifactVersion.create({ 
 function copyServices() {
   const artifacts: Artifact[] = [];
   const versions: ArtifactVersion[] = [];
-  const lineages: Array<{ parent: string; child: string }> = [];
+  const lineages: Array<{ parent: string; child: string; sourceVersion: string | null }> = [];
   const content = new Map([["source-location", '{"knowledge":[],"skill":{}}']]);
   const storedContent: string[] = [];
   const artifactRepo: ArtifactRepository = {
     findById: async (id) => id === sourceArtifact.id ? sourceArtifact : null,
+    findTombstoneSnapshotArtifact: async () => null,
     findByOwnerAndSlug: async () => null,
     create: async (artifact) => { artifacts.push(artifact); },
     save: async () => {},
+    tombstone: async () => {},
+    restore: async () => null,
   };
   const versionRepo: ArtifactVersionRepository = {
     findById: async () => null,
@@ -50,9 +53,9 @@ function copyServices() {
   };
   const access = { canRead: async () => true, canWrite: async () => true };
   const lineageRepo: LineageRepository = {
-    createFork: async (parentArtifactId, childArtifactId) => {
-      lineages.push({ parent: parentArtifactId, child: childArtifactId });
-      return { id: "lineage", parentArtifactId, childArtifactId, relationshipType: "fork", createdAt: fixedTime };
+    createFork: async (parentArtifactId, childArtifactId, sourceVersionId) => {
+      lineages.push({ parent: parentArtifactId, child: childArtifactId, sourceVersion: sourceVersionId ?? null });
+      return { id: "lineage", parentArtifactId, childArtifactId, sourceVersionId: sourceVersionId ?? null, relationshipType: "fork", createdAt: fixedTime };
     },
     getParents: async () => [],
     getChildren: async () => [],
@@ -69,7 +72,7 @@ describe("copy services", () => {
     const child = await service.execute({ actorId: "owner", sourceArtifactId: "source", name: "Fork", slug: "fork" });
 
     expect(deps.lineages).toHaveLength(1);
-    expect(deps.lineages[0]).toEqual({ parent: "source", child: child.id });
+    expect(deps.lineages[0]).toEqual({ parent: "source", child: child.id, sourceVersion: "source-v1" });
     expect(sourceArtifact.name).toBe("Source");
     expect(deps.versions[0]?.artifactId).toBe(child.id);
     const copiedDependencies = deps.dependencies.filter((dependency) => dependency.artifactVersionId === deps.versions[0]?.id);
@@ -233,6 +236,54 @@ describe("application transaction boundaries", () => {
   });
 });
 
+describe("Artifact lifecycle services", () => {
+  it("creates a tombstone once and leaves repeated deletes idempotent", async () => {
+    let current = sourceArtifact;
+    let snapshotCount = 0;
+    const artifacts: ArtifactRepository = {
+      findById: async () => current,
+      findTombstoneSnapshotArtifact: async () => null,
+      findByOwnerAndSlug: async () => null,
+      create: async () => {},
+      save: async () => {},
+      tombstone: async (artifact) => {
+        snapshotCount += 1;
+        current = artifact;
+      },
+      restore: async () => null,
+    };
+    const service = new DeleteArtifactService(artifacts, { canRead: async () => true, canWrite: async () => false }, { now: () => fixedTime });
+
+    await service.execute({ actorId: sourceArtifact.ownerId, artifactId: sourceArtifact.id });
+    await service.execute({ actorId: sourceArtifact.ownerId, artifactId: sourceArtifact.id });
+    expect(current.status).toBe("tombstone");
+    expect(snapshotCount).toBe(1);
+  });
+
+  it("restores only when authorized and keeps the snapshot state as source of visibility", async () => {
+    const deleted = sourceArtifact.tombstone(fixedTime);
+    let current = deleted;
+    const artifacts: ArtifactRepository = {
+      findById: async () => current,
+      findTombstoneSnapshotArtifact: async () => sourceArtifact,
+      findByOwnerAndSlug: async () => null,
+      create: async () => {},
+      save: async () => {},
+      tombstone: async () => {},
+      restore: async (artifact) => {
+        current = artifact;
+        return artifact;
+      },
+    };
+    const service = new RestoreArtifactService(artifacts, { canRestore: async () => false }, { now: () => fixedTime });
+    await expect(service.execute({ actorId: sourceArtifact.ownerId, artifactId: sourceArtifact.id })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    current = deleted;
+    const restored = await new RestoreArtifactService(artifacts, { canRestore: async () => true }, { now: () => fixedTime })
+      .execute({ actorId: "admin", artifactId: sourceArtifact.id });
+    expect(restored.snapshot()).toMatchObject({ id: sourceArtifact.id, ownerId: sourceArtifact.ownerId, visibility: "public", status: "active" });
+  });
+});
+
 describe("GitHub import", () => {
   it.each([
     { version: "2.3.1", contentHash: "sha256:bc7bb97945a8c63b3025f86569c210fe543b39c360e96f6cc78ac80482bbdad2" },
@@ -242,7 +293,15 @@ describe("GitHub import", () => {
     const savedVersions: ArtifactVersion[] = [];
     const provenance: unknown[] = [];
     const storedContent: Array<{ content: string; hash: string }> = [];
-    const artifactRepo = { findById: async () => null, findByOwnerAndSlug: async () => null, create: async (value: Artifact) => { savedArtifacts.push(value); }, save: async () => {} } as ArtifactRepository;
+    const artifactRepo = {
+      findById: async () => null,
+      findTombstoneSnapshotArtifact: async () => null,
+      findByOwnerAndSlug: async () => null,
+      create: async (value: Artifact) => { savedArtifacts.push(value); },
+      save: async () => {},
+      tombstone: async () => {},
+      restore: async () => null,
+    } satisfies ArtifactRepository;
     const versionRepo = { findById: async () => null, findByArtifactAndVersion: async () => null, findForArtifact: async () => [], findLatest: async () => null, create: async (value: ArtifactVersion) => { savedVersions.push(value); } } as ArtifactVersionRepository;
     const store = { put: async (content: string, hash: string) => { storedContent.push({ content, hash }); return hash; }, get: async () => null, exists: async () => false };
     const provenanceRepo = { create: async (value: unknown) => { provenance.push(value); }, findForVersion: async () => [] } as unknown as ProvenanceRepository;

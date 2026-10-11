@@ -27,6 +27,10 @@ export interface AccessPolicy {
   canWrite(actorId: string, artifact: Artifact): Promise<boolean>;
 }
 
+export interface RestoreAccessPolicy {
+  canRestore(actorId: string, artifact: Artifact): Promise<boolean>;
+}
+
 export class CreateArtifactService {
   constructor(private readonly artifacts: ArtifactRepository, private readonly ids = uuidGenerator, private readonly clock = systemClock) {}
 
@@ -85,7 +89,7 @@ abstract class CopyArtifactService {
     protected readonly transactions?: TransactionManager,
   ) {}
 
-  protected async copy(input: { actorId: string; sourceArtifactId: string; name: string; slug: string; sourceVersionId?: string }, afterCreate?: (artifact: Artifact) => Promise<void>): Promise<{ artifact: Artifact; sourceVersion: ArtifactVersion }> {
+  protected async copy(input: { actorId: string; sourceArtifactId: string; name: string; slug: string; sourceVersionId?: string }, afterCreate?: (artifact: Artifact, sourceVersion: ArtifactVersion) => Promise<void>): Promise<{ artifact: Artifact; sourceVersion: ArtifactVersion }> {
     const source = await this.artifacts.findById(input.sourceArtifactId);
     if (!source) throw new DomainError("ARTIFACT_NOT_FOUND", "Source Artifact was not found.");
     await authorizeRead(this.access, input.actorId, source);
@@ -105,7 +109,7 @@ abstract class CopyArtifactService {
       for (const dependency of await this.dependencies.findForVersion(sourceVersion.id)) {
         await this.dependencies.create(Dependency.create({ id: this.ids.next(), artifactVersionId: copiedVersion.id, targetArtifactId: dependency.targetArtifactId, declaredRange: dependency.declaredRange, createdAt: at }));
       }
-      await afterCreate?.(artifact);
+      await afterCreate?.(artifact, sourceVersion);
     };
     if (this.transactions) await this.transactions.run(work); else await work();
     return { artifact, sourceVersion };
@@ -118,9 +122,9 @@ export class ForkArtifactService extends CopyArtifactService {
   }
 
   async execute(input: { actorId: string; sourceArtifactId: string; name: string; slug: string; sourceVersionId?: string }): Promise<Artifact> {
-    const copied = await this.copy(input, async (artifact) => {
-      const relation = createForkLineage(input.sourceArtifactId, artifact.id, this.ids.next(), this.clock.now());
-      await this.lineage.createFork(relation.parentArtifactId, relation.childArtifactId);
+    const copied = await this.copy(input, async (artifact, sourceVersion) => {
+      const relation = createForkLineage(input.sourceArtifactId, artifact.id, this.ids.next(), this.clock.now(), sourceVersion.id);
+      await this.lineage.createFork(relation.parentArtifactId, relation.childArtifactId, relation.sourceVersionId ?? undefined);
     });
     return copied.artifact;
   }
@@ -138,10 +142,30 @@ export class DeleteArtifactService {
     const artifact = await this.artifacts.findById(input.artifactId);
     if (!artifact) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
     await authorizeWrite(this.access, input.actorId, artifact);
+    if (artifact.status === "tombstone") return artifact;
     const deleted = artifact.tombstone(this.clock.now());
-    const save = () => this.artifacts.save(deleted);
-    if (this.transactions) await this.transactions.run(save); else await save();
+    const tombstone = () => this.artifacts.tombstone(deleted);
+    if (this.transactions) await this.transactions.run(tombstone); else await tombstone();
     return deleted;
+  }
+}
+
+export class RestoreArtifactService {
+  constructor(private readonly artifacts: ArtifactRepository, private readonly access: RestoreAccessPolicy, private readonly clock = systemClock) {}
+
+  async execute(input: { actorId: string; artifactId: string }): Promise<Artifact> {
+    const artifact = await this.artifacts.findById(input.artifactId);
+    if (!artifact) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+    if (!(await this.access.canRestore(input.actorId, artifact))) {
+      throw new DomainError("FORBIDDEN", "Only an Admin may restore an Artifact.");
+    }
+    if (artifact.status !== "tombstone") throw new DomainError("INVALID_REQUEST", "Only a tombstoned Artifact can be restored.");
+    const original = await this.artifacts.findTombstoneSnapshotArtifact(artifact.id);
+    if (!original) throw new DomainError("INVALID_REQUEST", "Artifact tombstone snapshot was not found.");
+    const restored = artifact.restore(original.visibility, this.clock.now());
+    const persisted = await this.artifacts.restore(restored);
+    if (!persisted) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+    return persisted;
   }
 }
 

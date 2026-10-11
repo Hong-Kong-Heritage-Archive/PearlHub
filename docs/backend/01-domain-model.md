@@ -54,6 +54,12 @@ A deleted Artifact becomes:
 
 The Artifact is not physically deleted.
 
+Each successful active-to-tombstone transition has an immutable persistence snapshot.
+Repeated deletion while already tombstoned does not create or replace a snapshot.
+After Admin restoration, a later deletion creates the next snapshot in the lifecycle
+history. Restoration keeps the same Artifact identity and its historical versions,
+dependencies, provenance, compatibility reports, and lineage.
+
 ## Artifact Version
 
 Fields:
@@ -84,6 +90,9 @@ Published versions are immutable.
 ## Lineage
 
 Fork creates permanent PearlHub lineage.
+
+A Fork lineage records the source Artifact Version when known. Historical lineage
+created before this field was persisted may have no source-version reference.
 
 Clone creates no PearlHub lineage.
 

@@ -5,9 +5,12 @@ import type { CompatibilityReport, DependencyResolution, Lineage, Provenance } f
 
 export interface ArtifactRepository {
   findById(id: string): Promise<Artifact | null>;
+  findTombstoneSnapshotArtifact(id: string): Promise<Artifact | null>;
   findByOwnerAndSlug(ownerId: string, slug: string): Promise<Artifact | null>;
   create(artifact: Artifact): Promise<void>;
   save(artifact: Artifact): Promise<void>;
+  tombstone(artifact: Artifact): Promise<void>;
+  restore(artifact: Artifact): Promise<Artifact | null>;
 }
 
 export interface ArtifactVersionRepository {
@@ -19,9 +22,22 @@ export interface ArtifactVersionRepository {
 }
 
 export interface LineageRepository {
-  createFork(parentArtifactId: string, childArtifactId: string): Promise<Lineage>;
+  createFork(parentArtifactId: string, childArtifactId: string, sourceVersionId?: string): Promise<Lineage>;
   getParents(artifactId: string): Promise<Lineage[]>;
   getChildren(artifactId: string): Promise<Lineage[]>;
+}
+
+export interface UserIdentity {
+  id: string;
+  userId: string;
+  provider: string;
+  subject: string;
+  createdAt: Date;
+}
+
+export interface UserIdentityRepository {
+  findUserId(provider: string, subject: string): Promise<string | null>;
+  create(identity: UserIdentity): Promise<void>;
 }
 
 export interface ProvenanceRepository {

@@ -72,12 +72,26 @@ Create a new Artifact from source content and dependency declarations without cr
 Delete means:
 
 1. verify actor permission
-2. preserve complete immutable snapshot
-3. change status to `tombstone`
-4. change visibility to `unlisted`
-5. preserve lineage
+2. atomically preserve a complete immutable snapshot and change status to `tombstone`
+3. change visibility to `unlisted`
+4. preserve lineage
 
 No physical Artifact deletion.
+
+Repeated delete of an already tombstoned Artifact is idempotent. If an Admin restores
+the Artifact and it is later deleted again, the later transition appends another
+snapshot rather than modifying the earlier one.
+
+## RestoreArtifact
+
+1. authorize the Admin restore operation
+2. load the latest immutable pre-delete Artifact snapshot
+3. restore the same Artifact ID, owner, name, and slug, using the captured visibility
+4. retain the snapshot and all historical versions and lineage
+
+The database snapshot stores immutable content hashes and locations, not content-store
+objects. Successful content restoration therefore relies on the content store retaining
+those referenced objects; a PostgreSQL transaction cannot provide cross-store rollback.
 
 ## ImportGitHub
 

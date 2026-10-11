@@ -29,7 +29,10 @@ Generate tests before adding framework-specific API code.
 - delete converts active Artifact to tombstone
 - tombstone becomes unlisted
 - snapshot remains available
+- snapshot includes versions, content references, dependency declarations/resolutions, provenance, compatibility reports, and lineage
+- snapshot is immutable and later tombstones append a new snapshot
 - lineage remains available
+- restore preserves Artifact identity and does not rewrite history
 - no physical Artifact deletion operation
 
 ### Version
@@ -75,6 +78,9 @@ Use a real PostgreSQL test database or ephemeral PostgreSQL environment.
 Test:
 
 - constraints
+- provider + subject uniqueness and same subject across providers
+- legacy external subjects remain unmapped unless explicit provider mapping data is supplied
+- immutable tombstone snapshots and atomic rollback
 - foreign keys
 - unique owner/slug
 - unique artifact/version

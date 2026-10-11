@@ -85,6 +85,13 @@ export class Artifact {
     return new Artifact({ ...this.state, status: "tombstone", visibility: "unlisted", updatedAt: new Date(at) });
   }
 
+  restore(visibility: ArtifactVisibility, at: Date): Artifact {
+    if (this.state.status !== "tombstone") {
+      throw new DomainError("INVALID_REQUEST", "Only a tombstoned Artifact can be restored.");
+    }
+    return new Artifact({ ...this.state, status: "active", visibility, updatedAt: new Date(at) });
+  }
+
   snapshot(): ArtifactSnapshot {
     return { ...this.state, createdAt: this.createdAt, updatedAt: this.updatedAt };
   }

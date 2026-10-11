@@ -15,6 +15,8 @@ import type {
   LineageRepository,
   ProvenanceRepository,
   TransactionManager,
+  UserIdentity,
+  UserIdentityRepository,
 } from "../ports/repositories.js";
 
 interface Queryable {
@@ -91,6 +93,14 @@ export class PostgresArtifactRepository implements ArtifactRepository {
     return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
   }
 
+  async findTombstoneSnapshotArtifact(id: string): Promise<Artifact | null> {
+    const result = await this.db.query<{ artifact: ArtifactRow }>(
+      "SELECT snapshot->'artifact' AS artifact FROM tombstone_snapshots WHERE artifact_id=$1 ORDER BY snapshot_number DESC LIMIT 1",
+      [id],
+    );
+    return result.rows[0] ? artifactFromRow(result.rows[0].artifact) : null;
+  }
+
   async findByOwnerAndSlug(ownerId: string, slug: string): Promise<Artifact | null> {
     const result = await this.db.query<ArtifactRow>("SELECT id,owner_id,name,slug,visibility,status,created_at,updated_at FROM artifacts WHERE owner_id = $1 AND slug = $2", [ownerId, slug]);
     return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
@@ -107,6 +117,20 @@ export class PostgresArtifactRepository implements ArtifactRepository {
   async save(artifact: Artifact): Promise<void> {
     const value = artifact.snapshot();
     await this.db.query("UPDATE artifacts SET visibility=$2, status=$3, updated_at=$4 WHERE id=$1", [value.id, value.visibility, value.status, value.updatedAt]);
+  }
+
+  async tombstone(artifact: Artifact): Promise<void> {
+    const value = artifact.snapshot();
+    await this.db.query("SELECT tombstone_artifact($1,$2,$3)", [value.id, randomUUID(), value.updatedAt]);
+  }
+
+  async restore(artifact: Artifact): Promise<Artifact | null> {
+    const value = artifact.snapshot();
+    const result = await this.db.query<ArtifactRow>(
+      "SELECT * FROM restore_artifact($1,$2,$3)",
+      [value.id, value.visibility, value.updatedAt],
+    );
+    return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
   }
 }
 
@@ -147,20 +171,39 @@ export class PostgresArtifactVersionRepository implements ArtifactVersionReposit
 
 export class PostgresLineageRepository implements LineageRepository {
   constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
-  async createFork(parentArtifactId: string, childArtifactId: string): Promise<Lineage> {
+  async createFork(parentArtifactId: string, childArtifactId: string, sourceVersionId?: string): Promise<Lineage> {
     const result = await this.db.query<Lineage>(
-      "INSERT INTO artifact_lineage (id,parent_artifact_id,child_artifact_id,relationship_type,created_at) VALUES ($1,$2,$3,'fork',now()) RETURNING id,parent_artifact_id AS \"parentArtifactId\",child_artifact_id AS \"childArtifactId\",relationship_type AS \"relationshipType\",created_at AS \"createdAt\"",
-      [randomUUID(), parentArtifactId, childArtifactId],
+      "INSERT INTO artifact_lineage (id,parent_artifact_id,child_artifact_id,source_version_id,relationship_type,created_at) VALUES ($1,$2,$3,$4,'fork',now()) RETURNING id,parent_artifact_id AS \"parentArtifactId\",child_artifact_id AS \"childArtifactId\",source_version_id AS \"sourceVersionId\",relationship_type AS \"relationshipType\",created_at AS \"createdAt\"",
+      [randomUUID(), parentArtifactId, childArtifactId, sourceVersionId ?? null],
     );
     return result.rows[0]!;
   }
   async getParents(artifactId: string): Promise<Lineage[]> {
-    const result = await this.db.query<Lineage>("SELECT id,parent_artifact_id AS \"parentArtifactId\",child_artifact_id AS \"childArtifactId\",relationship_type AS \"relationshipType\",created_at AS \"createdAt\" FROM artifact_lineage WHERE child_artifact_id=$1 ORDER BY created_at,id", [artifactId]);
+    const result = await this.db.query<Lineage>("SELECT id,parent_artifact_id AS \"parentArtifactId\",child_artifact_id AS \"childArtifactId\",source_version_id AS \"sourceVersionId\",relationship_type AS \"relationshipType\",created_at AS \"createdAt\" FROM artifact_lineage WHERE child_artifact_id=$1 ORDER BY created_at,id", [artifactId]);
     return result.rows;
   }
   async getChildren(artifactId: string): Promise<Lineage[]> {
-    const result = await this.db.query<Lineage>("SELECT id,parent_artifact_id AS \"parentArtifactId\",child_artifact_id AS \"childArtifactId\",relationship_type AS \"relationshipType\",created_at AS \"createdAt\" FROM artifact_lineage WHERE parent_artifact_id=$1 ORDER BY created_at,id", [artifactId]);
+    const result = await this.db.query<Lineage>("SELECT id,parent_artifact_id AS \"parentArtifactId\",child_artifact_id AS \"childArtifactId\",source_version_id AS \"sourceVersionId\",relationship_type AS \"relationshipType\",created_at AS \"createdAt\" FROM artifact_lineage WHERE parent_artifact_id=$1 ORDER BY created_at,id", [artifactId]);
     return result.rows;
+  }
+}
+
+export class PostgresUserIdentityRepository implements UserIdentityRepository {
+  constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
+
+  async findUserId(provider: string, subject: string): Promise<string | null> {
+    const result = await this.db.query<{ user_id: string }>(
+      "SELECT user_id FROM user_identities WHERE provider=$1 AND subject=$2",
+      [provider, subject],
+    );
+    return result.rows[0]?.user_id ?? null;
+  }
+
+  async create(identity: UserIdentity): Promise<void> {
+    await this.db.query(
+      "INSERT INTO user_identities (id,user_id,provider,subject,created_at) VALUES ($1,$2,$3,$4,$5)",
+      [identity.id, identity.userId, identity.provider, identity.subject, identity.createdAt],
+    );
   }
 }
 

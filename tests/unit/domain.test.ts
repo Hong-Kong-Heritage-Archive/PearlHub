@@ -26,6 +26,16 @@ describe("Artifact", () => {
       name: "Example Pearl",
       slug: "example-pearl",
     });
+    const restored = deleted.restore("public", new Date("2026-02-02T00:00:00Z"));
+    expect(restored.snapshot()).toMatchObject({
+      id: "artifact-1",
+      ownerId: "owner-1",
+      name: "Example Pearl",
+      slug: "example-pearl",
+      visibility: "public",
+      status: "active",
+    });
+    expect(() => artifact.restore("public", new Date())).toThrowError(DomainError);
   });
 
   it("rejects invalid names and slugs", () => {
