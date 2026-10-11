@@ -36,13 +36,20 @@ PostgreSQL is available at `localhost:54329` by default. The port, database, use
 
 ## Initialize the database
 
-Apply the initial schema after PostgreSQL is healthy:
+For a **fresh, empty** local database, apply all forward-only migrations once, in order, after PostgreSQL is healthy:
 
 ```sh
-docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/001_initial.sql
+docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/001_initial.sql &&
+docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/002_persistence_hardening.sql &&
+docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/003_identity_mapping_and_tombstone_snapshots.sql
 ```
 
-The migration is forward-only. Do not reapply it to a database where its tables already exist; use a fresh local database/volume for a clean initialization.
+Do not run this sequence against a database that already has PearlHub tables, or
+reapply a migration that has already run. The migrations are not a repeatable
+initialization script. For an existing database, confirm its migration history and
+apply only unapplied migrations in order; if its state is unknown, use a fresh local
+database/volume instead. The PostgreSQL integration suite uses its own random schema
+and applies all three migrations itself.
 
 ## Run backend checks locally
 
@@ -62,7 +69,13 @@ npm run test:integration
 
 The integration test is skipped when `TEST_DATABASE_URL` is unset. It creates a dedicated temporary schema in the configured database and removes only that schema on completion.
 
-This repository currently has no HTTP framework, route adapter, or backend server entrypoint. Therefore there is not yet a long-running API process to start; backend source and tests are executed locally with npm as described above. Framework selection remains intentionally deferred.
+The frozen architecture selects Hono for HTTP, OpenAPI 3.1 for the API contract, and a
+standard OCI container on Google Cloud Run. Firebase Authentication is one
+Infrastructure identity provider; provider-specific verification belongs there. These
+are architectural decisions, not claims that those components are implemented. This
+repository does not yet contain a Hono adapter or backend server entrypoint, so there
+is no long-running API process to start. Backend source and tests are executed locally
+with npm as described above.
 
 ## Stop PostgreSQL
 

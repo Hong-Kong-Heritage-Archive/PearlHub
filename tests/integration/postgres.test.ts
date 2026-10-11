@@ -354,11 +354,14 @@ integration("PostgreSQL persistence hardening", () => {
   });
 
   it("persists immutable complete lifecycle snapshots and restores the same Artifact identity", async () => {
-    const artifactId = await createArtifact(owners[0], randomUUID(), "public");
+    const artifactSlug = randomUUID();
+    const artifactId = await createArtifact(owners[0], artifactSlug, "public");
     const childId = await createArtifact(owners[1]);
     const targetId = await createArtifact(owners[2]);
+    const parentId = await createArtifact(owners[2]);
     const sourceVersionId = await createVersion(artifactId, "1.0.0", "sha256:source");
     const targetVersionId = await createVersion(targetId, "2.1.0", "sha256:target");
+    const parentVersionId = await createVersion(parentId, "1.0.0", "sha256:parent");
     const dependencyId = randomUUID();
     const resolutionId = randomUUID();
     const lineage = new PostgresLineageRepository(pool!);
@@ -378,6 +381,7 @@ integration("PostgreSQL persistence hardening", () => {
       "INSERT INTO compatibility_reports (id,artifact_version_id,status,report) VALUES ($1,$2,'compatible','{\"ok\":true}')",
       [randomUUID(), sourceVersionId],
     );
+    await lineage.createFork(parentId, artifactId, parentVersionId);
     await lineage.createFork(artifactId, childId, sourceVersionId);
 
     const artifacts = new PostgresArtifactRepository(pool!);
@@ -400,12 +404,17 @@ integration("PostgreSQL persistence hardening", () => {
     expect(snapshot.dependencies[0].resolutions).toMatchObject([{ id: resolutionId, resolved_artifact_version_id: targetVersionId }]);
     expect(snapshot.provenances).toHaveLength(1);
     expect(snapshot.compatibility_reports).toHaveLength(1);
-    expect(snapshot.lineage).toMatchObject([{ parent_artifact_id: artifactId, child_artifact_id: childId, source_version_id: sourceVersionId }]);
+    expect(snapshot.lineage).toEqual(expect.arrayContaining([
+      expect.objectContaining({ parent_artifact_id: parentId, child_artifact_id: artifactId, source_version_id: parentVersionId }),
+      expect.objectContaining({ parent_artifact_id: artifactId, child_artifact_id: childId, source_version_id: sourceVersionId }),
+    ]));
     expect(tombstoned.snapshot()).toMatchObject({ id: artifactId, status: "tombstone", visibility: "unlisted" });
 
     await expect(pool!.query("UPDATE tombstone_snapshots SET snapshot='{}' WHERE artifact_id=$1", [artifactId]))
       .rejects.toMatchObject({ code: "55000", constraint: "tombstone_snapshots_immutable" });
     await expect(pool!.query("DELETE FROM tombstone_snapshots WHERE artifact_id=$1", [artifactId]))
+      .rejects.toMatchObject({ code: "55000", constraint: "tombstone_snapshots_immutable" });
+    await expect(pool!.query("TRUNCATE tombstone_snapshots"))
       .rejects.toMatchObject({ code: "55000", constraint: "tombstone_snapshots_immutable" });
     await remove.execute({ actorId: owners[0]!, artifactId });
     expect((await pool!.query("SELECT snapshot_number,snapshot FROM tombstone_snapshots WHERE artifact_id=$1", [artifactId])).rows)
@@ -418,9 +427,21 @@ integration("PostgreSQL persistence hardening", () => {
       { canRestore: async () => true },
       { now: () => new Date("2026-06-02T00:00:00Z") },
     ).execute({ actorId: "admin", artifactId });
-    expect(restored.snapshot()).toMatchObject({ id: artifactId, ownerId: owners[0], visibility: "public", status: "active" });
+    expect(restored.snapshot()).toMatchObject({
+      id: artifactId,
+      ownerId: owners[0],
+      name: `Artifact ${artifactId}`,
+      slug: artifactSlug,
+      visibility: "public",
+      status: "active",
+    });
     expect(await artifacts.findTombstoneSnapshotArtifact(artifactId)).toMatchObject({ id: artifactId, visibility: "public", status: "active" });
     expect(await lineage.getChildren(artifactId)).toMatchObject([{ sourceVersionId, childArtifactId: childId }]);
+    expect(await lineage.getParents(artifactId)).toMatchObject([{
+      parentArtifactId: parentId,
+      childArtifactId: artifactId,
+      sourceVersionId: parentVersionId,
+    }]);
     expect(await new PostgresArtifactVersionRepository(pool!).findForArtifact(artifactId)).toHaveLength(1);
 
     await remove.execute({ actorId: owners[0]!, artifactId });
