@@ -1,6 +1,7 @@
 # 05 — REST API Contract
 
-The HTTP framework is intentionally unspecified.
+The REST resource contract is framework-neutral. The initial HTTP adapter uses
+Hono; its OpenAPI 3.1 document is served at `/openapi.json`.
 
 Base path:
 
@@ -21,6 +22,12 @@ Request:
   "visibility": "public"
 }
 ```
+
+The implemented `POST /api/v1/artifacts` operation requires bearer
+authentication. The owner is taken only from the authenticated internal user
+identity; the request body does not accept `ownerId`. It returns `201` with the
+created Artifact, or `400`, `401`, `409`, or `500` using the standard API error
+shape.
 
 ### GET /artifacts
 

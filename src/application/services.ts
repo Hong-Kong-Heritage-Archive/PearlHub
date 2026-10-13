@@ -31,10 +31,21 @@ export interface RestoreAccessPolicy {
   canRestore(actorId: string, artifact: Artifact): Promise<boolean>;
 }
 
-export class CreateArtifactService {
+export interface CreateArtifactCommand {
+  actorId: string;
+  name: string;
+  slug: string;
+  visibility: ArtifactVisibility;
+}
+
+export interface CreateArtifactUseCase {
+  execute(input: CreateArtifactCommand): Promise<Artifact>;
+}
+
+export class CreateArtifactService implements CreateArtifactUseCase {
   constructor(private readonly artifacts: ArtifactRepository, private readonly ids = uuidGenerator, private readonly clock = systemClock) {}
 
-  async execute(input: { actorId: string; name: string; slug: string; visibility: ArtifactVisibility }): Promise<Artifact> {
+  async execute(input: CreateArtifactCommand): Promise<Artifact> {
     const existing = await this.artifacts.findByOwnerAndSlug(input.actorId, input.slug);
     if (existing) throw new DomainError("ARTIFACT_SLUG_CONFLICT", "Artifact slug is already used by this owner.", { slug: input.slug });
     const artifact = Artifact.create({ id: this.ids.next(), ownerId: input.actorId, name: input.name, slug: input.slug, visibility: input.visibility, createdAt: this.clock.now() });

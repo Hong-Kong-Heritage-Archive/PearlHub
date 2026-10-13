@@ -122,7 +122,16 @@ export function toArtifactResponse(artifact: {
   id: string; ownerId: string; name: string; slug: string;
   visibility: CreateArtifactRequest["visibility"]; status: "active" | "tombstone"; createdAt: Date; updatedAt: Date;
 }): ArtifactResponse {
-  return { ...artifact, createdAt: artifact.createdAt.toISOString(), updatedAt: artifact.updatedAt.toISOString() };
+  return {
+    id: artifact.id,
+    ownerId: artifact.ownerId,
+    name: artifact.name,
+    slug: artifact.slug,
+    visibility: artifact.visibility,
+    status: artifact.status,
+    createdAt: artifact.createdAt.toISOString(),
+    updatedAt: artifact.updatedAt.toISOString(),
+  };
 }
 
 export function toApiError(error: DomainError): ApiErrorResponse {
