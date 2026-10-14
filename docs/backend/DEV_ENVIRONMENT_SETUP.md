@@ -16,6 +16,8 @@ sh scripts/setup-env.sh
 ```
 
 The script creates `.env` from `.env.example` and does not overwrite an existing `.env`. These values are for local development only; do not reuse them outside your machine.
+If you already have `.env`, add the new test-database and development-authentication
+variables from `.env.example` manually; the setup script deliberately preserves it.
 
 Load the variables into the current terminal before running Compose, migrations, or integration tests:
 
@@ -23,7 +25,7 @@ Load the variables into the current terminal before running Compose, migrations,
 set -a && . ./.env && set +a
 ```
 
-`DATABASE_URL` is the backend's local PostgreSQL connection string. `TEST_DATABASE_URL` currently points at the same local database; the integration test creates and removes its own randomly named schema, so it does not drop or overwrite the development schema.
+`DATABASE_URL` is the backend's local PostgreSQL connection string. `TEST_DATABASE_URL` must point to a separate disposable database whose name ends in `_test`; the integration suite refuses to run against the configured application database and removes only its randomly named schema.
 
 ## Start PostgreSQL
 
@@ -34,22 +36,38 @@ docker compose ps
 
 PostgreSQL is available at `localhost:54329` by default. The port, database, username, and password can be changed in `.env`. Compose persists data in the `pearlhub-postgres-data` volume.
 
-## Initialize the database
-
-For a **fresh, empty** local database, apply all forward-only migrations once, in order, after PostgreSQL is healthy:
+Create the dedicated test database once:
 
 ```sh
-docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/001_initial.sql &&
-docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/002_persistence_hardening.sql &&
-docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" < migrations/003_identity_mapping_and_tombstone_snapshots.sql
+docker compose exec -T postgres createdb -U "$POSTGRES_USER" pearlhub_test
 ```
 
-Do not run this sequence against a database that already has PearlHub tables, or
-reapply a migration that has already run. The migrations are not a repeatable
-initialization script. For an existing database, confirm its migration history and
-apply only unapplied migrations in order; if its state is unknown, use a fresh local
-database/volume instead. The PostgreSQL integration suite uses its own random schema
-and applies all three migrations itself.
+## Migrate the application database
+
+`npm run db:migrate` applies ordered SQL files transactionally and records each
+filename and SHA-256 checksum in `schema_migrations`. Running it again is safe; it
+does not reapply completed migrations, and it fails if an already-applied migration
+has changed.
+
+```sh
+npm run db:migrate
+```
+
+This command uses `DATABASE_URL`, not `TEST_DATABASE_URL`. Run it only against a
+database intended for PearlHub and after confirming its state. The checked-in
+migrations may have been run manually without a ledger. Do not run normal migration
+mode against that database. After verifying its migration history and taking a
+backup, the explicit baseline command checks for all final-schema tables, selected
+columns, and invariant triggers before recording the migration checksums without
+rerunning SQL:
+
+```sh
+npm run db:migrate:baseline
+```
+
+Baseline mode never changes application rows, but it trusts the operator's
+confirmation that the full checked-in migration set was previously applied. If the
+schema or history is uncertain, use a fresh local database instead.
 
 ## Run backend checks locally
 
@@ -61,21 +79,47 @@ npm run build
 npm run test:unit
 ```
 
-Run the PostgreSQL integration test against the local Compose database:
+Run the PostgreSQL integration suite against the separate `pearlhub_test` database:
 
 ```sh
 npm run test:integration
 ```
 
-The integration test is skipped when `TEST_DATABASE_URL` is unset. It creates a dedicated temporary schema in the configured database and removes only that schema on completion.
+The command fails with an actionable error when `TEST_DATABASE_URL` is missing,
+does not identify a database ending in `_test`, or points to the same database as
+`DATABASE_URL`. It creates a random schema inside the dedicated test database,
+applies all migrations twice to verify repeat safety, then removes only that test
+schema on completion.
 
-The frozen architecture selects Hono for HTTP, OpenAPI 3.1 for the API contract, and a
-standard OCI container on Google Cloud Run. Firebase Authentication is one
-Infrastructure identity provider; provider-specific verification belongs there. These
-are architectural decisions, not claims that those components are implemented. This
-repository does not yet contain a Hono adapter or backend server entrypoint, so there
-is no long-running API process to start. Backend source and tests are executed locally
-with npm as described above.
+## Run the API locally
+
+The local server requires a migrated database and explicitly opted-in development
+authentication. Provision the configured internal user once in the migrated
+application database:
+
+```sh
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
+  "INSERT INTO users (id) VALUES ('00000000-0000-4000-8000-000000000001') ON CONFLICT (id) DO NOTHING"
+```
+
+Keep `PEARLHUB_AUTH_MODE=development-fake` and `DEV_AUTH_TOKEN` local-only. The
+development authenticator uses `DEV_AUTH_USER_ID` as the internal owner ID. The
+server refuses to start in production because production authentication is not
+implemented; it never enables fake authentication as a production fallback.
+
+```sh
+npm run build
+npm start
+```
+
+The local endpoint is `http://localhost:8080/api/v1/artifacts`; pass
+`Authorization: Bearer $DEV_AUTH_TOKEN`. The OpenAPI 3.1 document is available at
+`/openapi.json`. Runtime configuration uses `DATABASE_URL`, `PORT`,
+`PEARLHUB_AUTH_MODE`, `DEV_AUTH_USER_ID`, and `DEV_AUTH_TOKEN`. Connection settings
+are never logged.
+
+Firebase Authentication remains a future provider adapter; the route receives only
+the provider-neutral verified internal user ID.
 
 ## Stop PostgreSQL
 

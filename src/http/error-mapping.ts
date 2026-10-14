@@ -37,7 +37,7 @@ function toErrorResponse(error: DomainError): ApiErrorResponse {
     error: {
       code: error.code,
       message: error.message,
-      details: error.details,
+      details: {},
     },
   };
 }

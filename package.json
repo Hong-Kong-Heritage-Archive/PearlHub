@@ -4,13 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "tsc",
+    "start": "node dist/src/server.js",
+    "db:migrate": "npm run build && node dist/src/migrate.js",
+    "db:migrate:baseline": "npm run build && node dist/src/migrate.js --baseline",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit tests/application tests/contracts",
     "test:integration": "vitest run tests/integration"
   },
   "dependencies": {
     "@hono/zod-openapi": "^1.6.3",
+    "@hono/node-server": "^2.1.5",
     "hono": "^4.10.0",
     "pg": "^8.16.3",
     "semver": "^7.7.2",

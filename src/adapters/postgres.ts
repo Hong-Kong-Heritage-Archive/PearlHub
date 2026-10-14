@@ -20,16 +20,17 @@ import type {
 } from "../ports/repositories.js";
 
 interface Queryable {
-  query<Row extends QueryResultRow = QueryResultRow>(text: string, values?: any[]): Promise<QueryResult<Row>>;
+  query<Row extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<QueryResult<Row>>;
 }
 
 function translateConstraints(db: Queryable): Queryable {
   return {
-    query: async <Row extends QueryResultRow = QueryResultRow>(text: string, values?: any[]) => {
+    query: async <Row extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]) => {
       try {
         return await db.query<Row>(text, values);
       } catch (error) {
-        const postgresError = error as { code?: string; constraint?: string; message?: string; detail?: string };
+        const postgresError = readPostgresError(error);
+        if (!postgresError) throw error;
         const sqlState = postgresError.code;
         if (!sqlState?.startsWith("23") && sqlState !== "55000") throw error;
 
@@ -52,13 +53,24 @@ function translateConstraints(db: Queryable): Queryable {
           code = "INVALID_REQUEST";
         }
 
-        throw new DomainError(code, "Persistence constraint rejected the operation.", {
-          sqlState,
-          ...(constraint ? { constraint } : {}),
-          ...(postgresError.detail ? { detail: postgresError.detail } : {}),
-        });
+        throw new DomainError(code, "Persistence constraint rejected the operation.");
       }
     },
+  };
+}
+
+function readPostgresError(error: unknown): { code: string; constraint?: string; message?: string } | null {
+  if ((typeof error !== "object" && typeof error !== "function") || error === null || !("code" in error)) {
+    return null;
+  }
+  const code = error.code;
+  if (typeof code !== "string") return null;
+  const constraint = "constraint" in error && typeof error.constraint === "string" ? error.constraint : undefined;
+  const message = "message" in error && typeof error.message === "string" ? error.message : undefined;
+  return {
+    code,
+    ...(constraint ? { constraint } : {}),
+    ...(message ? { message } : {}),
   };
 }
 

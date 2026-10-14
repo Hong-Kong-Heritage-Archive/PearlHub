@@ -1,39 +1,200 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CloneArtifactService, DeleteArtifactService, ForkArtifactService, RestoreArtifactService } from "../../src/application/services.js";
+import { baselinePostgresMigrations, runPostgresMigrations } from "../../src/adapters/postgres-migrations.js";
 import { PostgresArtifactRepository, PostgresArtifactVersionRepository, PostgresCompatibilityReportRepository, PostgresDependencyRepository, PostgresLineageRepository, PostgresProvenanceRepository, PostgresTransactionManager, PostgresUserIdentityRepository } from "../../src/adapters/postgres.js";
 import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Dependency } from "../../src/domain/dependency.js";
+import { DevelopmentOnlyFakeAuthenticator } from "../../src/http/testing/development-fake-authenticator.js";
+import { createPostgresRuntime } from "../../src/runtime.js";
 import type { CompatibilityReport, Provenance } from "../../src/domain/records.js";
 
-const databaseUrl = process.env.TEST_DATABASE_URL;
-const integration = databaseUrl ? describe : describe.skip;
-const adminPool = databaseUrl ? new Pool({ connectionString: databaseUrl }) : undefined;
-const schema = `pearlhub_test_${randomUUID().replaceAll("-", "")}`;
-const pool = databaseUrl ? new Pool({ connectionString: databaseUrl, options: `-c search_path=${schema}` }) : undefined;
+function requiredTestDatabaseUrl(): string {
+  const value = process.env.TEST_DATABASE_URL;
+  if (!value) {
+    throw new Error("TEST_DATABASE_URL is required; configure a dedicated disposable PostgreSQL database ending in _test.");
+  }
+  let testUrl: URL;
+  try {
+    testUrl = new URL(value);
+  } catch {
+    throw new Error("TEST_DATABASE_URL must be a valid PostgreSQL connection URL.");
+  }
+  const databaseName = decodeURIComponent(testUrl.pathname.slice(1));
+  if (!["postgres:", "postgresql:"].includes(testUrl.protocol) || !databaseName.endsWith("_test")) {
+    throw new Error("TEST_DATABASE_URL must target a dedicated database whose name ends in _test.");
+  }
+  const applicationUrl = process.env.DATABASE_URL;
+  if (applicationUrl) {
+    const appUrl = new URL(applicationUrl);
+    if (decodeURIComponent(appUrl.pathname) === decodeURIComponent(testUrl.pathname)) {
+      throw new Error("TEST_DATABASE_URL must not target DATABASE_URL; use a separate disposable test database.");
+    }
+  }
+  return value;
+}
 
-integration("PostgreSQL persistence hardening", () => {
+const databaseUrl = requiredTestDatabaseUrl();
+const adminPool = new Pool({ connectionString: databaseUrl });
+const schema = `pearlhub_test_${randomUUID().replaceAll("-", "")}`;
+const pool = new Pool({ connectionString: databaseUrl, options: `-c search_path=${schema}` });
+
+describe("PostgreSQL persistence hardening", () => {
   const owners = [randomUUID(), randomUUID(), randomUUID()];
+  let schemaCreated = false;
+  let firstMigrationRun: string[] = [];
+  let repeatedMigrationRun: string[] = [];
 
   beforeAll(async () => {
-    await adminPool!.query(`CREATE SCHEMA ${schema}`);
-    for (const migrationFile of ["001_initial.sql", "002_persistence_hardening.sql"]) {
-      const migration = await readFile(resolve(process.cwd(), "migrations", migrationFile), "utf8");
-      await pool!.query(migration);
-    }
-    await pool!.query("INSERT INTO users (id, external_subject) VALUES ($1,$2),($3,$4),($5,$6)", [owners[0], "owner-a", owners[1], "owner-b", owners[2], "owner-c"]);
-    const migration = await readFile(resolve(process.cwd(), "migrations", "003_identity_mapping_and_tombstone_snapshots.sql"), "utf8");
-    await pool!.query(migration);
+    await adminPool.query(`CREATE SCHEMA ${schema}`);
+    schemaCreated = true;
+    firstMigrationRun = await runPostgresMigrations(pool);
+    await pool.query("INSERT INTO users (id, external_subject) VALUES ($1,$2),($3,$4),($5,$6)", [owners[0], "owner-a", owners[1], "owner-b", owners[2], "owner-c"]);
+    repeatedMigrationRun = await runPostgresMigrations(pool);
   });
 
   afterAll(async () => {
-    await pool!.end();
-    await adminPool!.query(`DROP SCHEMA ${schema} CASCADE`);
-    await adminPool!.end();
+    await pool.end();
+    try {
+      if (schemaCreated) await adminPool.query(`DROP SCHEMA ${schema} CASCADE`);
+    } finally {
+      await adminPool.end();
+    }
+  });
+
+  it("applies all migrations on a fresh schema and is repeat-safe", async () => {
+    expect(firstMigrationRun).toEqual([
+      "001_initial.sql",
+      "002_persistence_hardening.sql",
+      "003_identity_mapping_and_tombstone_snapshots.sql",
+    ]);
+    expect(repeatedMigrationRun).toEqual([]);
+    const ledger = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM schema_migrations",
+    );
+    expect(ledger.rows[0]?.count).toBe(3);
+  });
+
+  it("baselines a complete manually migrated schema without rerunning SQL", async () => {
+    const baselineSchema = `pearlhub_baseline_${randomUUID().replaceAll("-", "")}`;
+    const baselinePool = new Pool({
+      connectionString: databaseUrl,
+      options: `-c search_path=${baselineSchema}`,
+    });
+    let created = false;
+    try {
+      await adminPool.query(`CREATE SCHEMA ${baselineSchema}`);
+      created = true;
+      for (const migrationName of [
+        "001_initial.sql",
+        "002_persistence_hardening.sql",
+        "003_identity_mapping_and_tombstone_snapshots.sql",
+      ]) {
+        const sql = await readFile(resolve(process.cwd(), "migrations", migrationName), "utf8");
+        await baselinePool.query(sql);
+      }
+
+      expect(await baselinePostgresMigrations(baselinePool)).toEqual([
+        "001_initial.sql",
+        "002_persistence_hardening.sql",
+        "003_identity_mapping_and_tombstone_snapshots.sql",
+      ]);
+      expect(await runPostgresMigrations(baselinePool)).toEqual([]);
+    } finally {
+      await baselinePool.end();
+      if (created) await adminPool.query(`DROP SCHEMA ${baselineSchema} CASCADE`);
+    }
+  });
+
+  it("wires the real HTTP create route to PostgreSQL and reads the persisted row back", async () => {
+    const runtime = await createPostgresRuntime({
+      databaseUrl,
+      pool,
+      authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "integration-test-token"),
+    });
+    const headers = {
+      authorization: "Bearer integration-test-token",
+      "content-type": "application/json",
+    };
+    const requestBody = {
+      name: "PostgreSQL HTTP Artifact",
+      slug: "postgresql-http-artifact",
+      visibility: "public",
+    };
+
+    try {
+      const response = await runtime.app.request("/api/v1/artifacts", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(requestBody),
+      });
+      expect(response.status).toBe(201);
+      const body = await response.json() as { id: string; ownerId: string; name: string; slug: string; createdAt: string; updatedAt: string };
+      expect(body).toMatchObject({ ownerId: owners[0], ...requestBody });
+      expect(Number.isNaN(Date.parse(body.createdAt))).toBe(false);
+      expect(body.updatedAt).toBe(body.createdAt);
+
+      const stored = await pool.query<{ id: string; owner_id: string; name: string; slug: string; visibility: string; status: string; created_at: Date; updated_at: Date }>(
+        "SELECT id,owner_id,name,slug,visibility,status,created_at,updated_at FROM artifacts WHERE id=$1",
+        [body.id],
+      );
+      expect(stored.rows[0]).toEqual({
+        id: body.id,
+        owner_id: owners[0],
+        name: requestBody.name,
+        slug: requestBody.slug,
+        visibility: requestBody.visibility,
+        status: "active",
+        created_at: new Date(body.createdAt),
+        updated_at: new Date(body.updatedAt),
+      });
+
+      const duplicate = await runtime.app.request("/api/v1/artifacts", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(requestBody),
+      });
+      const duplicateBody = await duplicate.text();
+      expect(duplicate.status).toBe(409);
+      expect(duplicateBody).toContain("ARTIFACT_SLUG_CONFLICT");
+      expect(duplicateBody).not.toMatch(/sqlstate|constraint|stack|password/i);
+
+      const beforeInvalid = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM artifacts WHERE owner_id=$1",
+        [owners[0]],
+      );
+      const invalidSlug = await runtime.app.request("/api/v1/artifacts", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ...requestBody, slug: "Invalid Slug" }),
+      });
+      const invalidName = await runtime.app.request("/api/v1/artifacts", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ...requestBody, slug: "empty-name", name: " " }),
+      });
+      const afterInvalid = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM artifacts WHERE owner_id=$1",
+        [owners[0]],
+      );
+      expect(invalidSlug.status).toBe(400);
+      expect(invalidName.status).toBe(400);
+      expect(afterInvalid.rows[0]?.count).toBe(beforeInvalid.rows[0]?.count);
+
+      const ownerOverride = await runtime.app.request("/api/v1/artifacts", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ...requestBody, slug: "owner-override", ownerId: owners[1] }),
+      });
+      expect(ownerOverride.status).toBe(400);
+      expect(await pool.query("SELECT id FROM artifacts WHERE slug='owner-override'")).toMatchObject({ rows: [] });
+    } finally {
+      await runtime.close();
+    }
   });
 
   it("matches the frozen table, column, constraint, trigger, and index inventory", async () => {
@@ -42,7 +203,8 @@ integration("PostgreSQL persistence hardening", () => {
     );
     expect(tables.rows.map((row) => row.table_name)).toEqual([
       "artifact_lineage", "artifact_versions", "artifacts", "compatibility_reports",
-      "dependencies", "dependency_resolutions", "provenances", "tombstone_snapshots", "user_identities", "users",
+      "dependencies", "dependency_resolutions", "provenances", "schema_migrations",
+      "tombstone_snapshots", "user_identities", "users",
     ]);
 
     const columns = await pool!.query<{ table_name: string; column_name: string }>(
@@ -63,6 +225,7 @@ integration("PostgreSQL persistence hardening", () => {
       compatibility_reports: ["id", "artifact_version_id", "target_artifact_version_id", "status", "report", "created_at"],
       tombstone_snapshots: ["id", "artifact_id", "snapshot_number", "snapshot", "created_at"],
       user_identities: ["id", "user_id", "provider", "subject", "created_at"],
+      schema_migrations: ["version", "checksum", "applied_at"],
     };
     expect(Object.keys(actualColumns).sort()).toEqual(Object.keys(expectedColumns).sort());
     for (const [tableName, expected] of Object.entries(expectedColumns)) {
@@ -107,6 +270,7 @@ integration("PostgreSQL persistence hardening", () => {
       ["dependency_resolutions_version_target_fkey", "f"],
       ["provenances_artifact_version_id_fkey", "f"],
       ["provenances_pkey", "p"],
+      ["schema_migrations_pkey", "p"],
       ["users_external_subject_key", "u"],
       ["users_pkey", "p"],
       ["user_identities_pkey", "p"],
@@ -134,6 +298,7 @@ integration("PostgreSQL persistence hardening", () => {
       "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() ORDER BY indexname",
     );
     expect(indexes.rows.map((row) => row.indexname)).toEqual(expect.arrayContaining([
+      "schema_migrations_pkey",
       "artifacts_owner_idx", "artifacts_visibility_status_idx", "artifact_versions_artifact_idx",
       "artifact_lineage_parent_idx", "artifact_lineage_child_idx", "provenances_version_idx",
       "dependencies_source_idx", "dependencies_target_idx", "dependency_resolutions_dependency_idx",
@@ -162,7 +327,7 @@ integration("PostgreSQL persistence hardening", () => {
     expect(await identities.findUserId("oidc-example", "same-subject")).toBe(userWithTwoProviders);
     expect(await identities.findUserId("firebase", "other-subject")).toBe(otherUser);
     await expect(identities.create({ id: randomUUID(), userId: otherUser, provider: "firebase", subject: "same-subject", createdAt }))
-      .rejects.toMatchObject({ code: "INVALID_REQUEST", details: { sqlState: "23505", constraint: "user_identities_provider_subject_key" } });
+      .rejects.toMatchObject({ code: "INVALID_REQUEST", details: {} });
   });
 
   async function createArtifact(ownerId: string = owners[0]!, slug: string = randomUUID(), visibility: string = "public", status: string = "active"): Promise<string> {
@@ -193,13 +358,13 @@ integration("PostgreSQL persistence hardening", () => {
     expect((await artifacts.findById(artifact.id))?.snapshot()).toEqual(changed.snapshot());
 
     const duplicateSlug = Artifact.create({ id: randomUUID(), ownerId: artifact.ownerId, name: "Duplicate", slug: artifact.slug, visibility: "private", createdAt });
-    await expect(artifacts.create(duplicateSlug)).rejects.toMatchObject({ code: "ARTIFACT_SLUG_CONFLICT", details: { sqlState: "23505", constraint: "artifacts_owner_id_slug_key" } });
+    await expect(artifacts.create(duplicateSlug)).rejects.toMatchObject({ code: "ARTIFACT_SLUG_CONFLICT", details: {} });
     const invalidTombstone = Artifact.reconstitute({ ...artifact.snapshot(), id: randomUUID(), slug: randomUUID(), status: "tombstone", visibility: "public" });
-    await expect(artifacts.create(invalidTombstone)).rejects.toMatchObject({ code: "INVALID_REQUEST", details: { sqlState: "23514", constraint: "artifacts_tombstone_unlisted" } });
+    await expect(artifacts.create(invalidTombstone)).rejects.toMatchObject({ code: "INVALID_REQUEST", details: {} });
     const immutableTriggerProbe = new PostgresArtifactRepository({
       query: () => pool!.query("UPDATE artifacts SET name='Changed' WHERE id=$1", [artifact.id]),
     } as never);
-    await expect(immutableTriggerProbe.findById(artifact.id)).rejects.toMatchObject({ code: "ARTIFACT_NAME_IMMUTABLE", details: { sqlState: "55000", constraint: "artifacts_name_immutable" } });
+    await expect(immutableTriggerProbe.findById(artifact.id)).rejects.toMatchObject({ code: "ARTIFACT_NAME_IMMUTABLE", details: {} });
     const unexpectedError = Object.assign(new Error("connection interrupted"), { code: "08006" });
     const unexpectedErrorProbe = new PostgresArtifactRepository({ query: async () => { throw unexpectedError; } } as never);
     await expect(unexpectedErrorProbe.findById(artifact.id)).rejects.toBe(unexpectedError);
@@ -238,11 +403,11 @@ integration("PostgreSQL persistence hardening", () => {
     expect((await artifacts.findLatest(artifactId))?.version).toBe("10.0.0");
     expect(await artifacts.findLatest(randomUUID())).toBeNull();
 
-    await expect(artifacts.create(ArtifactVersion.create({ id: randomUUID(), artifactId, version: "10.0.0", contentHash: randomUUID(), contentLocation: "content/duplicate", createdAt, publishedAt: createdAt }))).rejects.toMatchObject({ code: "VERSION_ALREADY_EXISTS", details: { sqlState: "23505" } });
+    await expect(artifacts.create(ArtifactVersion.create({ id: randomUUID(), artifactId, version: "10.0.0", contentHash: randomUUID(), contentLocation: "content/duplicate", createdAt, publishedAt: createdAt }))).rejects.toMatchObject({ code: "VERSION_ALREADY_EXISTS", details: {} });
     const immutableTriggerProbe = new PostgresArtifactVersionRepository({
       query: () => pool!.query("UPDATE artifact_versions SET version='11.0.0' WHERE id=$1", [stored[0]!.id]),
     } as never);
-    await expect(immutableTriggerProbe.findById(stored[0]!.id)).rejects.toMatchObject({ code: "VERSION_IMMUTABLE", details: { sqlState: "55000" } });
+    await expect(immutableTriggerProbe.findById(stored[0]!.id)).rejects.toMatchObject({ code: "VERSION_IMMUTABLE", details: {} });
   });
 
   it("persists lineage, provenance, dependencies, and compatibility reports with stable empty and ordered reads", async () => {
@@ -272,7 +437,7 @@ integration("PostgreSQL persistence hardening", () => {
       "UPDATE artifact_lineage SET created_at=CASE id WHEN $1 THEN $4::timestamptz WHEN $2 THEN $5::timestamptz WHEN $3 THEN $6::timestamptz END WHERE id=ANY($7::uuid[])",
       [firstFork.id, secondFork.id, thirdFork.id, new Date("2026-01-03T00:00:00.000Z"), new Date("2026-01-02T00:00:00.000Z"), new Date("2026-01-01T00:00:00.000Z"), [firstFork.id, secondFork.id, thirdFork.id]],
     );
-    await expect(lineage.createFork(artifactA, artifactB)).rejects.toMatchObject({ code: "LINEAGE_INVALID", details: { sqlState: "23505" } });
+    await expect(lineage.createFork(artifactA, artifactB)).rejects.toMatchObject({ code: "LINEAGE_INVALID", details: {} });
     const expectDateOrder = (records: Array<{ id: string; date: Date }>) => {
       expect(records.map((record) => record.id)).toEqual([...records].sort((left, right) => left.date.getTime() - right.date.getTime() || left.id.localeCompare(right.id)).map((record) => record.id));
     };
@@ -306,7 +471,7 @@ integration("PostgreSQL persistence hardening", () => {
     const resolutionRows = await dependencies.findResolutions(dependency.id);
     expect(resolutionRows).toEqual([firstResolution, secondResolution]);
     expectDateOrder(resolutionRows.map(({ id, resolvedAt }) => ({ id, date: resolvedAt })));
-    await expect(dependencies.createResolution({ id: randomUUID(), dependencyId: dependency.id, resolvedArtifactVersionId: sourceVersionId, resolvedAt: resolutionAt })).rejects.toMatchObject({ code: "INVALID_REQUEST", details: { sqlState: "23503" } });
+    await expect(dependencies.createResolution({ id: randomUUID(), dependencyId: dependency.id, resolvedArtifactVersionId: sourceVersionId, resolvedAt: resolutionAt })).rejects.toMatchObject({ code: "INVALID_REQUEST", details: {} });
 
     const report: CompatibilityReport = { id: randomUUID(), artifactVersionId: sourceVersionId, targetArtifactVersionId: null, status: "compatible", report: { summary: "ok", score: 0.875, enabled: true, checks: [{ name: "schema", passed: true, metadata: { threshold: 2, labels: ["required", "stable"], nested: { active: false } } }] }, createdAt: new Date("2026-04-04T00:00:00.000Z") };
     const secondReport: CompatibilityReport = { ...report, id: randomUUID(), targetArtifactVersionId: targetVersionId, status: "incompatible", report: { summary: "breaking", breakingChanges: ["field removed"] }, createdAt: new Date("2026-04-04T00:00:01.000Z") };

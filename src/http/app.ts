@@ -123,7 +123,7 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
   app.onError((error, context) => {
     const mapped = mapHttpError(error);
     if (mapped.status === 500) {
-      console.error("Unhandled HTTP error", error);
+      console.error("Unhandled HTTP error");
     }
     return context.json(mapped.body, mapped.status);
   });

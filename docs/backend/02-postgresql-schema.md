@@ -1,6 +1,11 @@
 # 02 — PostgreSQL Schema
 
-The persistence contract is implemented by `migrations/001_initial.sql`, `migrations/002_persistence_hardening.sql`, and `migrations/003_identity_mapping_and_tombstone_snapshots.sql`. Together they create ten application tables. The schema uses PostgreSQL constraints and triggers for database invariants; SemVer parsing and range evaluation remain domain/application responsibilities.
+The persistence contract is implemented by `migrations/001_initial.sql`, `migrations/002_persistence_hardening.sql`, and `migrations/003_identity_mapping_and_tombstone_snapshots.sql`. Together they create ten application tables. The migration runner also creates the operational `schema_migrations` ledger; it is not a domain table. The schema uses PostgreSQL constraints and triggers for database invariants; SemVer parsing and range evaluation remain domain/application responsibilities.
+
+`npm run db:migrate` applies ordered migrations in transactions, records the migration
+filename and SHA-256 checksum, and verifies checksums on repeat runs. Applied migration
+files are immutable. The HTTP runtime checks that the ledger matches the checked-in
+migrations and refuses to serve against a missing or outdated schema.
 
 All primary keys are `UUID`. Timestamp columns are `TIMESTAMPTZ`; the initial migration supplies `now()` defaults where noted below. Foreign keys use PostgreSQL's default `NO ACTION` behavior, so referenced records are retained rather than cascaded away.
 
