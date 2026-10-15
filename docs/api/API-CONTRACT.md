@@ -4,14 +4,14 @@
 **API version:** v1  
 **Base path:** `/api/v1`
 
-This document is the human-readable API contract for PearlHub v0.1.
+This document records the human-readable API contract decisions for PearlHub
+v0.1. The repository-root `openapi.yaml` is the canonical machine-readable
+contract, and `/openapi.json` is the runtime-generated representation.
 
-It is intended to be the source of truth for:
-- Backend API implementation
-- OpenAPI definition
-- Contract tests
-- Frontend/API clients
-- AI coding assistants such as GitHub Copilot
+**Naming reconciliation:** Pearl is the product concept. Artifact is the
+API/domain resource name, and canonical API resource paths use
+`/api/v1/artifacts`. Ownership is derived from the authenticated principal;
+clients cannot provide `ownerId` in a write body.
 
 If implementation conflicts with a rule marked **FROZEN**, the implementation must be changed or the contract must be explicitly revised.
 
@@ -135,46 +135,49 @@ Base path:
 
 `/api/v1`
 
-### Pearl endpoints
+### Artifact endpoints
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/pearls` | Create Pearl |
-| GET | `/pearls` | List/search Pearls |
-| GET | `/pearls/{slug}` | Get Pearl |
-| PATCH | `/pearls/{slug}` | Update mutable metadata only |
-| DELETE | `/pearls/{slug}` | Create tombstone |
+Only `POST /artifacts` is implemented. All other operations below are
+planned and are not currently runtime routes. Paths are relative to `/api/v1`.
+
+| Method | Endpoint | Purpose | Status |
+|---|---|---|---|
+| POST | `/artifacts` | Create Artifact | Implemented |
+| GET | `/artifacts` | List/search Artifacts | Planned |
+| GET | `/artifacts/{artifactId}` | Get Artifact | Planned |
+| PATCH | `/artifacts/{artifactId}` | Update mutable metadata only | Planned |
+| DELETE | `/artifacts/{artifactId}` | Create tombstone | Planned |
 
 ### Version endpoints
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/pearls/{slug}/versions` | List versions |
-| GET | `/pearls/{slug}/versions/{version}` | Get immutable Artifact Version |
-| POST | `/pearls/{slug}/versions` | Create new immutable version |
+| Method | Endpoint | Purpose | Status |
+|---|---|---|---|
+| GET | `/artifacts/{artifactId}/versions` | List versions | Planned |
+| GET | `/artifacts/{artifactId}/versions/{version}` | Get immutable Artifact Version | Planned |
+| POST | `/artifacts/{artifactId}/versions` | Create new immutable version | Planned |
 
 There is no Version PATCH or DELETE endpoint in v0.1.
 
 ### Lineage / lifecycle endpoints
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/pearls/{slug}/fork` | Fork with permanent PearlHub lineage |
-| POST | `/pearls/{slug}/clone` | Clone without PearlHub lineage |
-| GET | `/pearls/{slug}/lineage` | Get lineage |
+| Method | Endpoint | Purpose | Status |
+|---|---|---|---|
+| POST | `/artifacts/{artifactId}/fork` | Fork with permanent PearlHub lineage | Planned |
+| POST | `/artifacts/{artifactId}/clone` | Clone without PearlHub lineage | Planned |
+| GET | `/artifacts/{artifactId}/lineage` | Get lineage | Planned |
 
 ### Import
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/pearls/import/github` | Import from GitHub with provenance metadata |
+| Method | Endpoint | Purpose | Status |
+|---|---|---|---|
+| POST | `/imports/github` | Import from GitHub with provenance metadata | Planned |
 
 ### Dependencies / compatibility
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/pearls/{slug}/versions/{version}/dependencies` | Get dependencies |
-| GET | `/pearls/{slug}/versions/{version}/compatibility` | Get compatibility reports |
+| Method | Endpoint | Purpose | Status |
+|---|---|---|---|
+| GET | `/artifacts/{artifactId}/versions/{version}/dependencies` | Get dependencies | Planned |
+| GET | `/artifacts/{artifactId}/versions/{version}/compatibility` | Get compatibility reports | Planned |
 
 ### Search
 
@@ -206,22 +209,23 @@ Clients do not define the canonical content hash.
 
 PearlHub uses **OpenAPI 3.1**.
 
-The canonical machine-readable API description is intended to be:
+The canonical machine-readable API description is:
 
 `openapi.yaml`
 
-That file is not yet checked into this repository. This document records the
-contract decisions in prose and is not a substitute for the required OpenAPI 3.1
-definition.
+The runtime-generated representation remains available at `/openapi.json`.
+Phase A defines only the implemented `POST /api/v1/artifacts` route in the
+canonical OpenAPI document; planned operations remain prose-only until
+implemented.
 
 The OpenAPI definition uses:
 
-- base path `/api/v1`
+- canonical resource path `/api/v1/artifacts`
 - resource-first design
 - domain/resource tags
 - strict request schemas
 - immutable fields marked `readOnly`
-- cursor-based pagination
+- cursor-based pagination for planned list operations
 
 ### Resource tags
 
@@ -233,13 +237,14 @@ The OpenAPI definition uses:
 - Compatibility
 - Lineage
 
-### Immutable Pearl fields
+### Immutable Artifact fields
 
-The Pearl schema marks these as `readOnly`:
+The Artifact response schema marks these JSON fields as `readOnly`:
 
+- `id`
 - `name`
 - `slug`
-- `owner`
+- `ownerId`
 
 ### Visibility
 
@@ -447,15 +452,18 @@ HTTP header rather than placed in `error.details`.
 
 **STATUS: FROZEN**
 
+The canonical create operation uses the `BearerAuth` HTTP bearer scheme. Its
+identity provider remains provider-neutral.
+
 ### 1. Authentication
 
 Protected write operations require Bearer authentication.
 
-Protected operations include:
+The currently implemented protected operation is `POST /artifacts`. Planned
+protected operations include:
 
-- `POST /pearls`
-- `PATCH /pearls/{slug}`
-- `DELETE /pearls/{slug}`
+- `PATCH /artifacts/{artifactId}`
+- `DELETE /artifacts/{artifactId}`
 - create Version
 - Fork
 - Clone
@@ -465,10 +473,9 @@ OpenAPI security scheme:
 
 ```yaml
 securitySchemes:
-  bearerAuth:
+  BearerAuth:
     type: http
     scheme: bearer
-    bearerFormat: JWT
 ```
 
 ### 2. Authenticated identity
@@ -477,10 +484,10 @@ Authenticated identity is derived from the access token.
 
 The client must not be trusted to provide ownership in the request body.
 
-On Pearl creation:
+On Artifact creation:
 
-- `owner` is assigned from the authenticated principal
-- `owner` is immutable
+- `ownerId` is assigned from the authenticated principal
+- `ownerId` is immutable
 
 ### 3. Authentication vs Authorization
 
@@ -527,9 +534,10 @@ Unlisted Pearls:
 
 Private Pearls are accessible only by their owner.
 
-### 6. `GET /pearls` visibility filtering
+### 6. Planned `GET /artifacts` visibility filtering
 
-`GET /api/v1/pearls` is a public API surface, but it is **not a public dataset**.
+`GET /api/v1/artifacts` is planned and will be a public API surface, but it will
+not be a public dataset.
 
 Anonymous caller:
 
@@ -549,7 +557,7 @@ Unlisted Pearls are excluded from normal discovery by default.
 
 A query such as:
 
-`GET /pearls?visibility=private`
+`GET /artifacts?visibility=private`
 
 does not grant access to other users' private Pearls.
 
@@ -559,8 +567,8 @@ The server must apply authorization and visibility filtering based on the authen
 
 These are separate concepts:
 
-- `GET /pearls/{slug}` = direct resource lookup
-- `GET /pearls` = discovery/listing
+- `GET /artifacts/{artifactId}` = direct resource lookup
+- `GET /artifacts` = discovery/listing
 
 An unlisted Pearl may be retrieved by an authenticated caller who has its secret URL,
 while remaining absent from ordinary discovery.
@@ -575,19 +583,20 @@ A tombstoned Pearl:
 - has `status = tombstone`
 - has `visibility = unlisted`
 - is unreadable to normal users; non-admin reads return `410 Gone`
-- can be restored only by an Admin, preserving its identity, history, and lineage
+- may only be restored by a privileged Admin operation; no restore endpoint is
+  implemented
 - cannot be restored by normal user operations
 
 ### 10. Fork / Clone ownership
 
-Fork:
+Fork (planned):
 
 - requires authentication
 - creates a new Pearl
 - authenticated user becomes owner
 - establishes permanent PearlHub lineage
 
-Clone:
+Clone (planned):
 
 - requires authentication
 - creates a new Pearl
