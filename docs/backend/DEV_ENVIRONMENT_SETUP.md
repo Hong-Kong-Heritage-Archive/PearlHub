@@ -2,6 +2,10 @@
 
 PearlHub's development backend runs on the host with Node.js. Docker Compose is only for external development dependencies; it does not build or run the backend.
 
+The canonical OpenAPI 3.1 contract is [the repository-root `openapi.yaml`](../../openapi.yaml).
+When the server is running, its runtime-generated representation is available at
+`http://localhost:8080/openapi.json`; it includes only registered runtime routes.
+
 ## Prerequisites
 
 - Node.js 20 or newer and npm

@@ -1,0 +1,144 @@
+openapi: 3.1.0
+info:
+  title: PearlHub API
+  version: 1.0.0
+  description: >-
+    PearlHub's API uses Artifact as its resource name. Pearl is the product
+    concept. The implemented API is currently limited to Artifact creation.
+paths:
+  /api/v1/artifacts:
+    post:
+      tags:
+        - Artifacts
+      summary: Create an Artifact
+      description: Creates an Artifact owned by the authenticated internal user.
+      operationId: createArtifact
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateArtifactRequest"
+      responses:
+        "201":
+          description: Artifact created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Artifact"
+        "400":
+          description: Malformed or invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: The owner already has an Artifact with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Unexpected internal error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    CreateArtifactRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - slug
+        - visibility
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Leading and trailing whitespace is trimmed before validation.
+        slug:
+          type: string
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        visibility:
+          type: string
+          enum:
+            - private
+            - unlisted
+            - public
+    Artifact:
+      type: object
+      required:
+        - id
+        - ownerId
+        - name
+        - slug
+        - visibility
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          readOnly: true
+        ownerId:
+          type: string
+          readOnly: true
+          description: Derived from the authenticated principal, never from the request body.
+        name:
+          type: string
+          readOnly: true
+        slug:
+          type: string
+          readOnly: true
+        visibility:
+          type: string
+          enum:
+            - private
+            - unlisted
+            - public
+        status:
+          type: string
+          enum:
+            - active
+            - tombstone
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ApiError:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - details
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable UPPER_SNAKE_CASE code.
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
