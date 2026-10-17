@@ -3,9 +3,10 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CloneArtifactService, DeleteArtifactService, ForkArtifactService, RestoreArtifactService } from "../../src/application/services.js";
+import { CloneArtifactService, DeleteArtifactService, ForkArtifactService, PublishVersionService, RestoreArtifactService } from "../../src/application/services.js";
 import { baselinePostgresMigrations, runPostgresMigrations } from "../../src/adapters/postgres-migrations.js";
-import { PostgresArtifactRepository, PostgresArtifactVersionRepository, PostgresCompatibilityReportRepository, PostgresDependencyRepository, PostgresLineageRepository, PostgresProvenanceRepository, PostgresTransactionManager, PostgresUserIdentityRepository } from "../../src/adapters/postgres.js";
+import { PostgresArtifactDiscoveryRepository, PostgresArtifactRepository, PostgresArtifactVersionRepository, PostgresCompatibilityReportRepository, PostgresDependencyRepository, PostgresLineageRepository, PostgresProvenanceRepository, PostgresTransactionManager, PostgresUserIdentityRepository } from "../../src/adapters/postgres.js";
+import { MemoryArtifactContentStore } from "../../src/adapters/content-store.js";
 import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Dependency } from "../../src/domain/dependency.js";
@@ -71,12 +72,13 @@ describe("PostgreSQL persistence hardening", () => {
       "001_initial.sql",
       "002_persistence_hardening.sql",
       "003_identity_mapping_and_tombstone_snapshots.sql",
+      "004_artifact_discovery.sql",
     ]);
     expect(repeatedMigrationRun).toEqual([]);
     const ledger = await pool.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM schema_migrations",
     );
-    expect(ledger.rows[0]?.count).toBe(3);
+    expect(ledger.rows[0]?.count).toBe(4);
   });
 
   it("baselines a complete manually migrated schema without rerunning SQL", async () => {
@@ -93,6 +95,7 @@ describe("PostgreSQL persistence hardening", () => {
         "001_initial.sql",
         "002_persistence_hardening.sql",
         "003_identity_mapping_and_tombstone_snapshots.sql",
+        "004_artifact_discovery.sql",
       ]) {
         const sql = await readFile(resolve(process.cwd(), "migrations", migrationName), "utf8");
         await baselinePool.query(sql);
@@ -102,6 +105,7 @@ describe("PostgreSQL persistence hardening", () => {
         "001_initial.sql",
         "002_persistence_hardening.sql",
         "003_identity_mapping_and_tombstone_snapshots.sql",
+        "004_artifact_discovery.sql",
       ]);
       expect(await runPostgresMigrations(baselinePool)).toEqual([]);
     } finally {
@@ -115,6 +119,7 @@ describe("PostgreSQL persistence hardening", () => {
       databaseUrl,
       pool,
       authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "integration-test-token"),
+      contentStore: new MemoryArtifactContentStore(),
     });
     const headers = {
       authorization: "Bearer integration-test-token",
@@ -197,11 +202,121 @@ describe("PostgreSQL persistence hardening", () => {
     }
   });
 
+  it("discovers with literal search, AND tags, stable cursors, and authorization-safe visibility", async () => {
+    const transactions = new PostgresTransactionManager(pool!);
+    const artifacts = new PostgresArtifactRepository(transactions.database);
+    const versions = new PostgresArtifactVersionRepository(transactions.database);
+    const discovery = new PostgresArtifactDiscoveryRepository(transactions.database);
+    const contentStore = new MemoryArtifactContentStore();
+    const access = { canRead: async () => true, canWrite: async () => true };
+    const publish = new PublishVersionService(
+      artifacts,
+      versions,
+      contentStore,
+      new PostgresDependencyRepository(transactions.database),
+      access,
+      discovery,
+      transactions,
+      { next: randomUUID },
+      { now: () => new Date("2026-06-01T00:00:00.000Z") },
+    );
+    const create = async (ownerId: string, name: string, visibility: "private" | "unlisted" | "public", tags: string[]) => {
+      const artifact = Artifact.create({
+        id: randomUUID(),
+        ownerId,
+        name,
+        slug: randomUUID(),
+        visibility,
+        createdAt: new Date("2026-06-01T00:00:00.000Z"),
+      });
+      await artifacts.create(artifact);
+      await publish.execute({ actorId: ownerId, artifactId: artifact.id, version: "1.0.0", content: { tags } });
+      return artifact;
+    };
+    const publicLiteral = await create(owners[0]!, "Discovery Literal 100%", "public", ["obsolete"]);
+    await publish.execute({
+      actorId: owners[0]!,
+      artifactId: publicLiteral.id,
+      version: "10.0.0",
+      content: { tags: [" RAG ", "language-model"] },
+    });
+    const publicSecond = await create(owners[0]!, "Discovery Second", "public", ["rag"]);
+    const ownerPrivate = await create(owners[0]!, "Discovery Owner Private", "private", ["rag", "language-model"]);
+    const otherPrivate = await create(owners[1]!, "Discovery Other Private", "private", ["rag", "language-model"]);
+    const ownerUnlisted = await create(owners[0]!, "Discovery Owner Unlisted", "unlisted", ["rag"]);
+    const tombstone = await create(owners[0]!, "Discovery Tombstone", "public", ["rag"]);
+    await new DeleteArtifactService(artifacts, access, { now: () => new Date("2026-06-02T00:00:00.000Z") }, transactions)
+      .execute({ actorId: owners[0]!, artifactId: tombstone.id });
+
+    const runtime = await createPostgresRuntime({
+      databaseUrl,
+      pool,
+      authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "discovery-integration-token"),
+      contentStore,
+    });
+    try {
+      const anonymousHeaders = { "content-type": "text/plain" };
+      const literal = await runtime.app.request("/api/v1/artifacts?q=%25", { headers: anonymousHeaders });
+      expect(literal.status).toBe(200);
+      const literalBody = await literal.json() as { items: Array<{ id: string; ownerId?: string }> };
+      expect(literalBody.items.map((item) => item.id)).toEqual([publicLiteral.id]);
+      expect(literalBody.items[0]).not.toHaveProperty("ownerId");
+
+      const tagMatch = await runtime.app.request("/api/v1/artifacts?tag=rag&tag=language-model", { headers: anonymousHeaders });
+      expect((await tagMatch.json()).items.map((item: { id: string }) => item.id)).toEqual([publicLiteral.id]);
+      const staleTagMatch = await runtime.app.request("/api/v1/artifacts?tag=obsolete", { headers: anonymousHeaders });
+      expect((await staleTagMatch.json()).items).toEqual([]);
+
+      const nameSorted = await runtime.app.request("/api/v1/artifacts?q=Discovery&visibility=public&sort=name&order=asc&limit=10");
+      expect((await nameSorted.json()).items.map((item: { name: string }) => item.name))
+        .toEqual(["Discovery Literal 100%", "Discovery Second"]);
+      const updatedSorted = await runtime.app.request("/api/v1/artifacts?q=Discovery&visibility=public&sort=updatedAt&order=desc&limit=10");
+      const updatedIds = (await updatedSorted.json()).items.map((item: { id: string }) => item.id);
+      expect(updatedIds).toEqual([publicLiteral.id, publicSecond.id].sort().reverse());
+
+      const firstPage = await runtime.app.request("/api/v1/artifacts?q=Discovery&visibility=public&sort=createdAt&order=asc&limit=1");
+      expect(firstPage.status).toBe(200);
+      const first = await firstPage.json() as { items: Array<{ id: string }>; nextCursor: string | null };
+      expect(first.items).toHaveLength(1);
+      expect(first.nextCursor).toBeTruthy();
+      const nextUrl = new URL("/api/v1/artifacts?q=Discovery&visibility=public&sort=createdAt&order=asc&limit=1", "http://localhost");
+      nextUrl.searchParams.set("cursor", first.nextCursor!);
+      const secondPage = await runtime.app.request(`${nextUrl.pathname}${nextUrl.search}`);
+      const second = await secondPage.json() as { items: Array<{ id: string }>; nextCursor: string | null };
+      expect(second.items).toHaveLength(1);
+      expect(second.items[0]?.id).not.toBe(first.items[0]?.id);
+      expect(second.nextCursor).toBeNull();
+      expect(new Set([first.items[0]!.id, second.items[0]!.id])).toEqual(new Set([publicLiteral.id, publicSecond.id]));
+
+      const ownerPrivatePage = await runtime.app.request("/api/v1/artifacts?visibility=private", {
+        headers: { authorization: "Bearer discovery-integration-token" },
+      });
+      expect((await ownerPrivatePage.json()).items.map((item: { id: string }) => item.id)).toEqual([ownerPrivate.id]);
+      const ownerUnlistedPage = await runtime.app.request("/api/v1/artifacts?visibility=unlisted", {
+        headers: { authorization: "Bearer discovery-integration-token" },
+      });
+      expect((await ownerUnlistedPage.json()).items.map((item: { id: string }) => item.id)).toEqual([ownerUnlisted.id]);
+      const anonymousPrivatePage = await runtime.app.request("/api/v1/artifacts?visibility=private");
+      expect((await anonymousPrivatePage.json()).items).toEqual([]);
+      const ownerDefaultPage = await runtime.app.request("/api/v1/artifacts?sort=name&order=asc", {
+        headers: { authorization: "Bearer discovery-integration-token" },
+      });
+      const ownerDefaultIds = (await ownerDefaultPage.json()).items.map((item: { id: string }) => item.id);
+      expect(ownerDefaultIds).toContain(ownerPrivate.id);
+      expect(ownerDefaultIds).not.toContain(ownerUnlisted.id);
+      expect(ownerDefaultIds).not.toContain(otherPrivate.id);
+      expect(ownerDefaultIds).not.toContain(tombstone.id);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("matches the frozen table, column, constraint, trigger, and index inventory", async () => {
     const tables = await pool!.query<{ table_name: string }>(
       "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_type='BASE TABLE' ORDER BY table_name",
     );
     expect(tables.rows.map((row) => row.table_name)).toEqual([
+      "artifact_discovery_index", "artifact_discovery_index_state",
       "artifact_lineage", "artifact_versions", "artifacts", "compatibility_reports",
       "dependencies", "dependency_resolutions", "provenances", "schema_migrations",
       "tombstone_snapshots", "user_identities", "users",
@@ -218,6 +333,8 @@ describe("PostgreSQL persistence hardening", () => {
       users: ["id", "external_subject", "created_at", "updated_at"],
       artifacts: ["id", "owner_id", "name", "slug", "visibility", "status", "created_at", "updated_at"],
       artifact_versions: ["id", "artifact_id", "version", "content_hash", "content_location", "created_at", "published_at"],
+      artifact_discovery_index: ["artifact_id", "artifact_version_id", "tags"],
+      artifact_discovery_index_state: ["singleton", "ready"],
       artifact_lineage: ["id", "parent_artifact_id", "child_artifact_id", "source_version_id", "relationship_type", "created_at"],
       provenances: ["id", "artifact_version_id", "source_type", "source_url", "source_ref", "imported_at"],
       dependencies: ["id", "artifact_version_id", "target_artifact_id", "declared_range", "created_at"],
@@ -236,6 +353,13 @@ describe("PostgreSQL persistence hardening", () => {
       "SELECT conname,contype FROM pg_constraint JOIN pg_class ON pg_class.oid=conrelid JOIN pg_namespace ON pg_namespace.oid=pg_class.relnamespace WHERE nspname=current_schema() ORDER BY conname",
     );
     const expectedConstraints: [string, string][] = [
+      ["artifact_discovery_index_artifact_id_fkey", "f"],
+      ["artifact_discovery_index_artifact_version_id_artifact_id_fkey", "f"],
+      ["artifact_discovery_index_pkey", "p"],
+      ["artifact_discovery_index_tags_count_check", "c"],
+      ["artifact_discovery_index_tags_no_null_check", "c"],
+      ["artifact_discovery_index_state_pkey", "p"],
+      ["artifact_discovery_index_state_singleton_check", "c"],
       ["artifact_lineage_child_artifact_id_fkey", "f"],
       ["artifact_lineage_check", "c"],
       ["artifact_lineage_parent_artifact_id_child_artifact_id_relat_key", "u"],
@@ -300,6 +424,9 @@ describe("PostgreSQL persistence hardening", () => {
     expect(indexes.rows.map((row) => row.indexname)).toEqual(expect.arrayContaining([
       "schema_migrations_pkey",
       "artifacts_owner_idx", "artifacts_visibility_status_idx", "artifact_versions_artifact_idx",
+      "artifact_discovery_tags_gin_idx", "artifacts_discovery_name_trgm_idx",
+      "artifacts_discovery_slug_trgm_idx", "artifacts_discovery_created_idx",
+      "artifacts_discovery_updated_idx", "artifacts_discovery_name_idx",
       "artifact_lineage_parent_idx", "artifact_lineage_child_idx", "provenances_version_idx",
       "dependencies_source_idx", "dependencies_target_idx", "dependency_resolutions_dependency_idx",
       "compatibility_reports_source_idx", "compatibility_reports_target_idx",
@@ -684,15 +811,17 @@ describe("PostgreSQL persistence hardening", () => {
   it("preserves fork lineage, clone behavior, and lineage after tombstoning", async () => {
     const sourceId = await createArtifact();
     await createVersion(sourceId);
-    const artifacts = new PostgresArtifactRepository(pool!);
-    const versions = new PostgresArtifactVersionRepository(pool!);
-    const dependencies = new PostgresDependencyRepository(pool!);
-    const lineage = new PostgresLineageRepository(pool!);
+    const transactions = new PostgresTransactionManager(pool!);
+    const artifacts = new PostgresArtifactRepository(transactions.database);
+    const versions = new PostgresArtifactVersionRepository(transactions.database);
+    const discovery = new PostgresArtifactDiscoveryRepository(transactions.database);
+    const dependencies = new PostgresDependencyRepository(transactions.database);
+    const lineage = new PostgresLineageRepository(transactions.database);
     const access = { canRead: async () => false, canWrite: async () => false };
     const contentStore = { put: async () => "loc", get: async () => "{}", exists: async () => true };
-    const clone = await new CloneArtifactService(artifacts, versions, contentStore, dependencies, access).execute({ actorId: owners[0]!, sourceArtifactId: sourceId, name: "Clone", slug: randomUUID() });
+    const clone = await new CloneArtifactService(artifacts, versions, contentStore, dependencies, access, discovery, transactions).execute({ actorId: owners[0]!, sourceArtifactId: sourceId, name: "Clone", slug: randomUUID() });
     expect(await lineage.getParents(clone.id)).toEqual([]);
-    const fork = await new ForkArtifactService(artifacts, versions, contentStore, dependencies, lineage, access).execute({ actorId: owners[0]!, sourceArtifactId: sourceId, name: "Fork", slug: randomUUID() });
+    const fork = await new ForkArtifactService(artifacts, versions, contentStore, dependencies, lineage, access, discovery, transactions).execute({ actorId: owners[0]!, sourceArtifactId: sourceId, name: "Fork", slug: randomUUID() });
     expect((await lineage.getParents(fork.id)).map((item) => item.parentArtifactId)).toEqual([sourceId]);
     await expect(lineage.createFork(sourceId, fork.id)).rejects.toMatchObject({ code: "LINEAGE_INVALID" });
     await expect(lineage.createFork(sourceId, sourceId)).rejects.toMatchObject({ code: "LINEAGE_INVALID" });

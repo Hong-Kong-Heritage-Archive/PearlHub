@@ -1,10 +1,12 @@
 import { DomainError } from "./errors.js";
+import { normalizePearlContent } from "./discovery.js";
 import { parseSemVer } from "./semver.js";
 
 export interface PearlContent {
   version: string;
   skill: Record<string, unknown>;
   knowledge: unknown[];
+  tags?: string[];
   [key: string]: unknown;
 }
 
@@ -13,7 +15,7 @@ export function parsePearlContent(value: unknown): PearlContent {
     throw new DomainError("IMPORT_INVALID_FORMAT", "Pearl content must be a JSON object with a SemVer version, Skill object, and Knowledge array.");
   }
   parseSemVer(value.version);
-  return value as PearlContent;
+  return normalizePearlContent(value) as PearlContent;
 }
 
 function isJsonValue(value: unknown, ancestors = new WeakSet<object>()): boolean {

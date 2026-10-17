@@ -6,17 +6,30 @@ import { createHttpApp } from "../../src/http/app.js";
 import { DevelopmentOnlyFakeAuthenticator } from "../../src/http/testing/development-fake-authenticator.js";
 
 interface OpenApiSchema {
-  type?: string;
+  type?: string | string[];
   properties?: Record<string, OpenApiSchema>;
   required?: string[];
   additionalProperties?: boolean | OpenApiSchema;
   enum?: string[];
   readOnly?: boolean;
+  minLength?: number;
+  maxLength?: number;
+  maxItems?: number;
+  minimum?: number;
+  maximum?: number;
+  default?: unknown;
   $ref?: string;
 }
 
 interface OpenApiOperation {
   security?: Array<Record<string, string[]>>;
+  parameters?: Array<{
+    name: string;
+    in: string;
+    style?: string;
+    explode?: boolean;
+    schema?: OpenApiSchema;
+  }>;
   requestBody?: {
     required?: boolean;
     content?: Record<string, { schema?: OpenApiSchema }>;
@@ -29,7 +42,7 @@ interface OpenApiOperation {
 interface OpenApiDocument {
   openapi: string;
   info: { title: string; version: string };
-  paths: Record<string, { post?: OpenApiOperation }>;
+  paths: Record<string, { get?: OpenApiOperation; post?: OpenApiOperation }>;
   components: {
     schemas: Record<string, OpenApiSchema>;
     securitySchemes: Record<string, Record<string, unknown>>;
@@ -56,18 +69,56 @@ function createRuntimeApp() {
         createdAt: new Date("2026-01-01T00:00:00.000Z"),
       }),
     },
+    listArtifacts: {
+      execute: async () => ({ items: [], nextCursor: null }),
+    },
     authenticator: new DevelopmentOnlyFakeAuthenticator(ownerId, "contract-test-token"),
   });
 }
 
 describe("canonical OpenAPI contract", () => {
-  it("defines only the implemented Artifact creation operation under /api/v1", () => {
+  it("defines only the implemented Artifact discovery and creation operations under /api/v1", () => {
     expect(canonicalDocument.openapi).toBe("3.1.0");
     expect(canonicalDocument.info.title).toBe("PearlHub API");
     expect(canonicalDocument.paths).toHaveProperty("/api/v1/artifacts");
     expect(canonicalDocument.paths).not.toHaveProperty("/api/v1/pearls");
     expect(Object.keys(canonicalDocument.paths)).toEqual(["/api/v1/artifacts"]);
+    expect(canonicalDocument.paths["/api/v1/artifacts"]?.get).toBeDefined();
     expect(canonicalDocument.paths["/api/v1/artifacts"]?.post).toBeDefined();
+  });
+
+  it("documents the optional-auth discovery query and owner-free summary", () => {
+    const operation = canonicalDocument.paths["/api/v1/artifacts"]?.get;
+    const summary = canonicalDocument.components.schemas.ArtifactSummary;
+    const page = canonicalDocument.components.schemas.ArtifactDiscoveryPage;
+    const parameters = new Map(operation?.parameters?.map((parameter) => [parameter.name, parameter]));
+
+    expect(operation?.security).toEqual([{}, { BearerAuth: [] }]);
+    expect(operation?.parameters?.map(({ name }) => name)).toEqual([
+      "q", "tag", "limit", "cursor", "sort", "order", "visibility",
+    ]);
+    expect(Object.keys(summary?.properties ?? {}).sort()).toEqual([
+      "createdAt", "id", "name", "slug", "tags", "updatedAt", "visibility",
+    ]);
+    expect(summary?.properties).not.toHaveProperty("ownerId");
+    expect(page?.required?.slice().sort()).toEqual(["items", "nextCursor"]);
+    expect(parameters.get("q")?.schema).toMatchObject({ type: "string", minLength: 1, maxLength: 100 });
+    expect(parameters.get("tag")).toMatchObject({
+      style: "form",
+      explode: true,
+      schema: { type: "array", maxItems: 10 },
+    });
+    expect(parameters.get("limit")?.schema).toMatchObject({
+      type: "integer",
+      minimum: 1,
+      maximum: 100,
+      default: 20,
+    });
+    expect(parameters.get("sort")?.schema?.enum).toEqual(["createdAt", "updatedAt", "name"]);
+    expect(parameters.get("order")?.schema?.enum).toEqual(["asc", "desc"]);
+    expect(operation?.responses).toHaveProperty("200");
+    expect(operation?.responses).toHaveProperty("400");
+    expect(operation?.responses).toHaveProperty("503");
   });
 
   it("strictly describes create identity, visibility, and response fields", () => {
@@ -130,6 +181,29 @@ describe("canonical OpenAPI contract", () => {
 
     expect(response.status).toBe(200);
     expect(runtimeDocument.openapi).toBe("3.1.0");
+    const canonicalDiscovery = canonicalDocument.paths["/api/v1/artifacts"]?.get;
+    const runtimeDiscovery = runtimeDocument.paths["/api/v1/artifacts"]?.get;
+    expect(runtimeDiscovery?.security).toEqual(canonicalDiscovery?.security);
+    expect(runtimeDiscovery?.parameters?.map(({ name }) => name).sort()).toEqual(
+      canonicalDiscovery?.parameters?.map(({ name }) => name).sort(),
+    );
+    expect(Object.keys(runtimeDiscovery?.responses ?? {}).sort()).toEqual(
+      Object.keys(canonicalDiscovery?.responses ?? {}).sort(),
+    );
+    const canonicalDiscoveryResponse = resolveSchema(
+      canonicalDocument,
+      canonicalDiscovery?.responses?.["200"]?.content?.["application/json"]?.schema,
+    );
+    const runtimeDiscoveryResponse = resolveSchema(
+      runtimeDocument,
+      runtimeDiscovery?.responses?.["200"]?.content?.["application/json"]?.schema,
+    );
+    expect(Object.keys(runtimeDiscoveryResponse?.properties ?? {}).sort()).toEqual(
+      Object.keys(canonicalDiscoveryResponse?.properties ?? {}).sort(),
+    );
+    expect(runtimeDiscoveryResponse?.required?.slice().sort()).toEqual(
+      canonicalDiscoveryResponse?.required?.slice().sort(),
+    );
     expect(runtimeOperation).toBeDefined();
     expect(runtimeOperation?.security).toEqual(canonicalOperation?.security);
     expect(Object.keys(runtimeOperation?.responses ?? {}).sort()).toEqual(

@@ -214,9 +214,8 @@ The canonical machine-readable API description is:
 `openapi.yaml`
 
 The runtime-generated representation remains available at `/openapi.json`.
-Phase A defines only the implemented `POST /api/v1/artifacts` route in the
-canonical OpenAPI document; planned operations remain prose-only until
-implemented.
+The canonical OpenAPI document defines Artifact creation and the Phase B
+discovery operation, `GET /api/v1/artifacts`.
 
 The OpenAPI definition uses:
 
@@ -225,7 +224,7 @@ The OpenAPI definition uses:
 - domain/resource tags
 - strict request schemas
 - immutable fields marked `readOnly`
-- cursor-based pagination for planned list operations
+- cursor-based pagination for list operations
 
 ### Resource tags
 
@@ -534,24 +533,29 @@ Unlisted Pearls:
 
 Private Pearls are accessible only by their owner.
 
-### 6. Planned `GET /artifacts` visibility filtering
+### 6. `GET /api/v1/artifacts` visibility filtering
 
-`GET /api/v1/artifacts` is planned and will be a public API surface, but it will
-not be a public dataset.
+Discovery is an anonymously accessible API surface, but it is not a public
+dataset.
 
 Anonymous caller:
 
-- receives discoverable `public` Pearls
+- receives active `public` Pearls
 
 Authenticated caller:
 
-- receives `public` Pearls
-- may also receive their own `unlisted` Pearls
-- may also receive their own `private` Pearls
+- receives active `public` Pearls
+- may also receive their own active `private` Pearls
+- receives their own `unlisted` Pearls only when explicitly filtering for
+  `visibility=unlisted`
 
 A caller must never receive another user's private Pearl.
 
-Unlisted Pearls are excluded from normal discovery by default.
+Unlisted Pearls are excluded from normal discovery. A visibility filter only
+narrows the set already authorized for that caller: `visibility=private` and
+`visibility=unlisted` return only the authenticated owner's matching Pearls.
+Anonymous callers receive no private or unlisted Pearls, regardless of the
+filter. Tombstones are always excluded.
 
 ### 7. Query parameters cannot bypass authorization
 
@@ -562,6 +566,36 @@ A query such as:
 does not grant access to other users' private Pearls.
 
 The server must apply authorization and visibility filtering based on the authenticated principal.
+
+### 7.1 Discovery query, pagination, and response
+
+`GET /api/v1/artifacts` supports:
+
+| Parameter | Semantics |
+|---|---|
+| `q` | Optional, trimmed, 1–100 characters; case-insensitive literal substring search over Artifact name or slug. `%`, `_`, and backslash are treated literally. |
+| `tag` | Repeatable, at most 10 tags; values are trimmed and lowercased, duplicates after normalization are rejected, and all supplied tags must match. |
+| `limit` | Integer 1–100; defaults to 20. |
+| `cursor` | Opaque, filter-bound cursor for the next page. |
+| `sort` | `createdAt` (default), `updatedAt`, or case-insensitive `name`. |
+| `order` | `desc` (default) or `asc`. |
+| `visibility` | Optional `public`, `private`, or `unlisted` narrowing filter. |
+
+Results use `{ "items": [...], "nextCursor": "..." }`. `nextCursor` is `null`
+when there is no next page. The API does not return totals. Pages use keyset
+pagination with `id` as a same-direction tie-breaker for every sort.
+
+Search tags are optional top-level fields in immutable Pearl version content;
+they are not accepted in the strict Artifact-create request. Tags are trimmed,
+lowercased, limited to 10 per Pearl and 50 characters each, and must match
+lowercase kebab syntax (`[a-z0-9]+(-[a-z0-9]+)*`). Empty, malformed, and
+duplicate tags are rejected. Matching is exact and case-insensitive after
+normalization.
+
+Discovery is not enabled until a provider-neutral application reindex has
+projected tags from each Artifact's latest SemVer version through the configured
+content-store port. If content is unavailable or invalid, the index remains
+not ready and discovery fails closed.
 
 ### 8. Direct lookup vs discovery
 

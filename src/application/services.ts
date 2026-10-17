@@ -4,10 +4,12 @@ import { Artifact, type ArtifactVisibility } from "../domain/artifact.js";
 import { ArtifactVersion } from "../domain/artifact-version.js";
 import { Dependency } from "../domain/dependency.js";
 import { DomainError } from "../domain/errors.js";
+import { normalizePearlContent, readPearlTags } from "../domain/discovery.js";
 import { parsePearlContent } from "../domain/pearl.js";
 import { createForkLineage, type CompatibilityReport, type DependencyResolution, type Provenance } from "../domain/records.js";
 import type {
   ArtifactContentStore,
+  ArtifactDiscoveryRepository,
   ArtifactRepository,
   ArtifactVersionRepository,
   Clock,
@@ -61,9 +63,10 @@ export class PublishVersionService {
     private readonly contentStore: ArtifactContentStore,
     private readonly dependencies: DependencyRepository,
     private readonly access: AccessPolicy,
+    private readonly discovery: ArtifactDiscoveryRepository,
+    private readonly transactions: TransactionManager,
     private readonly ids = uuidGenerator,
     private readonly clock = systemClock,
-    private readonly transactions?: TransactionManager,
   ) {}
 
   async execute(input: { actorId: string; artifactId: string; version: string; content: Record<string, unknown>; dependencies?: Array<{ targetArtifactId: string; declaredRange: string }> }): Promise<ArtifactVersion> {
@@ -72,19 +75,25 @@ export class PublishVersionService {
     await authorizeWrite(this.access, input.actorId, artifact);
     if (artifact.status !== "active") throw new DomainError("INVALID_REQUEST", "Cannot publish to a tombstoned Artifact.");
     if (await this.versions.findByArtifactAndVersion(artifact.id, input.version)) throw new DomainError("VERSION_ALREADY_EXISTS", "This version already exists.");
-    const canonicalContent = canonicalize(input.content);
+    const canonicalContent = canonicalize(normalizePearlContent(input.content));
     const contentHash = `sha256:${createHash("sha256").update(canonicalContent).digest("hex")}`;
-    const store = async (): Promise<ArtifactVersion> => {
-      const contentLocation = await this.contentStore.put(canonicalContent, contentHash);
-      const at = this.clock.now();
-      const version = ArtifactVersion.create({ id: this.ids.next(), artifactId: artifact.id, version: input.version, contentHash, contentLocation, createdAt: at, publishedAt: at });
+    const contentLocation = await this.contentStore.put(canonicalContent, contentHash);
+    const at = this.clock.now();
+    const version = ArtifactVersion.create({ id: this.ids.next(), artifactId: artifact.id, version: input.version, contentHash, contentLocation, createdAt: at, publishedAt: at });
+    return this.transactions.run(async () => {
+      if (!await this.versions.lockArtifactForWrite(artifact.id)) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+      const current = await this.artifacts.findById(artifact.id);
+      if (!current) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+      await authorizeWrite(this.access, input.actorId, current);
+      if (current.status !== "active") throw new DomainError("INVALID_REQUEST", "Cannot publish to a tombstoned Artifact.");
+      if (await this.versions.findByArtifactAndVersion(artifact.id, input.version)) throw new DomainError("VERSION_ALREADY_EXISTS", "This version already exists.");
       await this.versions.create(version);
       for (const declaration of input.dependencies ?? []) {
         await this.dependencies.create(Dependency.create({ id: this.ids.next(), artifactVersionId: version.id, targetArtifactId: declaration.targetArtifactId, declaredRange: declaration.declaredRange, createdAt: at }));
       }
+      await projectLatestVersionTags(artifact.id, this.versions, this.contentStore, this.discovery);
       return version;
-    };
-    return this.transactions ? this.transactions.run(store) : store();
+    });
   }
 }
 
@@ -95,9 +104,10 @@ abstract class CopyArtifactService {
     protected readonly contentStore: ArtifactContentStore,
     protected readonly dependencies: DependencyRepository,
     protected readonly access: AccessPolicy,
+    protected readonly discovery: ArtifactDiscoveryRepository,
+    protected readonly transactions: TransactionManager,
     protected readonly ids: IdGenerator = uuidGenerator,
     protected readonly clock: Clock = systemClock,
-    protected readonly transactions?: TransactionManager,
   ) {}
 
   protected async copy(input: { actorId: string; sourceArtifactId: string; name: string; slug: string; sourceVersionId?: string }, afterCreate?: (artifact: Artifact, sourceVersion: ArtifactVersion) => Promise<void>): Promise<{ artifact: Artifact; sourceVersion: ArtifactVersion }> {
@@ -110,6 +120,7 @@ abstract class CopyArtifactService {
     if (!sourceVersion || sourceVersion.artifactId !== source.id) throw new DomainError("VERSION_NOT_FOUND", "Source version was not found.");
     const content = await this.contentStore.get(sourceVersion.contentLocation);
     if (content === null) throw new DomainError("INVALID_REQUEST", "Source content is unavailable.");
+    const tags = readPearlTags(content);
     const artifact = Artifact.create({ id: this.ids.next(), ownerId: input.actorId, name: input.name, slug: input.slug, visibility: "private", createdAt: this.clock.now() });
     const contentLocation = await this.contentStore.put(content, sourceVersion.contentHash);
     const at = this.clock.now();
@@ -120,16 +131,17 @@ abstract class CopyArtifactService {
       for (const dependency of await this.dependencies.findForVersion(sourceVersion.id)) {
         await this.dependencies.create(Dependency.create({ id: this.ids.next(), artifactVersionId: copiedVersion.id, targetArtifactId: dependency.targetArtifactId, declaredRange: dependency.declaredRange, createdAt: at }));
       }
+      await this.discovery.replaceTagProjection(artifact.id, copiedVersion.id, tags);
       await afterCreate?.(artifact, sourceVersion);
     };
-    if (this.transactions) await this.transactions.run(work); else await work();
+    await this.transactions.run(work);
     return { artifact, sourceVersion };
   }
 }
 
 export class ForkArtifactService extends CopyArtifactService {
-  constructor(artifacts: ArtifactRepository, versions: ArtifactVersionRepository, contentStore: ArtifactContentStore, dependencies: DependencyRepository, private readonly lineage: LineageRepository, access: AccessPolicy, ids = uuidGenerator, clock = systemClock, transactions?: TransactionManager) {
-    super(artifacts, versions, contentStore, dependencies, access, ids, clock, transactions);
+  constructor(artifacts: ArtifactRepository, versions: ArtifactVersionRepository, contentStore: ArtifactContentStore, dependencies: DependencyRepository, private readonly lineage: LineageRepository, access: AccessPolicy, discovery: ArtifactDiscoveryRepository, transactions: TransactionManager, ids = uuidGenerator, clock = systemClock) {
+    super(artifacts, versions, contentStore, dependencies, access, discovery, transactions, ids, clock);
   }
 
   async execute(input: { actorId: string; sourceArtifactId: string; name: string; slug: string; sourceVersionId?: string }): Promise<Artifact> {
@@ -185,7 +197,7 @@ export interface GitHubSource {
 }
 
 export class ImportGitHubService {
-  constructor(private readonly source: GitHubSource, private readonly artifacts: ArtifactRepository, private readonly versions: ArtifactVersionRepository, private readonly contentStore: ArtifactContentStore, private readonly provenances: ProvenanceRepository, private readonly ids = uuidGenerator, private readonly clock = systemClock, private readonly transactions?: TransactionManager) {}
+  constructor(private readonly source: GitHubSource, private readonly artifacts: ArtifactRepository, private readonly versions: ArtifactVersionRepository, private readonly contentStore: ArtifactContentStore, private readonly provenances: ProvenanceRepository, private readonly discovery: ArtifactDiscoveryRepository, private readonly transactions: TransactionManager, private readonly ids = uuidGenerator, private readonly clock = systemClock) {}
   async execute(input: { actorId: string; sourceUrl: string; name: string; slug: string }): Promise<{ artifact: Artifact; version: ArtifactVersion }> {
     const fetched = await this.source.fetch(input.sourceUrl);
     const pearl = parsePearlContent(fetched.content);
@@ -196,8 +208,13 @@ export class ImportGitHubService {
     const artifact = Artifact.create({ id: this.ids.next(), ownerId: input.actorId, name: input.name, slug: input.slug, visibility: "private", createdAt: now });
     const version = ArtifactVersion.create({ id: this.ids.next(), artifactId: artifact.id, version: pearl.version, contentHash: hash, contentLocation: location, createdAt: now, publishedAt: now });
     const provenance: Provenance = { id: this.ids.next(), artifactVersionId: version.id, sourceType: "github", sourceUrl: input.sourceUrl, sourceRef: fetched.ref, importedAt: now };
-    const work = async () => { await this.artifacts.create(artifact); await this.versions.create(version); await this.provenances.create(provenance); };
-    if (this.transactions) await this.transactions.run(work); else await work();
+    const work = async () => {
+      await this.artifacts.create(artifact);
+      await this.versions.create(version);
+      await this.provenances.create(provenance);
+      await this.discovery.replaceTagProjection(artifact.id, version.id, Array.isArray(pearl.tags) ? pearl.tags : []);
+    };
+    await this.transactions.run(work);
     return { artifact, version };
   }
 }
@@ -250,4 +267,22 @@ async function authorizeRead(access: AccessPolicy, actorId: string, artifact: Ar
 
 async function authorizeWrite(access: AccessPolicy, actorId: string, artifact: Artifact): Promise<void> {
   if (artifact.ownerId !== actorId && !await access.canWrite(actorId, artifact)) throw new DomainError("FORBIDDEN", "Actor cannot modify this Artifact.");
+}
+
+async function projectLatestVersionTags(
+  artifactId: string,
+  versions: ArtifactVersionRepository,
+  contentStore: ArtifactContentStore,
+  discovery: ArtifactDiscoveryRepository,
+): Promise<void> {
+  const latest = await versions.findLatest(artifactId);
+  if (!latest) {
+    await discovery.replaceTagProjection(artifactId, null, []);
+    return;
+  }
+  const content = await contentStore.get(latest.contentLocation);
+  if (content === null) {
+    throw new DomainError("INVALID_REQUEST", "Latest Artifact Version content is unavailable.");
+  }
+  await discovery.replaceTagProjection(artifactId, latest.id, readPearlTags(content));
 }

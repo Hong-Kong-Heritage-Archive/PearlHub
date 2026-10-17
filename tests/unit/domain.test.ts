@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
+import { normalizePearlTags } from "../../src/domain/discovery.js";
 import { Dependency } from "../../src/domain/dependency.js";
 import { DomainError } from "../../src/domain/errors.js";
 import { parsePearlContent } from "../../src/domain/pearl.js";
@@ -120,5 +121,24 @@ describe("Pearl content", () => {
     expect(() => parsePearlContent({ version: "2.4.3", skill: {} })).toThrowError(DomainError);
     expect(() => parsePearlContent({ version: 2, skill: {}, knowledge: [] })).toThrowError(DomainError);
     expect(() => parsePearlContent({ version: "v2", skill: {}, knowledge: [] })).toThrowError(expect.objectContaining({ code: "INVALID_SEMVER" }));
+  });
+
+  it("normalizes optional version tags without changing tag-free content", () => {
+    expect(parsePearlContent({ version: "2.4.3", skill: {}, knowledge: [], tags: [" LangChain ", "RAG-Tools"] }).tags)
+      .toEqual(["langchain", "rag-tools"]);
+    expect(parsePearlContent({ version: "2.4.3", skill: {}, knowledge: [] })).not.toHaveProperty("tags");
+  });
+
+  it.each([
+    [null],
+    [[""]],
+    [["   "]],
+    [["bad_tag"]],
+    [["two words"]],
+    [["a".repeat(51)]],
+    [["same", " SAME "]],
+    [Array.from({ length: 11 }, (_, index) => `tag-${index}`)],
+  ])("rejects malformed, empty, duplicate, or excessive tags", (tags) => {
+    expect(() => normalizePearlTags(tags)).toThrowError(DomainError);
   });
 });

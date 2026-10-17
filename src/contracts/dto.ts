@@ -1,4 +1,5 @@
 import { DomainError } from "../domain/errors.js";
+import type { ArtifactSummary } from "../domain/discovery.js";
 
 export interface CreateArtifactRequest {
   name: string;
@@ -15,6 +16,21 @@ export interface ArtifactResponse {
   status: "active" | "tombstone";
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ArtifactSummaryResponse {
+  id: string;
+  name: string;
+  slug: string;
+  visibility: ArtifactSummary["visibility"];
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ArtifactDiscoveryResponse {
+  items: ArtifactSummaryResponse[];
+  nextCursor: string | null;
 }
 
 export interface PublishVersionRequest {
@@ -131,6 +147,28 @@ export function toArtifactResponse(artifact: {
     status: artifact.status,
     createdAt: artifact.createdAt.toISOString(),
     updatedAt: artifact.updatedAt.toISOString(),
+  };
+}
+
+export function toArtifactSummaryResponse(artifact: ArtifactSummary): ArtifactSummaryResponse {
+  return {
+    id: artifact.id,
+    name: artifact.name,
+    slug: artifact.slug,
+    visibility: artifact.visibility,
+    tags: artifact.tags,
+    createdAt: artifact.createdAt.toISOString(),
+    updatedAt: artifact.updatedAt.toISOString(),
+  };
+}
+
+export function toArtifactDiscoveryResponse(page: {
+  items: ArtifactSummary[];
+  nextCursor: string | null;
+}): ArtifactDiscoveryResponse {
+  return {
+    items: page.items.map(toArtifactSummaryResponse),
+    nextCursor: page.nextCursor,
   };
 }
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Artifact } from "../../src/domain/artifact.js";
+import type { ArtifactDiscoveryPage, ArtifactDiscoveryQuery } from "../../src/domain/discovery.js";
 import { DomainError } from "../../src/domain/errors.js";
 import { createHttpApp } from "../../src/http/app.js";
 import { DevelopmentOnlyFakeAuthenticator } from "../../src/http/testing/development-fake-authenticator.js";
@@ -24,9 +25,13 @@ function makeArtifact(overrides: Partial<{ id: string; ownerId: string; name: st
   });
 }
 
-function makeApp(execute: (input: { actorId: string; name: string; slug: string; visibility: "private" | "unlisted" | "public" }) => Promise<Artifact>) {
+function makeApp(
+  execute: (input: { actorId: string; name: string; slug: string; visibility: "private" | "unlisted" | "public" }) => Promise<Artifact>,
+  listExecute: (input: ArtifactDiscoveryQuery) => Promise<ArtifactDiscoveryPage> = async () => ({ items: [], nextCursor: null }),
+) {
   return createHttpApp({
     createArtifact: { execute },
+    listArtifacts: { execute: listExecute },
     authenticator,
   });
 }
@@ -62,6 +67,7 @@ describe("POST /api/v1/artifacts", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
+
     expect(execute).toHaveBeenCalledWith({
       actorId: authenticatedUserId,
       name: "Example Pearl",
@@ -69,7 +75,81 @@ describe("POST /api/v1/artifacts", () => {
       visibility: "public",
     });
   });
+});
 
+describe("GET /api/v1/artifacts", () => {
+    it("allows anonymous discovery without the create route's JSON or authentication requirements", async () => {
+      const listExecute = vi.fn(async () => ({
+        items: [{
+          id: "artifact-123",
+          name: "Example Pearl",
+          slug: "example-pearl",
+          visibility: "public" as const,
+          tags: ["language-model", "rag"],
+          createdAt: new Date("2026-01-01T00:00:00.000Z"),
+          updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+        }],
+        nextCursor: null,
+      }));
+      const response = await makeApp(async () => makeArtifact(), listExecute).request("/api/v1/artifacts?q=%20Pearl%20&tag=language-model&tag=rag");
+
+      expect(response.status, await response.clone().text()).toBe(200);
+      expect(await response.json()).toEqual({
+        items: [{
+          id: "artifact-123",
+          name: "Example Pearl",
+          slug: "example-pearl",
+          visibility: "public",
+          tags: ["language-model", "rag"],
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        }],
+        nextCursor: null,
+      });
+      expect(listExecute).toHaveBeenCalledWith({
+        callerId: null,
+        q: "Pearl",
+        tags: ["language-model", "rag"],
+        limit: 20,
+        sort: "createdAt",
+        direction: "desc",
+      });
+});
+
+    it("passes an authenticated owner identity without exposing it in the summary", async () => {
+      const listExecute = vi.fn(async () => ({ items: [], nextCursor: null }));
+      const response = await makeApp(async () => makeArtifact(), listExecute).request(
+        "/api/v1/artifacts?visibility=private",
+        { headers: { authorization: `Bearer ${authToken}` } },
+      );
+
+      expect(response.status).toBe(200);
+      expect(listExecute).toHaveBeenCalledWith({
+        callerId: authenticatedUserId,
+        tags: [],
+        visibility: "private",
+        limit: 20,
+        sort: "createdAt",
+        direction: "desc",
+      });
+    });
+
+    it.each([
+      "/api/v1/artifacts?q=%20%20",
+      "/api/v1/artifacts?q=ab&limit=0",
+      "/api/v1/artifacts?limit=2&limit=3",
+      "/api/v1/artifacts?tag=Bad_Tag",
+      "/api/v1/artifacts?unknown=true",
+    ])("rejects invalid discovery query %s", async (url) => {
+      const listExecute = vi.fn(async () => ({ items: [], nextCursor: null }));
+      const response = await makeApp(async () => makeArtifact(), listExecute).request(url);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "INVALID_REQUEST" } });
+      expect(listExecute).not.toHaveBeenCalled();
+    });
+});
+
+describe("POST /api/v1/artifacts additional validation", () => {
   it("returns 401 when authentication fails", async () => {
     const execute = vi.fn(async () => makeArtifact());
     const response = await postArtifact(makeApp(execute), JSON.stringify(requestBody), "");
@@ -83,6 +163,7 @@ describe("POST /api/v1/artifacts", () => {
     ["malformed JSON", "{\"name\":"],
     ["invalid fields", JSON.stringify({ ...requestBody, slug: "Invalid Slug" })],
     ["unexpected owner field", JSON.stringify({ ...requestBody, ownerId: "attacker" })],
+    ["unexpected tags field", JSON.stringify({ ...requestBody, tags: ["rag"] })],
   ])("rejects %s at the HTTP boundary", async (_description, body) => {
     const execute = vi.fn(async () => makeArtifact());
     const response = await postArtifact(makeApp(execute), body);

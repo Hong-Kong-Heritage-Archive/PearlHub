@@ -1,4 +1,5 @@
 import { serve } from "@hono/node-server";
+import { MemoryArtifactContentStore } from "./adapters/content-store.js";
 import { DevelopmentOnlyFakeAuthenticator } from "./http/testing/development-fake-authenticator.js";
 import { createPostgresRuntime, requireDatabaseUrl } from "./runtime.js";
 
@@ -25,6 +26,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 const runtime = await createPostgresRuntime({
   databaseUrl: requireDatabaseUrl(),
   authenticator: new DevelopmentOnlyFakeAuthenticator(userId, token),
+  contentStore: new MemoryArtifactContentStore(),
 });
 const server = serve(
   { fetch: runtime.app.fetch, port },
