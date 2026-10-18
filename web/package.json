@@ -1,0 +1,35 @@
+{
+  "name": "pearlhub-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "next": "^16.4.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@testing-library/jest-dom": "^6.6.4",
+    "@testing-library/react": "^16.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "@types/node": "^22.19.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.1.0",
+    "globals": "^16.4.0",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.0",
+    "vitest": "^5.0.5"
+  }
+}
