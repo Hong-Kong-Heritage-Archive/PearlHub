@@ -31,3 +31,39 @@ jobs:
 
       - name: Run unit, application, and contract tests
         run: npm run test:unit
+
+  integration:
+    name: PostgreSQL integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: pearlhub_test
+          POSTGRES_USER: pearlhub
+          POSTGRES_PASSWORD: pearlhub_test_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pearlhub -d pearlhub_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql://pearlhub:pearlhub_test_only@localhost:5432/pearlhub_test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run PostgreSQL integration tests
+        run: npm run test:integration
