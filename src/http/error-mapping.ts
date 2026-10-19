@@ -1,7 +1,7 @@
 import type { ApiErrorResponse } from "../contracts/dto.js";
 import { DomainError } from "../domain/errors.js";
 
-export type HttpErrorStatus = 400 | 401 | 409 | 500;
+export type HttpErrorStatus = 400 | 401 | 409 | 500 | 503;
 
 export interface MappedHttpError {
   status: HttpErrorStatus;
@@ -17,6 +17,8 @@ export function mapHttpError(error: unknown): MappedHttpError {
         return { status: 401, body: toErrorResponse(error) };
       case "ARTIFACT_SLUG_CONFLICT":
         return { status: 409, body: toErrorResponse(error) };
+      case "DISCOVERY_NOT_READY":
+        return { status: 503, body: toErrorResponse(error) };
     }
   }
 

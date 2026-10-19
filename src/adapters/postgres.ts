@@ -4,14 +4,17 @@ import * as semver from "semver";
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { Artifact, type ArtifactSnapshot } from "../domain/artifact.js";
 import { ArtifactVersion } from "../domain/artifact-version.js";
+import type { ArtifactDiscoveryPageRow, ArtifactDiscoveryQuery, ArtifactSummary } from "../domain/discovery.js";
 import { Dependency } from "../domain/dependency.js";
 import { DomainError } from "../domain/errors.js";
 import type { CompatibilityReport, DependencyResolution, Lineage, Provenance } from "../domain/records.js";
 import type {
   ArtifactRepository,
   ArtifactVersionRepository,
+  ArtifactDiscoveryRepository,
   CompatibilityReportRepository,
   DependencyRepository,
+  DiscoveryReindexLock,
   LineageRepository,
   ProvenanceRepository,
   TransactionManager,
@@ -172,12 +175,186 @@ export class PostgresArtifactVersionRepository implements ArtifactVersionReposit
     return versions[0] ?? null;
   }
 
+  async lockArtifactForWrite(artifactId: string): Promise<boolean> {
+    const result = await this.db.query<{ id: string }>("SELECT id FROM artifacts WHERE id=$1 FOR UPDATE", [artifactId]);
+    return result.rows.length > 0;
+  }
+
   async create(version: ArtifactVersion): Promise<void> {
     const value = version.snapshot();
     await this.db.query(
       "INSERT INTO artifact_versions (id,artifact_id,version,content_hash,content_location,created_at,published_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
       [value.id, value.artifactId, value.version, value.contentHash, value.contentLocation, value.createdAt, value.publishedAt],
     );
+  }
+}
+
+interface DiscoveryRow {
+  id: string;
+  name: string;
+  slug: string;
+  visibility: ArtifactSummary["visibility"];
+  tags: string[] | null;
+  created_at: Date;
+  updated_at: Date;
+  sort_value: string;
+}
+
+export class PostgresArtifactDiscoveryRepository implements ArtifactDiscoveryRepository {
+  constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
+
+  async findPage(input: Omit<ArtifactDiscoveryQuery, "cursor"> & { after?: { sortValue: string; id: string } }): Promise<{ rows: ArtifactDiscoveryPageRow[]; hasMore: boolean }> {
+    const state = await this.db.query<{ ready: boolean }>(
+      "SELECT ready FROM artifact_discovery_index_state WHERE singleton=TRUE",
+    );
+    if (state.rows[0]?.ready !== true) {
+      throw new DomainError("DISCOVERY_NOT_READY", "Artifact discovery is temporarily unavailable.");
+    }
+
+    const values: unknown[] = [];
+    const bind = (value: unknown): string => {
+      values.push(value);
+      return `$${values.length}`;
+    };
+    const conditions = ["a.status='active'"];
+    if (input.visibility === "public") {
+      conditions.push("a.visibility='public'");
+    } else if (input.visibility) {
+      if (!input.callerId) {
+        conditions.push("FALSE");
+      } else {
+        const caller = bind(input.callerId);
+        conditions.push(`a.owner_id=${caller} AND a.visibility=${bind(input.visibility)}`);
+      }
+    } else if (input.callerId) {
+      const caller = bind(input.callerId);
+      conditions.push(`(a.visibility='public' OR (a.owner_id=${caller} AND a.visibility='private'))`);
+    } else {
+      conditions.push("a.visibility='public'");
+    }
+
+    if (input.tags.length > 0) {
+      conditions.push(`COALESCE(discovery.tags, ARRAY[]::text[]) @> ${bind(input.tags)}::text[]`);
+    }
+    if (input.q !== undefined) {
+      const escaped = input.q.replace(/[\\%_]/g, "\\$&");
+      const pattern = bind(`%${escaped}%`);
+      conditions.push(`(lower(a.name) LIKE lower(${pattern}) ESCAPE E'\\\\' OR lower(a.slug) LIKE lower(${pattern}) ESCAPE E'\\\\')`);
+    }
+
+    const sortExpression = input.sort === "name" ? "lower(a.name)"
+      : input.sort === "updatedAt" ? "a.updated_at"
+        : "a.created_at";
+    const cursorExpression = input.sort === "name" ? sortExpression : `extract(epoch FROM ${sortExpression})`;
+    const cursorType = input.sort === "name" ? "text" : "numeric";
+    if (input.after) {
+      const operator = input.direction === "asc" ? ">" : "<";
+      conditions.push(`(${cursorExpression},a.id) ${operator} (${bind(input.after.sortValue)}::${cursorType},${bind(input.after.id)}::uuid)`);
+    }
+
+    const limit = bind(input.limit + 1);
+    const direction = input.direction.toUpperCase();
+    const result = await this.db.query<DiscoveryRow>(
+      `SELECT a.id,a.name,a.slug,a.visibility,discovery.tags,a.created_at,a.updated_at,${cursorExpression}::text AS sort_value
+       FROM artifacts a
+       LEFT JOIN artifact_discovery_index discovery ON discovery.artifact_id=a.id
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY ${sortExpression} ${direction},a.id ${direction}
+       LIMIT ${limit}`,
+      values,
+    );
+    const hasMore = result.rows.length > input.limit;
+    const rows = result.rows.slice(0, input.limit).map((row): ArtifactDiscoveryPageRow => ({
+      item: {
+        id: row.id,
+        name: row.name,
+        slug: row.slug,
+        visibility: row.visibility,
+        tags: row.tags ?? [],
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      },
+      sortValue: row.sort_value,
+    }));
+    return { rows, hasMore };
+  }
+
+  async findArtifactIdsAfter(afterId: string | null, limit: number): Promise<string[]> {
+    const result = await this.db.query<{ id: string }>(
+      "SELECT id FROM artifacts WHERE $1::uuid IS NULL OR id>$1::uuid ORDER BY id LIMIT $2",
+      [afterId, limit],
+    );
+    return result.rows.map((row) => row.id);
+  }
+
+  async replaceTagProjection(artifactId: string, versionId: string | null, tags: string[]): Promise<void> {
+    if (versionId === null) {
+      await this.db.query("DELETE FROM artifact_discovery_index WHERE artifact_id=$1", [artifactId]);
+      return;
+    }
+    await this.db.query(
+      `INSERT INTO artifact_discovery_index (artifact_id,artifact_version_id,tags)
+       VALUES ($1,$2,$3)
+       ON CONFLICT (artifact_id) DO UPDATE
+       SET artifact_version_id=EXCLUDED.artifact_version_id,tags=EXCLUDED.tags`,
+      [artifactId, versionId, tags],
+    );
+  }
+
+  async clearTagProjections(): Promise<void> {
+    await this.db.query("DELETE FROM artifact_discovery_index");
+  }
+
+  async isReady(): Promise<boolean> {
+    const result = await this.db.query<{ ready: boolean }>(
+      "SELECT ready FROM artifact_discovery_index_state WHERE singleton=TRUE",
+    );
+    return result.rows[0]?.ready === true;
+  }
+
+  async setReady(ready: boolean): Promise<void> {
+    const result = await this.db.query(
+      "UPDATE artifact_discovery_index_state SET ready=$1 WHERE singleton=TRUE",
+      [ready],
+    );
+    if (result.rowCount !== 1) {
+      throw new Error("Artifact discovery index state is missing.");
+    }
+  }
+}
+
+export class PostgresDiscoveryReindexLock implements DiscoveryReindexLock {
+  constructor(private readonly pool: Pool) {}
+
+  async runExclusive<T>(work: () => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    let discardClient: Error | boolean | undefined;
+    let lockHeld = false;
+    let workError: unknown;
+    try {
+      await client.query(
+        "SELECT pg_advisory_lock(hashtext(current_schema()),hashtext('pearlhub.discovery_index_rebuild'))",
+      );
+      lockHeld = true;
+      return await work();
+    } catch (error) {
+      workError = error;
+      throw error;
+    } finally {
+      try {
+        if (lockHeld) {
+          await client.query(
+            "SELECT pg_advisory_unlock(hashtext(current_schema()),hashtext('pearlhub.discovery_index_rebuild'))",
+          );
+        }
+      } catch (error) {
+        discardClient = error instanceof Error ? error : true;
+        if (workError !== undefined) attachDiagnostic(workError, "unlockError", error);
+        else throw error;
+      } finally {
+        client.release(discardClient);
+      }
+    }
   }
 }
 

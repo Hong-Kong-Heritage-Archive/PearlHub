@@ -1,6 +1,9 @@
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
+import { cors } from "hono/cors";
+import type { ListArtifactsService } from "../application/discovery.js";
 import type { CreateArtifactUseCase } from "../application/services.js";
-import { toArtifactResponse } from "../contracts/dto.js";
+import { parseArtifactDiscoveryQuery } from "../contracts/discovery.js";
+import { toArtifactDiscoveryResponse, toArtifactResponse } from "../contracts/dto.js";
 import { DomainError } from "../domain/errors.js";
 import type { AuthenticatedPrincipal, Authenticator } from "./authentication.js";
 import { mapHttpError } from "./error-mapping.js";
@@ -30,6 +33,59 @@ const errorResponseSchema = z.object({
     details: z.record(z.string(), z.unknown()),
   }),
 }).openapi("ApiError");
+
+const artifactSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  slug: z.string(),
+  visibility: z.enum(["private", "unlisted", "public"]),
+  tags: z.array(z.string()),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+}).openapi("ArtifactSummary");
+
+const artifactDiscoveryResponseSchema = z.object({
+  items: z.array(artifactSummarySchema),
+  nextCursor: z.string().nullable(),
+}).openapi("ArtifactDiscoveryPage");
+
+const discoveryQuerySchema = z.object({
+  q: z.string().trim().min(1).max(100).optional(),
+  tag: z.union([z.string(), z.array(z.string())]).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  cursor: z.string().min(1).max(1024).optional(),
+  sort: z.enum(["createdAt", "updatedAt", "name"]).optional(),
+  order: z.enum(["asc", "desc"]).optional(),
+  visibility: z.enum(["public", "private", "unlisted"]).optional(),
+}).strict();
+
+const listArtifactsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/artifacts",
+  tags: ["Artifacts"],
+  summary: "Discover Artifacts",
+  description: "Lists active Artifacts visible to the caller, with optional text and tag filters.",
+  security: [{}, { BearerAuth: [] }],
+  request: { query: discoveryQuerySchema },
+  responses: {
+    200: {
+      description: "Artifacts matching the discovery filters.",
+      content: { "application/json": { schema: artifactDiscoveryResponseSchema } },
+    },
+    400: {
+      description: "Malformed or invalid query parameters.",
+      content: { "application/json": { schema: errorResponseSchema } },
+    },
+    500: {
+      description: "Unexpected internal error.",
+      content: { "application/json": { schema: errorResponseSchema } },
+    },
+    503: {
+      description: "Discovery is unavailable until its index has been built.",
+      content: { "application/json": { schema: errorResponseSchema } },
+    },
+  },
+});
 
 const createArtifactRoute = createRoute({
   method: "post",
@@ -80,7 +136,9 @@ type HttpEnvironment = {
 
 export interface HttpAppDependencies {
   createArtifact: CreateArtifactUseCase;
+  listArtifacts: Pick<ListArtifactsService, "execute">;
   authenticator: Authenticator;
+  corsOrigins?: string[];
 }
 
 export function createHttpApp(dependencies: HttpAppDependencies) {
@@ -92,7 +150,20 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
     },
   });
 
+  if (dependencies.corsOrigins !== undefined) {
+    app.use("/api/*", cors({
+      origin: dependencies.corsOrigins,
+      allowMethods: ["GET", "POST", "OPTIONS"],
+      allowHeaders: ["Authorization", "Content-Type"],
+      maxAge: 600,
+    }));
+  }
+
   app.use("/api/v1/artifacts", async (context, next) => {
+    if (context.req.method !== "POST") {
+      await next();
+      return;
+    }
     const principal = await dependencies.authenticator.authenticate(context.req.raw.headers);
     if (!principal) {
       throw new DomainError("UNAUTHENTICATED", "Authentication is required.");
@@ -109,6 +180,13 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
     }
 
     await next();
+  });
+
+  app.openapi(listArtifactsRoute, async (context) => {
+    const principal = await dependencies.authenticator.authenticate(context.req.raw.headers);
+    const query = parseArtifactDiscoveryQuery(new URL(context.req.url).searchParams, principal?.userId ?? null);
+    const page = await dependencies.listArtifacts.execute(query);
+    return context.json(toArtifactDiscoveryResponse(page), 200);
   });
 
   app.openapi(createArtifactRoute, async (context) => {

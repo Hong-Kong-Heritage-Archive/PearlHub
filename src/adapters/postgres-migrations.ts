@@ -190,6 +190,8 @@ async function verifyExistingFinalSchema(client: PoolClient): Promise<void> {
     "compatibility_reports",
     "user_identities",
     "tombstone_snapshots",
+    "artifact_discovery_index",
+    "artifact_discovery_index_state",
   ];
   const tables = await client.query<{ table_name: string }>(
     "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_type='BASE TABLE' AND table_name=ANY($1::text[])",
@@ -205,9 +207,12 @@ async function verifyExistingFinalSchema(client: PoolClient): Promise<void> {
     ["user_identities", "provider"],
     ["user_identities", "subject"],
     ["tombstone_snapshots", "snapshot_number"],
+    ["artifact_discovery_index", "artifact_version_id"],
+    ["artifact_discovery_index", "tags"],
+    ["artifact_discovery_index_state", "ready"],
   ];
   const columns = await client.query<{ table_name: string; column_name: string }>(
-    "SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema() AND (table_name,column_name) IN (('artifact_lineage','source_version_id'),('dependency_resolutions','target_artifact_id'),('user_identities','provider'),('user_identities','subject'),('tombstone_snapshots','snapshot_number'))",
+    "SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema() AND (table_name,column_name) IN (('artifact_lineage','source_version_id'),('dependency_resolutions','target_artifact_id'),('user_identities','provider'),('user_identities','subject'),('tombstone_snapshots','snapshot_number'),('artifact_discovery_index','artifact_version_id'),('artifact_discovery_index','tags'),('artifact_discovery_index_state','ready'))",
   );
   if (columns.rows.length !== requiredColumns.length) {
     throw new Error("Baseline schema is missing a migration column; no application data was changed.");
@@ -226,6 +231,29 @@ async function verifyExistingFinalSchema(client: PoolClient): Promise<void> {
   );
   if (triggers.rows.length !== requiredTriggers.length) {
     throw new Error("Baseline schema is missing a migration trigger; no application data was changed.");
+  }
+
+  const requiredIndexes = [
+    "artifact_discovery_tags_gin_idx",
+    "artifacts_discovery_name_trgm_idx",
+    "artifacts_discovery_slug_trgm_idx",
+    "artifacts_discovery_created_idx",
+    "artifacts_discovery_updated_idx",
+    "artifacts_discovery_name_idx",
+  ];
+  const indexes = await client.query<{ indexname: string }>(
+    "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname=ANY($1::text[])",
+    [requiredIndexes],
+  );
+  if (indexes.rows.length !== requiredIndexes.length) {
+    throw new Error("Baseline schema is missing a discovery index; no application data was changed.");
+  }
+
+  const extension = await client.query<{ extname: string }>(
+    "SELECT extname FROM pg_extension WHERE extname='pg_trgm' AND extnamespace='public'::regnamespace",
+  );
+  if (extension.rows.length !== 1) {
+    throw new Error("Baseline schema requires pg_trgm installed in public; no application data was changed.");
   }
 }
 

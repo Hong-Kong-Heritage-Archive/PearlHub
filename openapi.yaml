@@ -4,9 +4,110 @@ info:
   version: 1.0.0
   description: >-
     PearlHub's API uses Artifact as its resource name. Pearl is the product
-    concept. The implemented API is currently limited to Artifact creation.
+    concept. The API supports Artifact creation and visibility-safe discovery.
 paths:
   /api/v1/artifacts:
+    get:
+      tags:
+        - Artifacts
+      summary: Discover Artifacts
+      description: >-
+        Lists active Artifacts visible to the caller. Anonymous callers receive
+        public Artifacts. Authenticated owners may also receive their own
+        private Artifacts; unlisted Artifacts are excluded unless explicitly
+        requested by their owner. Visibility filters never grant access.
+      operationId: listArtifacts
+      security:
+        - {}
+        - BearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          description: >-
+            Case-insensitive literal substring match against name or slug.
+            Leading and trailing whitespace is trimmed.
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 100
+        - name: tag
+          in: query
+          description: >-
+            Repeat for multiple tags; all supplied tags must match. Values are
+            trimmed and lowercased; duplicates after normalization are rejected.
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: array
+            maxItems: 10
+            items:
+              type: string
+              pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+              maxLength: 50
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          description: Opaque cursor bound to the filters, caller, sort, direction, and limit.
+          required: false
+          schema:
+            type: string
+            maxLength: 1024
+        - name: sort
+          in: query
+          description: Name ordering is case-insensitive.
+          required: false
+          schema:
+            type: string
+            enum: [createdAt, updatedAt, name]
+            default: createdAt
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: visibility
+          in: query
+          description: Narrows results and never bypasses caller authorization.
+          required: false
+          schema:
+            type: string
+            enum: [public, unlisted, private]
+      responses:
+        "200":
+          description: Artifacts matching the discovery filters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactDiscoveryPage"
+        "400":
+          description: Malformed or invalid query parameters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Unexpected internal error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Discovery is unavailable until its index has been built.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
     post:
       tags:
         - Artifacts
@@ -122,6 +223,56 @@ components:
         updatedAt:
           type: string
           format: date-time
+    ArtifactSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - slug
+        - visibility
+        - tags
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          readOnly: true
+        name:
+          type: string
+          readOnly: true
+        slug:
+          type: string
+          readOnly: true
+        visibility:
+          type: string
+          enum: [private, unlisted, public]
+        tags:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+            maxLength: 50
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ArtifactDiscoveryPage:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactSummary"
+        nextCursor:
+          type: [string, "null"]
     ApiError:
       type: object
       required:

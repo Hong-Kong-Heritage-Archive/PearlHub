@@ -2,6 +2,12 @@ import type { Artifact } from "../domain/artifact.js";
 import type { ArtifactVersion } from "../domain/artifact-version.js";
 import type { Dependency } from "../domain/dependency.js";
 import type { CompatibilityReport, DependencyResolution, Lineage, Provenance } from "../domain/records.js";
+import type {
+  ArtifactDiscoveryCursorPosition,
+  ArtifactDiscoveryPageRow,
+  ArtifactDiscoveryQuery,
+  ArtifactSummary,
+} from "../domain/discovery.js";
 
 export interface ArtifactRepository {
   findById(id: string): Promise<Artifact | null>;
@@ -18,7 +24,21 @@ export interface ArtifactVersionRepository {
   findByArtifactAndVersion(artifactId: string, version: string): Promise<ArtifactVersion | null>;
   findForArtifact(artifactId: string): Promise<ArtifactVersion[]>;
   findLatest(artifactId: string): Promise<ArtifactVersion | null>;
+  lockArtifactForWrite(artifactId: string): Promise<boolean>;
   create(version: ArtifactVersion): Promise<void>;
+}
+
+export interface ArtifactDiscoveryRepository {
+  findPage(input: Omit<ArtifactDiscoveryQuery, "cursor"> & { after?: ArtifactDiscoveryCursorPosition }): Promise<{ rows: ArtifactDiscoveryPageRow[]; hasMore: boolean }>;
+  findArtifactIdsAfter(afterId: string | null, limit: number): Promise<string[]>;
+  replaceTagProjection(artifactId: string, versionId: string | null, tags: string[]): Promise<void>;
+  clearTagProjections(): Promise<void>;
+  isReady(): Promise<boolean>;
+  setReady(ready: boolean): Promise<void>;
+}
+
+export interface DiscoveryReindexLock {
+  runExclusive<T>(work: () => Promise<T>): Promise<T>;
 }
 
 export interface LineageRepository {

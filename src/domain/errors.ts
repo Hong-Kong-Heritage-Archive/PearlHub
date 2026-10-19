@@ -16,6 +16,7 @@ export const errorCodes = [
   "UNAUTHENTICATED",
   "FORBIDDEN",
   "ARTIFACT_SLUG_CONFLICT",
+  "DISCOVERY_NOT_READY",
 ] as const;
 
 export type ErrorCode = (typeof errorCodes)[number];

@@ -1,14 +1,24 @@
 import { Pool } from "pg";
+import { RebuildArtifactDiscoveryIndexService, ListArtifactsService } from "./application/discovery.js";
 import { CreateArtifactService } from "./application/services.js";
 import { assertPostgresMigrationsCurrent } from "./adapters/postgres-migrations.js";
-import { PostgresArtifactRepository, PostgresTransactionManager } from "./adapters/postgres.js";
+import {
+  PostgresArtifactDiscoveryRepository,
+  PostgresArtifactRepository,
+  PostgresArtifactVersionRepository,
+  PostgresDiscoveryReindexLock,
+  PostgresTransactionManager,
+} from "./adapters/postgres.js";
 import { createHttpApp } from "./http/app.js";
 import type { Authenticator } from "./http/authentication.js";
+import type { ArtifactContentStore } from "./ports/repositories.js";
 
 export interface PostgresRuntimeOptions {
   databaseUrl: string;
   authenticator: Authenticator;
+  contentStore: ArtifactContentStore;
   pool?: Pool;
+  corsOrigins?: string[];
 }
 
 export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
@@ -20,9 +30,24 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
     await assertPostgresMigrationsCurrent(pool);
     const transactions = new PostgresTransactionManager(pool);
     const artifacts = new PostgresArtifactRepository(transactions.database);
+    const versions = new PostgresArtifactVersionRepository(transactions.database);
+    const discovery = new PostgresArtifactDiscoveryRepository(transactions.database);
+    await new RebuildArtifactDiscoveryIndexService(
+      discovery,
+      versions,
+      options.contentStore,
+      transactions,
+      new PostgresDiscoveryReindexLock(pool),
+    ).execute();
     const createArtifact = new CreateArtifactService(artifacts);
+    const listArtifacts = new ListArtifactsService(discovery);
     return {
-      app: createHttpApp({ createArtifact, authenticator: options.authenticator }),
+      app: createHttpApp({
+        createArtifact,
+        listArtifacts,
+        authenticator: options.authenticator,
+        ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),
+      }),
       close: async () => {
         if (ownsPool) await pool.end();
       },

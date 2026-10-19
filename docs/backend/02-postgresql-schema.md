@@ -97,6 +97,20 @@ Do not import provider tokens, credentials, or API keys as part of this process.
 
 Unique constraints are `UNIQUE(artifact_id, version)` and `UNIQUE(artifact_id, content_hash)`. The additional unique key `(id, artifact_id)` supports dependency-resolution integrity. SemVer validity is not checked in SQL.
 
+### `artifact_discovery_index`
+
+The discovery projection stores the tags of an Artifact's latest SemVer
+ArtifactVersion. It is derived data; immutable version content remains the
+source of truth. The `artifact_version_id` and `artifact_id` foreign key pair
+prevents a projection from pointing at a version owned by a different Artifact.
+An Artifact without a version has no projection row and is treated as having no
+tags.
+
+`artifact_discovery_index_state.ready` stays false until the application
+rebuilds the projection through the configured content-store port. Runtime
+startup fails rather than serving incomplete discovery if version content
+cannot be read or validated.
+
 ### `artifact_lineage`
 
 | Column | Type | Nullability / default |
@@ -215,6 +229,9 @@ The primary-key and unique constraints create their own indexes. The initial mig
 | --- | --- |
 | `artifacts_owner_idx` | Artifacts by owner; the owner prefix of `UNIQUE(owner_id, slug)` also supports this lookup. |
 | `artifacts_visibility_status_idx` | Artifact filtering by visibility and lifecycle status. |
+| `artifacts_discovery_name_trgm_idx` and `artifacts_discovery_slug_trgm_idx` | `pg_trgm` GIN indexes for case-insensitive literal substring search on active Artifact names and slugs. |
+| `artifacts_discovery_created_idx`, `artifacts_discovery_updated_idx`, and `artifacts_discovery_name_idx` | Stable keyset ordering for active discovery results. |
+| `artifact_discovery_tags_gin_idx` | GIN array containment for exact, AND-semantics tag filters. |
 | `artifact_versions_artifact_idx` | Versions by Artifact; unique `(artifact_id, version)` also has this leading key. |
 | `artifact_lineage_parent_idx` | Children of a parent Artifact. |
 | `artifact_lineage_child_idx` | Parents of a child Artifact. |
@@ -227,4 +244,10 @@ The primary-key and unique constraints create their own indexes. The initial mig
 | `user_identities_user_idx` | External identities associated with an internal User. |
 | `tombstone_snapshots_artifact_idx` | Snapshot history for an Artifact. |
 
-No additional index is introduced by the schema freeze. The owner and version lookup indexes overlap the leading columns of unique indexes but are retained as present in the initial migration; any future index change should be based on measured query plans and handled by a new migration.
+Migration `004_artifact_discovery.sql` installs the trusted `pg_trgm`
+extension in `public` for literal substring search and adds the discovery
+projection/readiness tables and active-row indexes above. The database role
+running migrations must be permitted to install the extension. The owner and
+version lookup indexes overlap the leading columns of unique indexes but are
+retained as present in the initial migration; future index changes should be
+based on measured query plans and handled by a new migration.
