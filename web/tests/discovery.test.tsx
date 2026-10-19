@@ -62,6 +62,7 @@ describe("buildDiscoveryUrl", () => {
     expect([...url.searchParams.keys()].sort()).toEqual(
       ["cursor", "limit", "order", "q", "sort", "tag", "tag", "visibility"].sort(),
     );
+    expect(buildDiscoveryUrl("https://api.example.test/api/v1", filters).pathname).toBe("/api/v1/artifacts");
   });
 });
 

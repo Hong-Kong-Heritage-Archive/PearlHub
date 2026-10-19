@@ -1,4 +1,5 @@
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
+import { cors } from "hono/cors";
 import type { ListArtifactsService } from "../application/discovery.js";
 import type { CreateArtifactUseCase } from "../application/services.js";
 import { parseArtifactDiscoveryQuery } from "../contracts/discovery.js";
@@ -137,6 +138,7 @@ export interface HttpAppDependencies {
   createArtifact: CreateArtifactUseCase;
   listArtifacts: Pick<ListArtifactsService, "execute">;
   authenticator: Authenticator;
+  corsOrigins?: string[];
 }
 
 export function createHttpApp(dependencies: HttpAppDependencies) {
@@ -147,6 +149,15 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
       }
     },
   });
+
+  if (dependencies.corsOrigins !== undefined) {
+    app.use("/api/*", cors({
+      origin: dependencies.corsOrigins,
+      allowMethods: ["GET", "POST", "OPTIONS"],
+      allowHeaders: ["Authorization", "Content-Type"],
+      maxAge: 600,
+    }));
+  }
 
   app.use("/api/v1/artifacts", async (context, next) => {
     if (context.req.method !== "POST") {

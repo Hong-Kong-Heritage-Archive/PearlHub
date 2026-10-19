@@ -78,6 +78,33 @@ a {
   font-size: 0.9rem;
 }
 
+.site-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.site-nav a {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 12px;
+  border-radius: 6px;
+  color: var(--green-dark);
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.site-nav a:hover,
+.site-nav a[aria-current="page"] {
+  background: var(--mint);
+}
+
+.site-nav .nav-create-link {
+  border: 1px solid var(--green);
+}
+
 .intro {
   padding: 48px 0 26px;
 }
@@ -190,6 +217,25 @@ h1 {
   background: var(--surface);
   color: var(--green-dark);
   font-weight: 700;
+}
+
+.primary-button {
+  min-height: 44px;
+  padding: 9px 18px;
+  border: 1px solid var(--green-dark);
+  border-radius: 6px;
+  background: var(--green);
+  color: white;
+  font-weight: 700;
+}
+
+.primary-button:hover:not(:disabled) {
+  background: var(--green-dark);
+}
+
+.primary-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 .secondary-button:hover,
@@ -454,6 +500,155 @@ h1 {
   text-align: center;
 }
 
+.create-panel,
+.auth-limitation {
+  margin-bottom: 24px;
+  padding: 26px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.create-panel > h2,
+.auth-limitation h2 {
+  margin: 0 0 20px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.55rem;
+  font-weight: 500;
+}
+
+.create-form {
+  display: grid;
+  gap: 20px;
+}
+
+.create-form .field {
+  max-width: 680px;
+}
+
+.required-mark {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.field input:disabled,
+.field select:disabled {
+  background: #f0f2f0;
+  color: #69736c;
+}
+
+.field input[aria-invalid="true"],
+.field select[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.field-error {
+  color: var(--danger);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.create-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.cancel-create {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+.create-error {
+  margin: 0 0 20px;
+  padding: 12px 14px;
+  border: 1px solid #d9a4a4;
+  border-left: 4px solid var(--danger);
+  border-radius: 6px;
+  background: #fff7f7;
+  color: #762929;
+  font-weight: 600;
+}
+
+.submission-status {
+  margin: -10px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.create-success {
+  margin-bottom: 24px;
+  padding: 18px;
+  border: 1px solid #9ebfaa;
+  border-left: 4px solid var(--green);
+  border-radius: 8px;
+  background: #f1f8f3;
+}
+
+.create-success h3 {
+  margin: 0 0 8px;
+  color: var(--green-dark);
+  font-size: 1.1rem;
+}
+
+.create-success > p {
+  margin: 0;
+}
+
+.created-details {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 18px;
+}
+
+.created-details div {
+  display: grid;
+  grid-template-columns: minmax(100px, 150px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.created-details dt {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.created-details dd {
+  min-width: 0;
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.created-details code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+.auth-limitation {
+  padding: 20px 24px;
+  background: #f0f3f0;
+}
+
+.auth-limitation h2 {
+  margin-bottom: 6px;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.auth-limitation p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 @media (max-width: 700px) {
   .filter-panel {
     grid-template-columns: 1fr;
@@ -488,6 +683,15 @@ h1 {
     text-align: right;
   }
 
+  .site-nav {
+    gap: 2px;
+  }
+
+  .site-nav a {
+    padding: 6px 8px;
+    font-size: 0.82rem;
+  }
+
   .intro {
     padding-top: 34px;
   }
@@ -503,5 +707,18 @@ h1 {
 
   .artifact-dates {
     grid-template-columns: 1fr;
+  }
+
+  .create-panel {
+    padding: 18px;
+  }
+
+  .create-actions {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .create-actions > * {
+    width: 100%;
   }
 }

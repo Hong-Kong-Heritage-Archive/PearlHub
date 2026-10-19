@@ -161,7 +161,10 @@ export default function ArtifactDiscovery() {
     <main className="page-shell">
       <header className="site-header">
         <Link className="wordmark" href="/" aria-label="PearlHub home">PearlHub</Link>
-        <p>Discover portable, community-built Pearls.</p>
+        <nav className="site-nav" aria-label="Main navigation">
+          <Link href="/" aria-current="page">Discover</Link>
+          <Link className="nav-create-link" href="/create">Create Artifact</Link>
+        </nav>
       </header>
 
       <section className="intro" aria-labelledby="page-title">

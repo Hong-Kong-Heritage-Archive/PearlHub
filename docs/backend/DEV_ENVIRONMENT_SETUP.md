@@ -110,6 +110,11 @@ Keep `PEARLHUB_AUTH_MODE=development-fake` and `DEV_AUTH_TOKEN` local-only. The
 development authenticator uses `DEV_AUTH_USER_ID` as the internal owner ID. The
 server refuses to start in production because production authentication is not
 implemented; it never enables fake authentication as a production fallback.
+In development, CORS allows `http://localhost:3000` and `http://127.0.0.1:3000`
+by default for the Thin UI. Override this with `PEARLHUB_DEV_CORS_ORIGINS`, a
+comma-separated list of exact HTTP(S) origins without paths or credentials. An
+empty value disables development CORS. CORS is not enabled outside
+`NODE_ENV=development` and does not replace authentication.
 
 ```sh
 npm run build
@@ -119,8 +124,8 @@ npm start
 The local endpoint is `http://localhost:8080/api/v1/artifacts`; pass
 `Authorization: Bearer $DEV_AUTH_TOKEN`. The OpenAPI 3.1 document is available at
 `/openapi.json`. Runtime configuration uses `DATABASE_URL`, `PORT`,
-`PEARLHUB_AUTH_MODE`, `DEV_AUTH_USER_ID`, and `DEV_AUTH_TOKEN`. Connection settings
-are never logged.
+`PEARLHUB_AUTH_MODE`, `DEV_AUTH_USER_ID`, `DEV_AUTH_TOKEN`, and optionally
+`PEARLHUB_DEV_CORS_ORIGINS`. Connection settings are never logged.
 
 Firebase Authentication remains a future provider adapter; the route receives only
 the provider-neutral verified internal user ID.

@@ -18,6 +18,7 @@ export interface PostgresRuntimeOptions {
   authenticator: Authenticator;
   contentStore: ArtifactContentStore;
   pool?: Pool;
+  corsOrigins?: string[];
 }
 
 export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
@@ -41,7 +42,12 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
     const createArtifact = new CreateArtifactService(artifacts);
     const listArtifacts = new ListArtifactsService(discovery);
     return {
-      app: createHttpApp({ createArtifact, listArtifacts, authenticator: options.authenticator }),
+      app: createHttpApp({
+        createArtifact,
+        listArtifacts,
+        authenticator: options.authenticator,
+        ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),
+      }),
       close: async () => {
         if (ownsPool) await pool.end();
       },

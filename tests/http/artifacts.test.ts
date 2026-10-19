@@ -28,11 +28,13 @@ function makeArtifact(overrides: Partial<{ id: string; ownerId: string; name: st
 function makeApp(
   execute: (input: { actorId: string; name: string; slug: string; visibility: "private" | "unlisted" | "public" }) => Promise<Artifact>,
   listExecute: (input: ArtifactDiscoveryQuery) => Promise<ArtifactDiscoveryPage> = async () => ({ items: [], nextCursor: null }),
+  corsOrigins?: string[],
 ) {
   return createHttpApp({
     createArtifact: { execute },
     listArtifacts: { execute: listExecute },
     authenticator,
+    ...(corsOrigins === undefined ? {} : { corsOrigins }),
   });
 }
 
@@ -157,6 +159,74 @@ describe("POST /api/v1/artifacts additional validation", () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toMatchObject({ error: { code: "UNAUTHENTICATED" } });
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  describe("Development CORS", () => {
+    it("allows the configured frontend origin to preflight API requests", async () => {
+      const app = makeApp(async () => makeArtifact(), undefined, ["http://localhost:3000"]);
+      const response = await app.request("/api/v1/artifacts", {
+        method: "OPTIONS",
+        headers: {
+          origin: "http://localhost:3000",
+          "access-control-request-method": "POST",
+          "access-control-request-headers": "authorization,content-type",
+        },
+      });
+
+      expect(response.status).toBe(204);
+      expect(response.headers.get("access-control-allow-origin")).toBe("http://localhost:3000");
+      expect(response.headers.get("access-control-allow-methods")).toContain("POST");
+      expect(response.headers.get("access-control-allow-headers")).toContain("Authorization");
+    });
+
+    it("does not grant CORS to unconfigured origins and still requires POST authentication", async () => {
+      const execute = vi.fn(async () => makeArtifact());
+      const app = makeApp(execute, undefined, ["http://localhost:3000"]);
+      const preflight = await app.request("/api/v1/artifacts", {
+        method: "OPTIONS",
+        headers: {
+          origin: "https://untrusted.example",
+          "access-control-request-method": "POST",
+          "access-control-request-headers": "authorization,content-type",
+        },
+      });
+      const post = await app.request("/api/v1/artifacts", {
+        method: "POST",
+        headers: {
+          origin: "http://localhost:3000",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+      expect(post.status).toBe(401);
+      expect(post.headers.get("access-control-allow-origin")).toBe("http://localhost:3000");
+      expect(execute).not.toHaveBeenCalled();
+
+      const authorizedPost = await app.request("/api/v1/artifacts", {
+        method: "POST",
+        headers: {
+          origin: "http://localhost:3000",
+          authorization: `Bearer ${authToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(requestBody),
+      });
+      expect(authorizedPost.status).toBe(201);
+      expect(authorizedPost.headers.get("access-control-allow-origin")).toBe("http://localhost:3000");
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
+    it("leaves CORS disabled unless allowed origins are explicitly provided", async () => {
+      const response = await makeApp(async () => makeArtifact()).request("/api/v1/artifacts", {
+        headers: { origin: "http://localhost:3000" },
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("access-control-allow-origin")).toBeNull();
+    });
   });
 
   it.each([

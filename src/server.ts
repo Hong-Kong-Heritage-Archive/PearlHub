@@ -1,5 +1,6 @@
 import { serve } from "@hono/node-server";
 import { MemoryArtifactContentStore } from "./adapters/content-store.js";
+import { parseDevelopmentCorsOrigins } from "./http/development-cors.js";
 import { DevelopmentOnlyFakeAuthenticator } from "./http/testing/development-fake-authenticator.js";
 import { createPostgresRuntime, requireDatabaseUrl } from "./runtime.js";
 
@@ -23,10 +24,15 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be a valid TCP port number.");
 }
 
+const corsOrigins = environment === "development"
+  ? parseDevelopmentCorsOrigins(process.env.PEARLHUB_DEV_CORS_ORIGINS)
+  : undefined;
+
 const runtime = await createPostgresRuntime({
   databaseUrl: requireDatabaseUrl(),
   authenticator: new DevelopmentOnlyFakeAuthenticator(userId, token),
   contentStore: new MemoryArtifactContentStore(),
+  ...(corsOrigins === undefined ? {} : { corsOrigins }),
 });
 const server = serve(
   { fetch: runtime.app.fetch, port },

@@ -1,6 +1,6 @@
 # PearlHub Thin UI
 
-This isolated `web/` application is a small Next.js App Router + TypeScript client for Artifact discovery. It uses the repository's Node 22 baseline. Frontend dependencies and the npm lockfile are kept separate from the backend.
+This isolated `web/` application is a small Next.js 16 App Router + TypeScript client for Artifact discovery and creation. Next.js requires Node.js 20.9 or newer; frontend CI currently runs Node.js 26, while backend CI runs Node.js 22. Frontend dependencies and the npm lockfile are kept separate from the backend.
 
 ## Local development
 
@@ -33,16 +33,20 @@ Open <http://localhost:3000>. The API base URL defaults to `http://localhost:808
 NEXT_PUBLIC_PEARLHUB_API_BASE_URL=http://localhost:8081 npm run dev
 ```
 
-The value is a public API origin/base path, not a credential. Configure the backend to allow the frontend origin when the browser runs on a different origin.
+The value is a public API origin/base path, not a credential. In development mode, the backend allows the default frontend origins `http://localhost:3000` and `http://127.0.0.1:3000`. Set `PEARLHUB_DEV_CORS_ORIGINS` in the backend environment to a comma-separated list of exact HTTP(S) origins if your frontend uses another origin. This allowlist is enabled only in development; the UI calls the configured API directly and does not proxy requests.
 
 ## Supported features and limitations
 
 - Search by Artifact name or slug, repeated tag filters, sort field/direction, visibility narrowing, and page-size controls.
 - Cursor-based “Load more” uses the opaque cursor returned by the API and deduplicates Artifact IDs.
 - Loading, empty, validation, network/API error, retry, and discovery-unavailable states.
-- Uses only the documented `GET /api/v1/artifacts` endpoint. Visibility and access control remain entirely server-side.
-- No authentication UI or real production login is available in this repository, so discovery is anonymous and Artifact creation is not exposed.
+- Create Artifact form submits only `name`, `slug`, and `visibility` to the documented `POST /api/v1/artifacts` endpoint.
+- Artifact creation requires a bearer token entered into a temporary developer-only password field. The token stays in component memory, is sent only to the configured API URL, is not persisted, and is cleared after successful creation or when leaving the page.
+- No production authentication or login flow is available. The developer token field is not a login system; the backend remains responsible for authentication and ownership.
+- Uses only the documented `GET /api/v1/artifacts` and `POST /api/v1/artifacts` endpoints. Visibility and access control remain entirely server-side.
 - No detail page, editing, publishing, import, or other Artifact workflows are part of this phase.
+
+For local creation with the development-only fake authenticator, enter the `DEV_AUTH_TOKEN` value from your untracked root `.env` file. This token is for local development only and is not a production credential. Development CORS permits only the configured frontend origins and does not bypass the API's bearer-token requirement.
 
 ## Checks
 
