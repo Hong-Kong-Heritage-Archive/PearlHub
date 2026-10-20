@@ -1,139 +1,50 @@
 # 05 — REST API Contract
 
-The REST resource contract is framework-neutral. The canonical machine-readable
-OpenAPI 3.1 contract is the repository-root `openapi.yaml`; the Hono adapter
-serves its runtime-generated representation at `/openapi.json`.
+The canonical machine-readable OpenAPI 3.1 contract is the repository-root
+`openapi.yaml`; the Hono adapter serves its runtime-generated representation
+at `/openapi.json`. Pearl is the product concept; Artifact is the API/domain
+resource. All paths below are relative to `/api/v1`.
 
-Pearl is the product concept; Artifact is the API/domain resource. Only the
-create operation below is implemented and included in OpenAPI. Other operations
-described here are planned and are not runtime routes.
+## Implemented workflow
 
-Base path:
+An Artifact is created only by publishing its first Draft. Draft writes require
+bearer authentication, derive ownership from the authenticated principal, and
+use revision checks for updates and publication.
 
-`/api/v1`
+| Method | Path | Behavior |
+|---|---|---|
+| GET | `/artifacts` | Discover visible Artifacts |
+| POST | `/artifacts` | Retired; returns `410 ARTIFACT_CREATION_REQUIRES_DRAFT` |
+| POST | `/drafts` | Create a private Draft with initial content |
+| GET | `/drafts/{draftId}` | Read an owner-authorized Draft |
+| PUT | `/drafts/{draftId}` | Replace Draft content using the current revision |
+| DELETE | `/drafts/{draftId}?revision={revision}` | Discard an unpublished Draft |
+| POST | `/drafts/{draftId}/publish` | Atomically create first Artifact and immutable `0.1.0` version |
+| GET | `/artifacts/{artifactId}/versions` | List published versions |
+| GET | `/artifacts/{artifactId}/versions/{version}` | Read a complete immutable version snapshot |
+| POST | `/artifacts/{artifactId}/versions/{version}/work-copy` | Create the owner's editable Draft from a version |
 
-## Artifacts
+The first publish stores the Artifact, complete content snapshot, dependency
+declarations, discovery projection, and consumed Draft in one PostgreSQL
+transaction. Subsequent work-copy publication increments the latest SemVer
+patch component; the source version must still be current when publishing.
+Existing versions whose content was not persisted before migration 005 remain
+readable as metadata but return `409 VERSION_CONTENT_UNAVAILABLE` for full
+content reads and work-copy creation.
 
-### POST /artifacts — implemented
+## Not implemented
 
-Create an Artifact.
-
-Request:
-
-```json
-{
-  "name": "Example Pearl",
-  "slug": "example-pearl",
-  "visibility": "public"
-}
-```
-
-The request body is strict and accepts exactly `name`, `slug`, and `visibility`;
-unknown properties, including `ownerId`, are rejected. The operation requires
-HTTP bearer authentication. Ownership is derived from the verified,
-provider-neutral authenticated principal and is returned as `ownerId`.
-
-It returns `201` with an Artifact containing `id`, `ownerId`, `name`, `slug`,
-`visibility`, `status`, `createdAt`, and `updatedAt`. `id`, `name`, `slug`, and
-`ownerId` are immutable. Errors use `{ "error": { "code", "message", "details" } }`
-with actual response statuses `400`, `401`, `409`, or `500`.
-
-### GET /artifacts — planned
-
-List/search Artifacts.
-
-The implementation may start with basic keyword/tag filtering only.
-
-### GET /artifacts/:artifactId — planned
-
-Return Artifact metadata.
-
-### PATCH /artifacts/:artifactId — planned
-
-Only mutable metadata may be changed.
-
-Must reject attempts to change:
-
-- name
-- slug
-- owner
-
-### DELETE /artifacts/:artifactId — planned
-
-Converts the Artifact to a tombstone.
-
-## Versions
-
-### GET /artifacts/:artifactId/versions — planned
-
-List versions.
-
-### POST /artifacts/:artifactId/versions — planned
-
-Publish a new immutable version.
-
-### GET /artifacts/:artifactId/versions/:version — planned
-
-Return a specific version.
-
-There is no PATCH endpoint for published versions.
-
-## Fork and Clone
-
-### POST /artifacts/:artifactId/fork — planned
-
-Creates a new Artifact and permanent fork lineage.
-
-### POST /artifacts/:artifactId/clone — planned
-
-Creates a new Artifact without PearlHub lineage.
-
-## GitHub Import
-
-### POST /imports/github — planned
-
-Import a Pearl from a GitHub source URL.
-
-The import creates provenance, not fork lineage.
-
-## Dependencies
-
-### GET /artifacts/:artifactId/dependencies — planned
-
-Return dependency information relevant to the Artifact.
-
-### POST /dependencies/resolve — planned
-
-Resolve declared SemVer ranges and record resolved versions.
-
-## Compatibility
-
-### POST /compatibility/reports — planned
-
-Create a compatibility report.
-
-### GET /artifacts/:artifactId/compatibility — planned
-
-List compatibility reports.
-
-## Public identity URL
-
-Human-facing Artifact URL:
-
-`/@{owner}/{slug}`
-
-The API should continue to use immutable Artifact UUIDs internally.
-
-No slug-based lookup operation is currently implemented or described in
-OpenAPI.
+Artifact metadata lookup/update and tombstoning; direct Version creation;
+Fork, Clone, Import, dependency resolution, and compatibility reports remain
+outside this slice. Published versions have no update or delete operation.
 
 ## API error shape
 
 ```json
 {
   "error": {
-    "code": "ARTIFACT_NAME_IMMUTABLE",
-    "message": "Artifact name cannot be changed.",
+    "code": "DRAFT_REVISION_CONFLICT",
+    "message": "Draft revision is stale.",
     "details": {}
   }
 }

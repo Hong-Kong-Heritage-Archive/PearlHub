@@ -191,7 +191,8 @@ describe("dependency resolution", () => {
         content: { tags: [" Retrieval ", "RAG-Tools"] },
       });
 
-      expect(deps.storedContent).toEqual(['{"tags":["retrieval","rag-tools"]}']);
+      expect(deps.storedContent).toEqual([]);
+      expect(deps.versions[0]?.contentSnapshot).toMatchObject({ content: { tags: ["retrieval", "rag-tools"] }, dependencies: [] });
       expect(deps.projections.at(-1)).toEqual({
         artifactId: "source",
         versionId: "new-1",

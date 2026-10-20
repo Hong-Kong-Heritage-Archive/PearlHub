@@ -1,6 +1,6 @@
 # 02 — PostgreSQL Schema
 
-The persistence contract is implemented by `migrations/001_initial.sql`, `migrations/002_persistence_hardening.sql`, and `migrations/003_identity_mapping_and_tombstone_snapshots.sql`. Together they create ten application tables. The migration runner also creates the operational `schema_migrations` ledger; it is not a domain table. The schema uses PostgreSQL constraints and triggers for database invariants; SemVer parsing and range evaluation remain domain/application responsibilities.
+The persistence contract is implemented by migrations `001` through `005`. Together they create thirteen application tables. The migration runner also creates the operational `schema_migrations` ledger; it is not a domain table. The schema uses PostgreSQL constraints and triggers for database invariants; SemVer parsing and range evaluation remain domain/application responsibilities.
 
 `npm run db:migrate` applies ordered migrations in transactions, records the migration
 filename and SHA-256 checksum, and verifies checksums on repeat runs. Applied migration
@@ -13,9 +13,11 @@ All primary keys are `UUID`. Timestamp columns are `TIMESTAMPTZ`; the initial mi
 
 Migration 003 leaves existing `users.external_subject` values unchanged and does not
 infer a provider; map legacy accounts only through reviewed, authoritative
-provider/subject-to-user mappings. Tombstone snapshots keep content hashes and locations,
-not content bytes, so restoration assumes the external content store retains immutable
-objects. PostgreSQL transactions cannot roll back that external store.
+provider/subject-to-user mappings. Migration 005 stores new Drafts and complete
+published-version JSON snapshots in PostgreSQL, so tombstone snapshots include those
+content bytes. Existing versions are assigned an empty JSON object because the previous
+runtime used an in-memory content store; their content cannot be backfilled reliably and
+full reads/work-copies return `VERSION_CONTENT_UNAVAILABLE`.
 
 ## Tables
 
@@ -92,6 +94,7 @@ Do not import provider tokens, credentials, or API keys as part of this process.
 | `version` | `TEXT` | not null |
 | `content_hash` | `TEXT` | not null |
 | `content_location` | `TEXT` | not null |
+| `content_snapshot` | `JSONB` | not null; complete immutable PostgreSQL snapshot for new workflow versions; legacy rows default to `{}` |
 | `created_at` | `TIMESTAMPTZ` | not null, default `now()` |
 | `published_at` | `TIMESTAMPTZ` | not null |
 
@@ -107,9 +110,21 @@ An Artifact without a version has no projection row and is treated as having no
 tags.
 
 `artifact_discovery_index_state.ready` stays false until the application
-rebuilds the projection through the configured content-store port. Runtime
-startup fails rather than serving incomplete discovery if version content
-cannot be read or validated.
+rebuilds the projection from immutable PostgreSQL snapshots. Legacy versions
+may fall back to the configured content-store port; runtime startup fails
+rather than serving incomplete discovery if legacy content cannot be read.
+
+### `drafts`
+
+Migration `005_drafts_and_version_snapshots.sql` creates owner-private Draft records.
+Draft content (instructions, normalized knowledge-file paths and contents, declared
+dependencies) is stored as JSONB before an Artifact row exists. `revision` supports
+optimistic concurrency; `state` prevents updates or repeat publication after a Draft is
+consumed or discarded. `artifact_id` and `base_version_id` identify work-copies, and a
+composite foreign key ensures the selected version belongs to that Artifact. A partial
+unique index permits only one active work-copy per existing Artifact. New pre-publication
+Drafts have NULL Artifact IDs and do not reserve an Artifact slug; the owner-scoped unique
+Artifact constraint is enforced when the first publication creates the Artifact.
 
 ### `artifact_lineage`
 
@@ -219,7 +234,8 @@ The migrations are forward-only. `001_initial.sql` establishes the original tabl
 indexes; `002_persistence_hardening.sql` adds the tombstone check, Artifact identity
 trigger, and composite keys/foreign keys for dependency-resolution target integrity;
 `003_identity_mapping_and_tombstone_snapshots.sql` adds provider identity mappings,
-source-version lineage references, and immutable lifecycle snapshots.
+source-version lineage references, and immutable lifecycle snapshots. Migration 005 adds
+Draft persistence and version content snapshots.
 
 ## Indexes
 
@@ -243,6 +259,8 @@ The primary-key and unique constraints create their own indexes. The initial mig
 | `compatibility_reports_target_idx` | Reports targeting an Artifact Version. |
 | `user_identities_user_idx` | External identities associated with an internal User. |
 | `tombstone_snapshots_artifact_idx` | Snapshot history for an Artifact. |
+| `drafts_owner_state_idx` | Owner's active, published, and discarded Draft records. |
+| `drafts_one_active_per_artifact_idx` | At most one active work-copy per existing Artifact. |
 
 Migration `004_artifact_discovery.sql` installs the trusted `pg_trgm`
 extension in `public` for literal substring search and adds the discovery

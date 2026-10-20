@@ -1,9 +1,11 @@
 import { Pool } from "pg";
 import { RebuildArtifactDiscoveryIndexService, ListArtifactsService } from "./application/discovery.js";
-import { CreateArtifactService } from "./application/services.js";
+import { DraftWorkflowService } from "./application/services.js";
 import { assertPostgresMigrationsCurrent } from "./adapters/postgres-migrations.js";
 import {
   PostgresArtifactDiscoveryRepository,
+  PostgresDraftRepository,
+  PostgresDependencyRepository,
   PostgresArtifactRepository,
   PostgresArtifactVersionRepository,
   PostgresDiscoveryReindexLock,
@@ -39,11 +41,22 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
       transactions,
       new PostgresDiscoveryReindexLock(pool),
     ).execute();
-    const createArtifact = new CreateArtifactService(artifacts);
+    const drafts = new DraftWorkflowService(
+      new PostgresDraftRepository(transactions.database),
+      artifacts,
+      versions,
+      new PostgresDependencyRepository(transactions.database),
+      {
+        canRead: async (actorId, artifact) => artifact.ownerId === actorId || artifact.visibility === "public",
+        canWrite: async (actorId, artifact) => artifact.ownerId === actorId,
+      },
+      discovery,
+      transactions,
+    );
     const listArtifacts = new ListArtifactsService(discovery);
     return {
       app: createHttpApp({
-        createArtifact,
+        drafts,
         listArtifacts,
         authenticator: options.authenticator,
         ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),

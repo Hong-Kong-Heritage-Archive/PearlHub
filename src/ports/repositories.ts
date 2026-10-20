@@ -1,5 +1,6 @@
 import type { Artifact } from "../domain/artifact.js";
 import type { ArtifactVersion } from "../domain/artifact-version.js";
+import type { Draft } from "../domain/draft.js";
 import type { Dependency } from "../domain/dependency.js";
 import type { CompatibilityReport, DependencyResolution, Lineage, Provenance } from "../domain/records.js";
 import type {
@@ -26,6 +27,13 @@ export interface ArtifactVersionRepository {
   findLatest(artifactId: string): Promise<ArtifactVersion | null>;
   lockArtifactForWrite(artifactId: string): Promise<boolean>;
   create(version: ArtifactVersion): Promise<void>;
+}
+
+export interface DraftRepository {
+  findById(id: string): Promise<Draft | null>;
+  findByIdForUpdate(id: string): Promise<Draft | null>;
+  create(draft: Draft): Promise<void>;
+  save(draft: Draft): Promise<void>;
 }
 
 export interface ArtifactDiscoveryRepository {

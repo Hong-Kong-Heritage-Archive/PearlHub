@@ -137,13 +137,20 @@ Base path:
 
 ### Artifact endpoints
 
-Only `POST /artifacts` is implemented. All other operations below are
-planned and are not currently runtime routes. Paths are relative to `/api/v1`.
+Paths below are relative to `/api/v1`. Drafts are private to their owner.
+First publication creates the Artifact identity and complete `0.1.0`
+version atomically; direct Artifact creation is retired.
 
 | Method | Endpoint | Purpose | Status |
 |---|---|---|---|
-| POST | `/artifacts` | Create Artifact | Implemented |
-| GET | `/artifacts` | List/search Artifacts | Planned |
+| POST | `/drafts` | Create a private unpublished Draft | Implemented |
+| GET | `/drafts/{draftId}` | Read an owner-authorized Draft | Implemented |
+| PUT | `/drafts/{draftId}` | Update with revision-based concurrency | Implemented |
+| DELETE | `/drafts/{draftId}?revision={revision}` | Discard an unpublished Draft | Implemented |
+| POST | `/drafts/{draftId}/publish` | Atomically publish a Draft | Implemented |
+| POST | `/artifacts/{artifactId}/versions/{version}/work-copy` | Create owner work-copy from selected version | Implemented |
+| POST | `/artifacts` | Legacy direct creation; returns `410 ARTIFACT_CREATION_REQUIRES_DRAFT` | Retired |
+| GET | `/artifacts` | List/search Artifacts | Implemented |
 | GET | `/artifacts/{artifactId}` | Get Artifact | Planned |
 | PATCH | `/artifacts/{artifactId}` | Update mutable metadata only | Planned |
 | DELETE | `/artifacts/{artifactId}` | Create tombstone | Planned |
@@ -152,8 +159,8 @@ planned and are not currently runtime routes. Paths are relative to `/api/v1`.
 
 | Method | Endpoint | Purpose | Status |
 |---|---|---|---|
-| GET | `/artifacts/{artifactId}/versions` | List versions | Planned |
-| GET | `/artifacts/{artifactId}/versions/{version}` | Get immutable Artifact Version | Planned |
+| GET | `/artifacts/{artifactId}/versions` | List published versions | Implemented |
+| GET | `/artifacts/{artifactId}/versions/{version}` | Get complete immutable Artifact Version | Implemented |
 | POST | `/artifacts/{artifactId}/versions` | Create new immutable version | Planned |
 
 There is no Version PATCH or DELETE endpoint in v0.1.
@@ -201,6 +208,23 @@ API versioning is separate from Artifact SemVer.
 
 Clients do not define the canonical content hash.
 
+For Draft publication, canonical content is UTF-8 JSON with recursively
+sorted object keys, normalized/sorted knowledge-file paths, and dependency
+declarations sorted by target Artifact ID and declared range. The SHA-256
+digest is returned as `sha256:<lowercase hex>` and covers instructions,
+file paths and contents, and dependency declarations. Each knowledge file
+also receives a server-generated content hash.
+
+Draft revisions start at `1`; each successful update increments the revision.
+Update and Publish requests must provide the revision they read. First
+publication is exactly `0.1.0`; each work-copy publication increments the
+latest SemVer patch component. Draft content and published snapshots are
+stored in PostgreSQL. Migration `005_drafts_and_version_snapshots.sql` adds
+the Draft table and immutable version content snapshot. Existing versions
+predating this migration cannot be backfilled from the old in-memory store;
+their metadata remains available, but full content read/work-copy returns a
+documented `409 VERSION_CONTENT_UNAVAILABLE`.
+
 ---
 
 ## 2.3.4 — OpenAPI Contract
@@ -214,8 +238,8 @@ The canonical machine-readable API description is:
 `openapi.yaml`
 
 The runtime-generated representation remains available at `/openapi.json`.
-The canonical OpenAPI document defines Artifact creation and the Phase B
-discovery operation, `GET /api/v1/artifacts`.
+The canonical OpenAPI document defines Draft lifecycle, publication,
+published-version reads, the retired direct-create path, and discovery.
 
 The OpenAPI definition uses:
 
@@ -458,15 +482,11 @@ identity provider remains provider-neutral.
 
 Protected write operations require Bearer authentication.
 
-The currently implemented protected operation is `POST /artifacts`. Planned
-protected operations include:
-
-- `PATCH /artifacts/{artifactId}`
-- `DELETE /artifacts/{artifactId}`
-- create Version
-- Fork
-- Clone
-- GitHub Import
+Implemented protected operations include Draft creation, read, update,
+discard, and publish; creating a work-copy; and owner-scoped access to private
+Artifacts and Drafts. Direct `POST /artifacts` is retired and returns
+`410 ARTIFACT_CREATION_REQUIRES_DRAFT`. Metadata mutation, deletion, Fork,
+Clone, and GitHub Import remain planned.
 
 OpenAPI security scheme:
 

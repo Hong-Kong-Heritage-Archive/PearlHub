@@ -42,7 +42,7 @@ interface OpenApiOperation {
 interface OpenApiDocument {
   openapi: string;
   info: { title: string; version: string };
-  paths: Record<string, { get?: OpenApiOperation; post?: OpenApiOperation }>;
+  paths: Record<string, { get?: OpenApiOperation; post?: OpenApiOperation; put?: OpenApiOperation; delete?: OpenApiOperation }>;
   components: {
     schemas: Record<string, OpenApiSchema>;
     securitySchemes: Record<string, Record<string, unknown>>;
@@ -59,16 +59,6 @@ function resolveSchema(document: OpenApiDocument, schema: OpenApiSchema | undefi
 function createRuntimeApp() {
   const ownerId = "internal-user-42";
   return createHttpApp({
-    createArtifact: {
-      execute: async (input) => Artifact.create({
-        id: "artifact-123",
-        ownerId: input.actorId,
-        name: input.name,
-        slug: input.slug,
-        visibility: input.visibility,
-        createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      }),
-    },
     listArtifacts: {
       execute: async () => ({ items: [], nextCursor: null }),
     },
@@ -77,12 +67,13 @@ function createRuntimeApp() {
 }
 
 describe("canonical OpenAPI contract", () => {
-  it("defines only the implemented Artifact discovery and creation operations under /api/v1", () => {
+  it("defines the implemented Draft and published-version workflow under /api/v1", () => {
     expect(canonicalDocument.openapi).toBe("3.1.0");
     expect(canonicalDocument.info.title).toBe("PearlHub API");
     expect(canonicalDocument.paths).toHaveProperty("/api/v1/artifacts");
     expect(canonicalDocument.paths).not.toHaveProperty("/api/v1/pearls");
-    expect(Object.keys(canonicalDocument.paths)).toEqual(["/api/v1/artifacts"]);
+    expect(Object.keys(canonicalDocument.paths)).toContain("/api/v1/drafts");
+    expect(Object.keys(canonicalDocument.paths)).toContain("/api/v1/artifacts");
     expect(canonicalDocument.paths["/api/v1/artifacts"]?.get).toBeDefined();
     expect(canonicalDocument.paths["/api/v1/artifacts"]?.post).toBeDefined();
   });
@@ -158,7 +149,7 @@ describe("canonical OpenAPI contract", () => {
       type: "http",
       scheme: "bearer",
     });
-    expect(responseCodes).toEqual(["201", "400", "401", "409", "500"]);
+    expect(responseCodes).toEqual(["400", "401", "409", "410", "500"]);
     expect(Object.keys(errorObject?.properties ?? {}).sort()).toEqual(["code", "details", "message"]);
     expect(errorSchema?.required).toContain("error");
     expect(errorObject?.required?.slice().sort()).toEqual(["code", "details", "message"]);
@@ -217,11 +208,11 @@ describe("canonical OpenAPI contract", () => {
 
     const canonicalResponse = resolveSchema(
       canonicalDocument,
-      canonicalOperation?.responses?.["201"]?.content?.["application/json"]?.schema,
+      canonicalOperation?.responses?.["410"]?.content?.["application/json"]?.schema,
     );
     const runtimeResponse = resolveSchema(
       runtimeDocument,
-      runtimeOperation?.responses?.["201"]?.content?.["application/json"]?.schema,
+      runtimeOperation?.responses?.["410"]?.content?.["application/json"]?.schema,
     );
     expect(Object.keys(runtimeResponse?.properties ?? {}).sort()).toEqual(
       Object.keys(canonicalResponse?.properties ?? {}).sort(),

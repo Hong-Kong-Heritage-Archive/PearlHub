@@ -76,7 +76,10 @@ export class RebuildArtifactDiscoveryIndexService {
               await this.discovery.replaceTagProjection(artifactId, null, []);
               return;
             }
-            const content = await this.contentStore.get(latest.contentLocation);
+            const snapshot = latest.contentSnapshot;
+            const content = snapshot && Object.keys(snapshot).length > 0
+              ? JSON.stringify(snapshot.content ?? snapshot)
+              : await this.contentStore.get(latest.contentLocation);
             if (content === null) {
               throw new Error(`Content for Artifact Version ${latest.id} is unavailable during discovery index rebuild.`);
             }

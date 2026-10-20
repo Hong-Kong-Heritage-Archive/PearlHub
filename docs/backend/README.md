@@ -1,8 +1,8 @@
 # PearlHub Backend Contract
 
-This directory defines the framework-neutral backend contract for PearlHub v0.1.
+This directory defines the framework-neutral domain/application contract for PearlHub v0.1. The existing HTTP adapter uses Hono; no framework types cross into domain or application services.
 
-Framework selection is intentionally deferred.
+The Content API MVP vertical slice implements Draft creation/editing, atomic first publication, published-version reads, and owner work-copies. The API and PostgreSQL adapters are documented in [`../api/API-CONTRACT.md`](../api/API-CONTRACT.md) and the repository-root [`../../openapi.yaml`](../../openapi.yaml).
 
 For local development and PostgreSQL setup, see [`DEV_ENVIRONMENT_SETUP.md`](DEV_ENVIRONMENT_SETUP.md).
 
@@ -18,7 +18,7 @@ For local development and PostgreSQL setup, see [`DEV_ENVIRONMENT_SETUP.md`](DEV
 
 ## Non-goals
 
-Do not implement Hono, Fastify, NestJS, or another HTTP framework yet.
+Do not move HTTP framework dependencies into domain or application packages.
 
 Do not add authentication-provider-specific code yet.
 

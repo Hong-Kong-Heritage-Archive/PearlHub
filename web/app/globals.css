@@ -29,7 +29,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -167,7 +168,8 @@ h1 {
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   width: 100%;
   min-height: 44px;
   padding: 9px 12px;
@@ -179,6 +181,16 @@ h1 {
 
 .field input::placeholder {
   color: #727d75;
+}
+
+.field textarea {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid #aeb9b1;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  resize: vertical;
 }
 
 .tag-form {
@@ -364,6 +376,85 @@ h1 {
   min-width: 0;
   margin: 0;
   color: var(--muted);
+}
+
+.draft-editor-list {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.draft-editor-list legend {
+  padding: 0 6px;
+  font-weight: 700;
+}
+
+.draft-editor-item {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.draft-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.draft-preview {
+  margin-top: 22px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.draft-preview summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.draft-preview pre,
+.published-version pre {
+  overflow: auto;
+  padding: 12px;
+  border-radius: 6px;
+  background: #f0f3ef;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.version-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+  padding-left: 20px;
+}
+
+.version-list li {
+  display: grid;
+  gap: 3px;
+}
+
+.version-list span {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.published-version {
+  margin-top: 24px;
+}
+
+.knowledge-file {
+  margin: 18px 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 0.82rem;
   overflow-wrap: anywhere;

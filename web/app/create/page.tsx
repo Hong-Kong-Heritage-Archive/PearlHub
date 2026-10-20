@@ -1,5 +1,5 @@
-import CreateArtifactForm from "../../components/create-artifact-form";
+import DraftEditor from "../../components/draft-editor";
 
 export default function CreateArtifactPage() {
-  return <CreateArtifactForm />;
+  return <DraftEditor />;
 }

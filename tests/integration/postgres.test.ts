@@ -3,9 +3,9 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CloneArtifactService, DeleteArtifactService, ForkArtifactService, PublishVersionService, RestoreArtifactService } from "../../src/application/services.js";
+import { CloneArtifactService, DeleteArtifactService, DraftWorkflowService, ForkArtifactService, PublishVersionService, RestoreArtifactService } from "../../src/application/services.js";
 import { baselinePostgresMigrations, runPostgresMigrations } from "../../src/adapters/postgres-migrations.js";
-import { PostgresArtifactDiscoveryRepository, PostgresArtifactRepository, PostgresArtifactVersionRepository, PostgresCompatibilityReportRepository, PostgresDependencyRepository, PostgresLineageRepository, PostgresProvenanceRepository, PostgresTransactionManager, PostgresUserIdentityRepository } from "../../src/adapters/postgres.js";
+import { PostgresArtifactDiscoveryRepository, PostgresArtifactRepository, PostgresArtifactVersionRepository, PostgresCompatibilityReportRepository, PostgresDependencyRepository, PostgresDraftRepository, PostgresLineageRepository, PostgresProvenanceRepository, PostgresTransactionManager, PostgresUserIdentityRepository } from "../../src/adapters/postgres.js";
 import { MemoryArtifactContentStore } from "../../src/adapters/content-store.js";
 import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
@@ -73,12 +73,13 @@ describe("PostgreSQL persistence hardening", () => {
       "002_persistence_hardening.sql",
       "003_identity_mapping_and_tombstone_snapshots.sql",
       "004_artifact_discovery.sql",
+      "005_drafts_and_version_snapshots.sql",
     ]);
     expect(repeatedMigrationRun).toEqual([]);
     const ledger = await pool.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM schema_migrations",
     );
-    expect(ledger.rows[0]?.count).toBe(4);
+    expect(ledger.rows[0]?.count).toBe(5);
   });
 
   it("baselines a complete manually migrated schema without rerunning SQL", async () => {
@@ -96,6 +97,7 @@ describe("PostgreSQL persistence hardening", () => {
         "002_persistence_hardening.sql",
         "003_identity_mapping_and_tombstone_snapshots.sql",
         "004_artifact_discovery.sql",
+        "005_drafts_and_version_snapshots.sql",
       ]) {
         const sql = await readFile(resolve(process.cwd(), "migrations", migrationName), "utf8");
         await baselinePool.query(sql);
@@ -106,6 +108,7 @@ describe("PostgreSQL persistence hardening", () => {
         "002_persistence_hardening.sql",
         "003_identity_mapping_and_tombstone_snapshots.sql",
         "004_artifact_discovery.sql",
+        "005_drafts_and_version_snapshots.sql",
       ]);
       expect(await runPostgresMigrations(baselinePool)).toEqual([]);
     } finally {
@@ -114,13 +117,14 @@ describe("PostgreSQL persistence hardening", () => {
     }
   });
 
-  it("wires the real HTTP create route to PostgreSQL and reads the persisted row back", async () => {
+  it("creates a private Draft and atomically publishes a complete 0.1.0 PostgreSQL snapshot", async () => {
     const runtime = await createPostgresRuntime({
       databaseUrl,
       pool,
       authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "integration-test-token"),
       contentStore: new MemoryArtifactContentStore(),
     });
+
     const headers = {
       authorization: "Bearer integration-test-token",
       "content-type": "application/json",
@@ -129,77 +133,119 @@ describe("PostgreSQL persistence hardening", () => {
       name: "PostgreSQL HTTP Artifact",
       slug: "postgresql-http-artifact",
       visibility: "public",
+      content: {
+        instructions: "Use the knowledge file.",
+        knowledgeFiles: [{ path: "guide/usage.md", content: "Reference content." }],
+        dependencies: [],
+      },
     };
 
     try {
-      const response = await runtime.app.request("/api/v1/artifacts", {
+      const response = await runtime.app.request("/api/v1/drafts", {
         method: "POST",
         headers,
         body: JSON.stringify(requestBody),
       });
       expect(response.status).toBe(201);
-      const body = await response.json() as { id: string; ownerId: string; name: string; slug: string; createdAt: string; updatedAt: string };
-      expect(body).toMatchObject({ ownerId: owners[0], ...requestBody });
-      expect(Number.isNaN(Date.parse(body.createdAt))).toBe(false);
-      expect(body.updatedAt).toBe(body.createdAt);
+      const draft = await response.json() as { id: string; ownerId: string; revision: number; state: string };
+      expect(draft).toMatchObject({ ownerId: owners[0], revision: 1, state: "active" });
+      expect((await pool.query("SELECT id FROM artifacts WHERE owner_id=$1 AND slug=$2", [owners[0], requestBody.slug])).rows).toEqual([]);
+
+      const publish = await runtime.app.request(`/api/v1/drafts/${draft.id}/publish`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ revision: draft.revision }),
+      });
+      expect(publish.status, await publish.clone().text()).toBe(201);
+      const body = await publish.json() as { artifact: { id: string; ownerId: string; name: string; slug: string; visibility: string; createdAt: string; updatedAt: string }; version: { id: string; version: string; contentHash: string; content: { instructions: string; knowledgeFiles: Array<{ path: string; content: string; contentHash: string }>; dependencies: unknown[] } } };
+      expect(body.artifact).toMatchObject({ ownerId: owners[0], name: requestBody.name, slug: requestBody.slug, visibility: requestBody.visibility });
+      expect(body.version).toMatchObject({ version: "0.1.0", contentHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/), content: { instructions: requestBody.content.instructions, knowledgeFiles: [{ path: "guide/usage.md", content: "Reference content.", contentHash: expect.stringMatching(/^sha256:/) }], dependencies: [] } });
 
       const stored = await pool.query<{ id: string; owner_id: string; name: string; slug: string; visibility: string; status: string; created_at: Date; updated_at: Date }>(
         "SELECT id,owner_id,name,slug,visibility,status,created_at,updated_at FROM artifacts WHERE id=$1",
-        [body.id],
+        [body.artifact.id],
       );
       expect(stored.rows[0]).toEqual({
-        id: body.id,
+        id: body.artifact.id,
         owner_id: owners[0],
         name: requestBody.name,
         slug: requestBody.slug,
         visibility: requestBody.visibility,
         status: "active",
-        created_at: new Date(body.createdAt),
-        updated_at: new Date(body.updatedAt),
+        created_at: new Date(body.artifact.createdAt),
+        updated_at: new Date(body.artifact.updatedAt),
       });
-
-      const duplicate = await runtime.app.request("/api/v1/artifacts", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(requestBody),
-      });
-      const duplicateBody = await duplicate.text();
-      expect(duplicate.status).toBe(409);
-      expect(duplicateBody).toContain("ARTIFACT_SLUG_CONFLICT");
-      expect(duplicateBody).not.toMatch(/sqlstate|constraint|stack|password/i);
-
-      const beforeInvalid = await pool.query<{ count: number }>(
-        "SELECT count(*)::int AS count FROM artifacts WHERE owner_id=$1",
-        [owners[0]],
+      const persistedVersion = await pool.query<{ version: string; content_snapshot: Record<string, unknown> }>(
+        "SELECT version,content_snapshot FROM artifact_versions WHERE id=$1",
+        [body.version.id],
       );
-      const invalidSlug = await runtime.app.request("/api/v1/artifacts", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ ...requestBody, slug: "Invalid Slug" }),
-      });
-      const invalidName = await runtime.app.request("/api/v1/artifacts", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ ...requestBody, slug: "empty-name", name: " " }),
-      });
-      const afterInvalid = await pool.query<{ count: number }>(
-        "SELECT count(*)::int AS count FROM artifacts WHERE owner_id=$1",
-        [owners[0]],
-      );
-      expect(invalidSlug.status).toBe(400);
-      expect(invalidName.status).toBe(400);
-      expect(afterInvalid.rows[0]?.count).toBe(beforeInvalid.rows[0]?.count);
+      expect(persistedVersion.rows[0]).toMatchObject({ version: "0.1.0", content_snapshot: body.version.content });
+      expect(await pool.query("SELECT state FROM drafts WHERE id=$1", [draft.id])).toMatchObject({ rows: [{ state: "published" }] });
 
-      const ownerOverride = await runtime.app.request("/api/v1/artifacts", {
+      const readVersion = await runtime.app.request(`/api/v1/artifacts/${body.artifact.id}/versions/0.1.0`);
+      expect(readVersion.status).toBe(200);
+      expect(await readVersion.json()).toMatchObject({ version: { content: body.version.content, contentHash: body.version.contentHash } });
+
+      const repeatPublish = await runtime.app.request(`/api/v1/drafts/${draft.id}/publish`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ ...requestBody, slug: "owner-override", ownerId: owners[1] }),
+        body: JSON.stringify({ revision: draft.revision }),
       });
-      expect(ownerOverride.status).toBe(400);
-      expect(await pool.query("SELECT id FROM artifacts WHERE slug='owner-override'")).toMatchObject({ rows: [] });
+      expect(repeatPublish.status).toBe(409);
+      expect(await repeatPublish.text()).toContain("DRAFT_NOT_ACTIVE");
+
+      const invalidDraft = await runtime.app.request("/api/v1/drafts", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ...requestBody, ownerId: owners[1] }),
+      });
+      expect(invalidDraft.status).toBe(400);
     } finally {
       await runtime.close();
     }
+  });
+
+  it("rolls back Artifact, version, and Draft state together when dependency persistence fails", async () => {
+    const transactions = new PostgresTransactionManager(pool!);
+    const artifacts = new PostgresArtifactRepository(transactions.database);
+    const versions = new PostgresArtifactVersionRepository(transactions.database);
+    const dependencies = new PostgresDependencyRepository(transactions.database);
+    const drafts = new PostgresDraftRepository(transactions.database);
+    const discovery = new PostgresArtifactDiscoveryRepository(transactions.database);
+    const service = new DraftWorkflowService(
+      drafts, artifacts, versions, dependencies,
+      { canRead: async (actorId, artifact) => actorId === artifact.ownerId || artifact.visibility === "public", canWrite: async (actorId, artifact) => actorId === artifact.ownerId },
+      discovery, transactions,
+    );
+    const target = Artifact.create({ id: randomUUID(), ownerId: owners[1]!, name: "Dependency target", slug: `dependency-target-${randomUUID().slice(0, 8)}`, visibility: "public", createdAt: new Date() });
+    await artifacts.create(target);
+    const draft = await service.create({
+      actorId: owners[0]!,
+      name: "Rollback Pearl",
+      slug: `rollback-pearl-${randomUUID().slice(0, 8)}`,
+      visibility: "public",
+      content: { instructions: "Atomic publish", knowledgeFiles: [], dependencies: [{ targetArtifactId: randomUUID(), declaredRange: "^2.1.0" }] },
+    });
+
+    await expect(service.publish({ actorId: owners[0]!, draftId: draft.id, revision: 1 })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    expect(await artifacts.findByOwnerAndSlug(owners[0]!, draft.slug)).toBeNull();
+    expect(await pool!.query(
+      "SELECT count(*)::int AS count FROM artifact_versions v JOIN artifacts a ON a.id=v.artifact_id WHERE a.slug=$1",
+      [draft.slug],
+    )).toMatchObject({ rows: [{ count: 0 }] });
+    expect((await drafts.findById(draft.id))?.state).toBe("active");
+
+    const corrected = await service.update({
+      actorId: owners[0]!, draftId: draft.id, revision: 1, name: draft.name, slug: draft.slug,
+      visibility: "public",
+      content: { ...draft.content, dependencies: [{ targetArtifactId: target.id, declaredRange: "^2.1.0" }] },
+    });
+    const published = await service.publish({ actorId: owners[0]!, draftId: draft.id, revision: corrected.revision });
+    expect(published.version.version).toBe("0.1.0");
+    expect(await dependencies.findForVersion(published.version.id)).toHaveLength(1);
+    const copy = await service.createWorkCopy({ actorId: owners[0]!, artifactId: published.artifact.id, version: "0.1.0" });
+    expect(copy.baseVersionId).toBe(published.version.id);
+    await expect(service.createWorkCopy({ actorId: owners[0]!, artifactId: published.artifact.id, version: "0.1.0" })).rejects.toMatchObject({ code: "DRAFT_ALREADY_ACTIVE" });
   });
 
   it("discovers with literal search, AND tags, stable cursors, and authorization-safe visibility", async () => {
@@ -318,7 +364,7 @@ describe("PostgreSQL persistence hardening", () => {
     expect(tables.rows.map((row) => row.table_name)).toEqual([
       "artifact_discovery_index", "artifact_discovery_index_state",
       "artifact_lineage", "artifact_versions", "artifacts", "compatibility_reports",
-      "dependencies", "dependency_resolutions", "provenances", "schema_migrations",
+      "dependencies", "dependency_resolutions", "drafts", "provenances", "schema_migrations",
       "tombstone_snapshots", "user_identities", "users",
     ]);
 
@@ -332,7 +378,8 @@ describe("PostgreSQL persistence hardening", () => {
     const expectedColumns: Record<string, string[]> = {
       users: ["id", "external_subject", "created_at", "updated_at"],
       artifacts: ["id", "owner_id", "name", "slug", "visibility", "status", "created_at", "updated_at"],
-      artifact_versions: ["id", "artifact_id", "version", "content_hash", "content_location", "created_at", "published_at"],
+      artifact_versions: ["id", "artifact_id", "version", "content_hash", "content_location", "content_snapshot", "created_at", "published_at"],
+      drafts: ["id", "owner_id", "artifact_id", "base_version_id", "name", "slug", "visibility", "content", "state", "revision", "created_at", "updated_at"],
       artifact_discovery_index: ["artifact_id", "artifact_version_id", "tags"],
       artifact_discovery_index_state: ["singleton", "ready"],
       artifact_lineage: ["id", "parent_artifact_id", "child_artifact_id", "source_version_id", "relationship_type", "created_at"],
@@ -353,6 +400,7 @@ describe("PostgreSQL persistence hardening", () => {
       "SELECT conname,contype FROM pg_constraint JOIN pg_class ON pg_class.oid=conrelid JOIN pg_namespace ON pg_namespace.oid=pg_class.relnamespace WHERE nspname=current_schema() ORDER BY conname",
     );
     const expectedConstraints: [string, string][] = [
+      ["artifact_versions_content_snapshot_object", "c"],
       ["artifact_discovery_index_artifact_id_fkey", "f"],
       ["artifact_discovery_index_artifact_version_id_artifact_id_fkey", "f"],
       ["artifact_discovery_index_pkey", "p"],
@@ -387,6 +435,17 @@ describe("PostgreSQL persistence hardening", () => {
       ["dependencies_id_target_artifact_id_key", "u"],
       ["dependencies_pkey", "p"],
       ["dependencies_target_artifact_id_fkey", "f"],
+      ["drafts_artifact_id_fkey", "f"],
+      ["drafts_base_version_artifact_fkey", "f"],
+      ["drafts_check", "c"],
+      ["drafts_content_check", "c"],
+      ["drafts_name_check", "c"],
+      ["drafts_owner_id_fkey", "f"],
+      ["drafts_pkey", "p"],
+      ["drafts_revision_check", "c"],
+      ["drafts_slug_check", "c"],
+      ["drafts_state_check", "c"],
+      ["drafts_visibility_check", "c"],
       ["dependency_resolutions_dependency_id_fkey", "f"],
       ["dependency_resolutions_dependency_target_fkey", "f"],
       ["dependency_resolutions_pkey", "p"],
@@ -431,6 +490,7 @@ describe("PostgreSQL persistence hardening", () => {
       "dependencies_source_idx", "dependencies_target_idx", "dependency_resolutions_dependency_idx",
       "compatibility_reports_source_idx", "compatibility_reports_target_idx",
       "user_identities_user_idx", "tombstone_snapshots_artifact_idx",
+      "drafts_owner_state_idx", "drafts_one_active_per_artifact_idx",
     ]));
   });
 

@@ -192,6 +192,7 @@ async function verifyExistingFinalSchema(client: PoolClient): Promise<void> {
     "tombstone_snapshots",
     "artifact_discovery_index",
     "artifact_discovery_index_state",
+    "drafts",
   ];
   const tables = await client.query<{ table_name: string }>(
     "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_type='BASE TABLE' AND table_name=ANY($1::text[])",
@@ -210,9 +211,13 @@ async function verifyExistingFinalSchema(client: PoolClient): Promise<void> {
     ["artifact_discovery_index", "artifact_version_id"],
     ["artifact_discovery_index", "tags"],
     ["artifact_discovery_index_state", "ready"],
+    ["artifact_versions", "content_snapshot"],
+    ["drafts", "content"],
+    ["drafts", "state"],
+    ["drafts", "revision"],
   ];
   const columns = await client.query<{ table_name: string; column_name: string }>(
-    "SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema() AND (table_name,column_name) IN (('artifact_lineage','source_version_id'),('dependency_resolutions','target_artifact_id'),('user_identities','provider'),('user_identities','subject'),('tombstone_snapshots','snapshot_number'),('artifact_discovery_index','artifact_version_id'),('artifact_discovery_index','tags'),('artifact_discovery_index_state','ready'))",
+    "SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema() AND (table_name,column_name) IN (('artifact_lineage','source_version_id'),('dependency_resolutions','target_artifact_id'),('user_identities','provider'),('user_identities','subject'),('tombstone_snapshots','snapshot_number'),('artifact_discovery_index','artifact_version_id'),('artifact_discovery_index','tags'),('artifact_discovery_index_state','ready'),('artifact_versions','content_snapshot'),('drafts','content'),('drafts','state'),('drafts','revision'))",
   );
   if (columns.rows.length !== requiredColumns.length) {
     throw new Error("Baseline schema is missing a migration column; no application data was changed.");
@@ -240,6 +245,7 @@ async function verifyExistingFinalSchema(client: PoolClient): Promise<void> {
     "artifacts_discovery_created_idx",
     "artifacts_discovery_updated_idx",
     "artifacts_discovery_name_idx",
+    "drafts_one_active_per_artifact_idx",
   ];
   const indexes = await client.query<{ indexname: string }>(
     "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname=ANY($1::text[])",

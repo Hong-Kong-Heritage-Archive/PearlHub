@@ -163,7 +163,7 @@ export default function ArtifactDiscovery() {
         <Link className="wordmark" href="/" aria-label="PearlHub home">PearlHub</Link>
         <nav className="site-nav" aria-label="Main navigation">
           <Link href="/" aria-current="page">Discover</Link>
-          <Link className="nav-create-link" href="/create">Create Artifact</Link>
+          <Link className="nav-create-link" href="/create">Create Draft</Link>
         </nav>
       </header>
 
@@ -335,7 +335,7 @@ export default function ArtifactDiscovery() {
       </section>
 
       <footer className="site-footer">
-        <p>Anonymous discovery is available. Sign-in and Artifact creation are not part of this preview.</p>
+        <p>Anonymous discovery is available. Published versions are immutable; create a Draft to publish a Pearl.</p>
       </footer>
     </main>
   );
@@ -350,7 +350,7 @@ function ArtifactCard({ artifact }: { artifact: ArtifactSummary }) {
           {artifact.visibility}
         </span>
       </div>
-      <h3>{artifact.name}</h3>
+      <h3><Link href={`/artifacts/${encodeURIComponent(artifact.id)}/versions`}>{artifact.name}</Link></h3>
       {artifact.tags.length > 0
         ? <ul className="card-tags" aria-label={`${artifact.name} tags`}>{artifact.tags.map((tag) => <li key={tag}>{tag}</li>)}</ul>
         : <p className="no-tags">No tags</p>}

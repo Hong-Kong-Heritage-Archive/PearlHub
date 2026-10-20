@@ -1,0 +1,219 @@
+export type ArtifactVisibility = "private" | "unlisted" | "public";
+
+export interface DraftContent {
+  instructions: string;
+  knowledgeFiles: Array<{ path: string; content: string }>;
+  dependencies: Array<{ targetArtifactId: string; declaredRange: string }>;
+}
+
+export interface DraftInput {
+  name: string;
+  slug: string;
+  visibility: ArtifactVisibility;
+  content: DraftContent;
+}
+
+export interface Draft extends DraftInput {
+  id: string;
+  ownerId: string;
+  artifactId: string | null;
+  baseVersionId: string | null;
+  state: "active" | "published" | "discarded";
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PublishedContent extends Omit<DraftContent, "knowledgeFiles"> {
+  knowledgeFiles: Array<{ path: string; content: string; contentHash: string }>;
+}
+
+export interface PublishedVersion {
+  artifact: {
+    id: string;
+    ownerId: string;
+    name: string;
+    slug: string;
+    visibility: ArtifactVisibility;
+    status: "active" | "tombstone";
+    createdAt: string;
+    updatedAt: string;
+  };
+  version: {
+    id: string;
+    artifactId: string;
+    version: string;
+    contentHash: string;
+    publishedAt: string;
+    content: PublishedContent;
+  };
+}
+
+export class DraftRequestError extends Error {
+  constructor(message: string, readonly status: number, readonly code: string) {
+    super(message);
+    this.name = "DraftRequestError";
+  }
+}
+
+export async function createDraft(input: DraftInput, token: string, signal?: AbortSignal): Promise<Draft> {
+  const response = await request("/drafts", "POST", input, token, signal);
+  return readDraft(response);
+}
+
+export async function getDraft(draftId: string, token: string, signal?: AbortSignal): Promise<Draft> {
+  return readDraft(await request(`/drafts/${encodeURIComponent(draftId)}`, "GET", undefined, token, signal));
+}
+
+export async function updateDraft(draft: DraftInput & { revision: number; id: string }, token: string, signal?: AbortSignal): Promise<Draft> {
+  const { id, ...body } = draft;
+  return readDraft(await request(`/drafts/${encodeURIComponent(id)}`, "PUT", body, token, signal));
+}
+
+export async function discardDraft(draft: Pick<Draft, "id" | "revision">, token: string): Promise<void> {
+  const response = await request(`/drafts/${encodeURIComponent(draft.id)}?revision=${draft.revision}`, "DELETE", undefined, token);
+  if (response.status !== 204) throw await readError(response);
+}
+
+export async function publishDraft(draft: Pick<Draft, "id" | "revision">, token: string): Promise<PublishedVersion> {
+  const response = await request(`/drafts/${encodeURIComponent(draft.id)}/publish`, "POST", { revision: draft.revision }, token);
+  return readPublishedVersion(response);
+}
+
+export async function listVersions(artifactId: string, token?: string): Promise<PublishedVersion[]> {
+  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}/versions`, "GET", undefined, token);
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new DraftRequestError("The API returned an invalid versions response.", response.status, "INVALID_RESPONSE");
+  }
+  if (!Array.isArray(payload) || !payload.every(isPublishedVersion)) {
+    throw new DraftRequestError("The API returned an unexpected versions response.", response.status, "INVALID_RESPONSE");
+  }
+  return payload;
+}
+
+export async function getPublishedVersion(artifactId: string, version: string, token?: string): Promise<PublishedVersion> {
+  return readPublishedVersion(await request(`/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}`, "GET", undefined, token));
+}
+
+export async function createWorkCopy(artifactId: string, version: string, token: string): Promise<Draft> {
+  return readDraft(await request(`/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/work-copy`, "POST", undefined, token));
+}
+
+async function request(path: string, method: string, body: unknown, token?: string, signal?: AbortSignal): Promise<Response> {
+  const headers = new Headers({ Accept: "application/json" });
+  if (token?.trim()) headers.set("Authorization", `Bearer ${token.trim()}`);
+  if (body !== undefined) headers.set("Content-Type", "application/json");
+  let response: Response;
+  try {
+    response = await fetch(buildApiUrl(path), {
+      method,
+      headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(signal === undefined ? {} : { signal }),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    throw new DraftRequestError("Could not reach the PearlHub API. Check your connection and try again.", 0, "NETWORK_ERROR");
+  }
+  if (!response.ok) throw await readError(response);
+  return response;
+}
+
+function buildApiUrl(path: string): URL {
+  const base = process.env.NEXT_PUBLIC_PEARLHUB_API_BASE_URL ?? "http://localhost:8080";
+  let url: URL;
+  try {
+    url = new URL(base);
+  } catch {
+    throw new DraftRequestError("The PearlHub API base URL is invalid.", 0, "INVALID_API_URL");
+  }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new DraftRequestError("The PearlHub API base URL must use HTTP(S) and must not include credentials.", 0, "INVALID_API_URL");
+  }
+  const root = url.pathname.replace(/\/+$/, "");
+  url.pathname = `${root.endsWith("/api/v1") ? root : `${root}/api/v1`}${path}`;
+  url.search = "";
+  url.hash = "";
+  return url;
+}
+
+async function readDraft(response: Response): Promise<Draft> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new DraftRequestError("The API returned an invalid Draft response.", response.status, "INVALID_RESPONSE");
+  }
+  if (!isDraft(payload)) throw new DraftRequestError("The API returned an unexpected Draft response.", response.status, "INVALID_RESPONSE");
+  return payload;
+}
+
+async function readPublishedVersion(response: Response): Promise<PublishedVersion> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new DraftRequestError("The API returned an invalid published-version response.", response.status, "INVALID_RESPONSE");
+  }
+  if (!isPublishedVersion(payload)) throw new DraftRequestError("The API returned an unexpected published-version response.", response.status, "INVALID_RESPONSE");
+  return payload;
+}
+
+async function readError(response: Response): Promise<DraftRequestError> {
+  let message: string | undefined;
+  let code = "API_ERROR";
+  try {
+    const payload: unknown = await response.json();
+    if (isRecord(payload) && isRecord(payload.error)) {
+      if (typeof payload.error.message === "string") message = payload.error.message;
+      if (typeof payload.error.code === "string") code = payload.error.code;
+    }
+  } catch {
+    message = undefined;
+  }
+  if (response.status >= 500) message = "PearlHub could not complete the request. Try again.";
+  return new DraftRequestError(message ?? `The PearlHub API returned HTTP ${response.status}.`, response.status, code);
+}
+
+function isDraft(value: unknown): value is Draft {
+  return isRecord(value)
+    && typeof value.id === "string" && typeof value.ownerId === "string"
+    && (typeof value.artifactId === "string" || value.artifactId === null)
+    && (typeof value.baseVersionId === "string" || value.baseVersionId === null)
+    && typeof value.name === "string" && typeof value.slug === "string"
+    && isVisibility(value.visibility) && isDraftContent(value.content)
+    && ["active", "published", "discarded"].includes(String(value.state))
+    && Number.isInteger(value.revision) && typeof value.createdAt === "string" && typeof value.updatedAt === "string";
+}
+
+function isPublishedVersion(value: unknown): value is PublishedVersion {
+  if (!isRecord(value) || !isRecord(value.artifact) || !isRecord(value.version)) return false;
+  return typeof value.artifact.id === "string" && typeof value.artifact.name === "string"
+    && typeof value.artifact.slug === "string" && isVisibility(value.artifact.visibility)
+    && typeof value.version.id === "string" && typeof value.version.artifactId === "string"
+    && typeof value.version.version === "string" && typeof value.version.contentHash === "string"
+    && typeof value.version.publishedAt === "string" && isPublishedContent(value.version.content);
+}
+
+function isDraftContent(value: unknown): value is DraftContent {
+  return isRecord(value) && typeof value.instructions === "string"
+    && Array.isArray(value.knowledgeFiles) && value.knowledgeFiles.every((file) => isRecord(file) && typeof file.path === "string" && typeof file.content === "string")
+    && Array.isArray(value.dependencies) && value.dependencies.every((dependency) => isRecord(dependency) && typeof dependency.targetArtifactId === "string" && typeof dependency.declaredRange === "string");
+}
+
+function isPublishedContent(value: unknown): value is PublishedContent {
+  return isRecord(value) && typeof value.instructions === "string"
+    && Array.isArray(value.knowledgeFiles) && value.knowledgeFiles.every((file) => isRecord(file) && typeof file.path === "string" && typeof file.content === "string" && typeof file.contentHash === "string")
+    && Array.isArray(value.dependencies) && value.dependencies.every((dependency) => isRecord(dependency) && typeof dependency.targetArtifactId === "string" && typeof dependency.declaredRange === "string");
+}
+
+function isVisibility(value: unknown): value is ArtifactVisibility {
+  return value === "private" || value === "unlisted" || value === "public";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}

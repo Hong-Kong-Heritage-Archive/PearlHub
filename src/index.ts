@@ -3,6 +3,7 @@ export * from "./contracts/index.js";
 export * from "./domain/artifact.js";
 export * from "./domain/artifact-version.js";
 export * from "./domain/dependency.js";
+export * from "./domain/draft.js";
 export * from "./domain/errors.js";
 export * from "./domain/pearl.js";
 export * from "./domain/records.js";

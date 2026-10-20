@@ -4,6 +4,7 @@ import * as semver from "semver";
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { Artifact, type ArtifactSnapshot } from "../domain/artifact.js";
 import { ArtifactVersion } from "../domain/artifact-version.js";
+import { Draft, type DraftState } from "../domain/draft.js";
 import type { ArtifactDiscoveryPageRow, ArtifactDiscoveryQuery, ArtifactSummary } from "../domain/discovery.js";
 import { Dependency } from "../domain/dependency.js";
 import { DomainError } from "../domain/errors.js";
@@ -11,6 +12,7 @@ import type { CompatibilityReport, DependencyResolution, Lineage, Provenance } f
 import type {
   ArtifactRepository,
   ArtifactVersionRepository,
+  DraftRepository,
   ArtifactDiscoveryRepository,
   CompatibilityReportRepository,
   DependencyRepository,
@@ -42,6 +44,7 @@ function translateConstraints(db: Queryable): Queryable {
         if (sqlState === "23505") {
           code = constraint === "artifacts_owner_id_slug_key" ? "ARTIFACT_SLUG_CONFLICT"
             : constraint === "artifact_versions_artifact_id_version_key" ? "VERSION_ALREADY_EXISTS"
+              : constraint === "drafts_one_active_per_artifact_idx" ? "DRAFT_ALREADY_ACTIVE"
               : constraint?.startsWith("artifact_lineage_") ? "LINEAGE_INVALID"
                 : "INVALID_REQUEST";
         } else if (sqlState === "55000") {
@@ -83,7 +86,7 @@ type ArtifactRow = {
 };
 type VersionRow = {
   id: string; artifact_id: string; version: string; content_hash: string; content_location: string;
-  created_at: Date; published_at: Date;
+  content_snapshot: Record<string, unknown>; created_at: Date; published_at: Date;
 };
 
 function artifactFromRow(row: ArtifactRow): Artifact {
@@ -96,7 +99,7 @@ function artifactFromRow(row: ArtifactRow): Artifact {
 function versionFromRow(row: VersionRow): ArtifactVersion {
   return ArtifactVersion.create({
     id: row.id, artifactId: row.artifact_id, version: row.version, contentHash: row.content_hash,
-    contentLocation: row.content_location, createdAt: row.created_at, publishedAt: row.published_at,
+    contentLocation: row.content_location, contentSnapshot: row.content_snapshot, createdAt: row.created_at, publishedAt: row.published_at,
   });
 }
 
@@ -153,17 +156,17 @@ export class PostgresArtifactVersionRepository implements ArtifactVersionReposit
   constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
 
   async findById(id: string): Promise<ArtifactVersion | null> {
-    const result = await this.db.query<VersionRow>("SELECT id,artifact_id,version,content_hash,content_location,created_at,published_at FROM artifact_versions WHERE id = $1", [id]);
+    const result = await this.db.query<VersionRow>("SELECT id,artifact_id,version,content_hash,content_location,content_snapshot,created_at,published_at FROM artifact_versions WHERE id = $1", [id]);
     return result.rows[0] ? versionFromRow(result.rows[0]) : null;
   }
 
   async findByArtifactAndVersion(artifactId: string, version: string): Promise<ArtifactVersion | null> {
-    const result = await this.db.query<VersionRow>("SELECT id,artifact_id,version,content_hash,content_location,created_at,published_at FROM artifact_versions WHERE artifact_id=$1 AND version=$2", [artifactId, version]);
+    const result = await this.db.query<VersionRow>("SELECT id,artifact_id,version,content_hash,content_location,content_snapshot,created_at,published_at FROM artifact_versions WHERE artifact_id=$1 AND version=$2", [artifactId, version]);
     return result.rows[0] ? versionFromRow(result.rows[0]) : null;
   }
 
   async findForArtifact(artifactId: string): Promise<ArtifactVersion[]> {
-    const result = await this.db.query<VersionRow>("SELECT id,artifact_id,version,content_hash,content_location,created_at,published_at FROM artifact_versions WHERE artifact_id=$1 ORDER BY created_at,id", [artifactId]);
+    const result = await this.db.query<VersionRow>("SELECT id,artifact_id,version,content_hash,content_location,content_snapshot,created_at,published_at FROM artifact_versions WHERE artifact_id=$1 ORDER BY created_at,id", [artifactId]);
     return result.rows.map(versionFromRow);
   }
 
@@ -183,9 +186,60 @@ export class PostgresArtifactVersionRepository implements ArtifactVersionReposit
   async create(version: ArtifactVersion): Promise<void> {
     const value = version.snapshot();
     await this.db.query(
-      "INSERT INTO artifact_versions (id,artifact_id,version,content_hash,content_location,created_at,published_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-      [value.id, value.artifactId, value.version, value.contentHash, value.contentLocation, value.createdAt, value.publishedAt],
+      "INSERT INTO artifact_versions (id,artifact_id,version,content_hash,content_location,content_snapshot,created_at,published_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+      [value.id, value.artifactId, value.version, value.contentHash, value.contentLocation, value.contentSnapshot ?? {}, value.createdAt, value.publishedAt],
     );
+  }
+}
+
+type DraftRow = {
+  id: string; owner_id: string; artifact_id: string | null; base_version_id: string | null;
+  name: string; slug: string; visibility: DraftState["visibility"]; content: DraftState["content"];
+  state: DraftState["state"]; revision: number; created_at: Date; updated_at: Date;
+};
+
+function draftFromRow(row: DraftRow): Draft {
+  return Draft.reconstitute({
+    id: row.id, ownerId: row.owner_id, artifactId: row.artifact_id, baseVersionId: row.base_version_id,
+    name: row.name, slug: row.slug, visibility: row.visibility, content: row.content,
+    state: row.state, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at,
+  });
+}
+
+export class PostgresDraftRepository implements DraftRepository {
+  constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
+
+  async findById(id: string): Promise<Draft | null> {
+    const result = await this.db.query<DraftRow>(
+      "SELECT id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,state,revision,created_at,updated_at FROM drafts WHERE id=$1",
+      [id],
+    );
+    return result.rows[0] ? draftFromRow(result.rows[0]) : null;
+  }
+
+  async findByIdForUpdate(id: string): Promise<Draft | null> {
+    const result = await this.db.query<DraftRow>(
+      "SELECT id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,state,revision,created_at,updated_at FROM drafts WHERE id=$1 FOR UPDATE",
+      [id],
+    );
+    return result.rows[0] ? draftFromRow(result.rows[0]) : null;
+  }
+
+  async create(draft: Draft): Promise<void> {
+    const value = draft.snapshot();
+    await this.db.query(
+      "INSERT INTO drafts (id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,state,revision,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+      [value.id, value.ownerId, value.artifactId, value.baseVersionId, value.name, value.slug, value.visibility, value.content, value.state, value.revision, value.createdAt, value.updatedAt],
+    );
+  }
+
+  async save(draft: Draft): Promise<void> {
+    const value = draft.snapshot();
+    const result = await this.db.query(
+      "UPDATE drafts SET name=$2,slug=$3,visibility=$4,content=$5,state=$6,revision=$7,updated_at=$8 WHERE id=$1",
+      [value.id, value.name, value.slug, value.visibility, value.content, value.state, value.revision, value.updatedAt],
+    );
+    if (result.rowCount !== 1) throw new DomainError("DRAFT_NOT_FOUND", "Draft was not found.");
   }
 }
 
