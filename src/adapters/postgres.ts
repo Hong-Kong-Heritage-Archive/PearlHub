@@ -209,6 +209,14 @@ function draftFromRow(row: DraftRow): Draft {
 export class PostgresDraftRepository implements DraftRepository {
   constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
 
+  async findActiveByOwner(ownerId: string): Promise<Draft[]> {
+    const result = await this.db.query<DraftRow>(
+      "SELECT id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,state,revision,created_at,updated_at FROM drafts WHERE owner_id=$1 AND state='active' ORDER BY updated_at DESC,id",
+      [ownerId],
+    );
+    return result.rows.map(draftFromRow);
+  }
+
   async findById(id: string): Promise<Draft | null> {
     const result = await this.db.query<DraftRow>(
       "SELECT id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,state,revision,created_at,updated_at FROM drafts WHERE id=$1",

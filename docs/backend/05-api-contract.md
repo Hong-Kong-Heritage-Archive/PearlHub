@@ -16,6 +16,7 @@ use revision checks for updates and publication.
 | GET | `/artifacts` | Discover visible Artifacts |
 | POST | `/artifacts` | Retired; returns `410 ARTIFACT_CREATION_REQUIRES_DRAFT` |
 | POST | `/drafts` | Create a private Draft with initial content |
+| GET | `/drafts` | List active Draft summaries owned by the caller |
 | GET | `/drafts/{draftId}` | Read an owner-authorized Draft |
 | PUT | `/drafts/{draftId}` | Replace Draft content using the current revision |
 | DELETE | `/drafts/{draftId}?revision={revision}` | Discard an unpublished Draft |

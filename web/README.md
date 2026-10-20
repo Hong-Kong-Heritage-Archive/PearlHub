@@ -40,7 +40,7 @@ The value is a public API origin/base path, not a credential. In development mod
 - Search by Artifact name or slug, repeated tag filters, sort field/direction, visibility narrowing, and page-size controls.
 - Cursor-based “Load more” uses the opaque cursor returned by the API and deduplicates Artifact IDs.
 - Loading, empty, validation, network/API error, retry, and discovery-unavailable states.
-- Create Draft, edit/save with revision conflict handling, private preview, knowledge-file/dependency editing, and one-request Publish are provided through `POST /api/v1/drafts`, `PUT /api/v1/drafts/{draftId}`, and `POST /api/v1/drafts/{draftId}/publish`.
+- Create Draft, find active private Drafts, edit/save with revision conflict handling, private preview, knowledge-file/dependency editing, and one-request Publish are provided through `GET/POST /api/v1/drafts`, `PUT /api/v1/drafts/{draftId}`, and `POST /api/v1/drafts/{draftId}/publish`.
 - Published-version lists and immutable version views use `GET /api/v1/artifacts/{artifactId}/versions` and `GET /api/v1/artifacts/{artifactId}/versions/{version}`. The owner can create a work-copy from a selected version.
 - Authenticated operations require a bearer token entered into a temporary developer-only password field. The token stays in component memory, is sent only to the configured API URL, and is never persisted in browser storage. It is not a production login flow.
 - No production authentication or login flow is available. The developer token field is not a login system; the backend remains responsible for authentication and ownership.

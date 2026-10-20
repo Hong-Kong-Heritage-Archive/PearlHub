@@ -30,6 +30,7 @@ export interface ArtifactVersionRepository {
 }
 
 export interface DraftRepository {
+  findActiveByOwner(ownerId: string): Promise<Draft[]>;
   findById(id: string): Promise<Draft | null>;
   findByIdForUpdate(id: string): Promise<Draft | null>;
   create(draft: Draft): Promise<void>;

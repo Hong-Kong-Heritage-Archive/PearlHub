@@ -4,7 +4,9 @@ info:
   version: 1.0.0
   description: >-
     PearlHub's API uses Artifact as its resource name. Pearl is the product
-    concept. The API supports Artifact creation and visibility-safe discovery.
+    concept. First publication creates the Artifact and immutable 0.1.0
+    version atomically from an owner-authorized Draft. Drafts and published
+    snapshots are stored in PostgreSQL.
 paths:
   /api/v1/artifacts:
     get:
@@ -111,9 +113,12 @@ paths:
     post:
       tags:
         - Artifacts
-      summary: Create an Artifact
-      description: Creates an Artifact owned by the authenticated internal user.
+      summary: Create an Artifact (retired)
+      description: >-
+        Retired. Create a Draft and publish it to create its Artifact identity
+        and first version in one transaction.
       operationId: createArtifact
+      deprecated: true
       security:
         - BearerAuth: []
       requestBody:
@@ -123,12 +128,12 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateArtifactRequest"
       responses:
-        "201":
-          description: Artifact created.
+        "410":
+          description: Use the Draft and Publish workflow.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Artifact"
+                $ref: "#/components/schemas/ApiError"
         "400":
           description: Malformed or invalid request.
           content:
@@ -153,12 +158,501 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /api/v1/drafts:
+    get:
+      tags: [Drafts]
+      summary: List the caller's active Drafts
+      operationId: listDrafts
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Active Draft summaries owned by the authenticated caller.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DraftSummary"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    post:
+      tags: [Drafts]
+      summary: Create a Draft
+      operationId: createDraft
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DraftInput"
+      responses:
+        "201":
+          description: Private Draft created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Draft"
+        "400":
+          description: Invalid metadata, content, or dependency range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /api/v1/drafts/{draftId}:
+    parameters:
+      - name: draftId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Drafts]
+      summary: Read an owner-authorized Draft
+      operationId: getDraft
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Draft and current revision.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Draft"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller does not own this Draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Draft was not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    put:
+      tags: [Drafts]
+      summary: Update a Draft with optimistic concurrency
+      operationId: updateDraft
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/DraftInput"
+                - type: object
+                  required: [revision]
+                  properties:
+                    revision:
+                      type: integer
+                      minimum: 1
+      responses:
+        "200":
+          description: Updated Draft with incremented revision.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Draft"
+        "400":
+          description: Invalid Draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller does not own this Draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Stale revision or Draft is no longer active.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    delete:
+      tags: [Drafts]
+      summary: Discard an unpublished Draft
+      operationId: discardDraft
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: revision
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "204":
+          description: Draft discarded.
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller does not own this Draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Stale revision or Draft is no longer active.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /api/v1/drafts/{draftId}/publish:
+    post:
+      tags: [Drafts]
+      summary: Publish a Draft atomically
+      operationId: publishDraft
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: draftId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [revision]
+              properties:
+                revision:
+                  type: integer
+                  minimum: 1
+      responses:
+        "201":
+          description: Artifact and complete immutable version created in one PostgreSQL transaction.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishedVersion"
+        "400":
+          description: Invalid Draft or dependency declaration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller does not own this Draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Stale Draft, duplicate slug/version, or active Draft conflict.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /api/v1/artifacts/{artifactId}/versions:
+    get:
+      tags: [Artifact Versions]
+      summary: List versions of a visible Artifact
+      operationId: listArtifactVersions
+      security:
+        - {}
+        - BearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Published versions. Drafts are never included.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PublishedVersion"
+        "404":
+          description: Artifact is not visible or was not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: A legacy version has no stored PostgreSQL content snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /api/v1/artifacts/{artifactId}/versions/{version}:
+    get:
+      tags: [Artifact Versions]
+      summary: Read a complete published version
+      operationId: getArtifactVersion
+      security:
+        - {}
+        - BearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Complete immutable version snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishedVersion"
+        "404":
+          description: Artifact or version is not visible or was not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Legacy version has no stored PostgreSQL content snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /api/v1/artifacts/{artifactId}/versions/{version}/work-copy:
+    post:
+      tags: [Drafts]
+      summary: Create an owner work-copy from a selected version
+      operationId: createWorkCopy
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "201":
+          description: New Draft based on the selected immutable version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Draft"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Only the Artifact owner may edit it through a work-copy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: An active Draft already exists or source content is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
 components:
   securitySchemes:
     BearerAuth:
       type: http
       scheme: bearer
   schemas:
+    DraftContent:
+      type: object
+      additionalProperties: false
+      required: [instructions, knowledgeFiles, dependencies]
+      properties:
+        instructions:
+          type: string
+        knowledgeFiles:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [path, content]
+            properties:
+              path:
+                type: string
+                description: Normalized relative path; traversal and duplicate paths are rejected.
+              content:
+                type: string
+        dependencies:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [targetArtifactId, declaredRange]
+            properties:
+              targetArtifactId:
+                type: string
+              declaredRange:
+                type: string
+                description: Valid SemVer range retained with the published version.
+    DraftInput:
+      type: object
+      additionalProperties: false
+      required: [name, slug, visibility, content]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        slug:
+          type: string
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        visibility:
+          type: string
+          enum: [private, unlisted, public]
+        content:
+          $ref: "#/components/schemas/DraftContent"
+    Draft:
+      allOf:
+        - $ref: "#/components/schemas/DraftInput"
+        - type: object
+          required: [id, ownerId, artifactId, baseVersionId, state, revision, createdAt, updatedAt]
+          properties:
+            id:
+              type: string
+              readOnly: true
+            ownerId:
+              type: string
+              readOnly: true
+            artifactId:
+              type: [string, "null"]
+            baseVersionId:
+              type: [string, "null"]
+            state:
+              type: string
+              enum: [active, published, discarded]
+            revision:
+              type: integer
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+    DraftSummary:
+      type: object
+      additionalProperties: false
+      required: [id, artifactId, baseVersionId, name, slug, visibility, state, revision, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        artifactId:
+          type: [string, "null"]
+        baseVersionId:
+          type: [string, "null"]
+        name:
+          type: string
+        slug:
+          type: string
+        visibility:
+          type: string
+          enum: [private, unlisted, public]
+        state:
+          type: string
+          const: active
+        revision:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    PublishedVersion:
+      type: object
+      additionalProperties: false
+      required: [artifact, version]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/Artifact"
+        version:
+          type: object
+          additionalProperties: false
+          required: [id, artifactId, version, contentHash, publishedAt, content]
+          properties:
+            id:
+              type: string
+            artifactId:
+              type: string
+            version:
+              type: string
+            contentHash:
+              type: string
+              pattern: "^sha256:[0-9a-f]{64}$"
+            publishedAt:
+              type: string
+              format: date-time
+            content:
+              allOf:
+                - $ref: "#/components/schemas/DraftContent"
+                - type: object
+                  properties:
+                    knowledgeFiles:
+                      type: array
+                      items:
+                        allOf:
+                          - $ref: "#/components/schemas/DraftContent/properties/knowledgeFiles/items"
+                          - type: object
+                            properties:
+                              contentHash:
+                                type: string
     CreateArtifactRequest:
       type: object
       additionalProperties: false

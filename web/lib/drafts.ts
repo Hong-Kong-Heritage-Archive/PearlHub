@@ -24,6 +24,19 @@ export interface Draft extends DraftInput {
   updatedAt: string;
 }
 
+export interface DraftSummary {
+  id: string;
+  artifactId: string | null;
+  baseVersionId: string | null;
+  name: string;
+  slug: string;
+  visibility: ArtifactVisibility;
+  state: "active";
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PublishedContent extends Omit<DraftContent, "knowledgeFiles"> {
   knowledgeFiles: Array<{ path: string; content: string; contentHash: string }>;
 }
@@ -63,6 +76,20 @@ export async function createDraft(input: DraftInput, token: string, signal?: Abo
 
 export async function getDraft(draftId: string, token: string, signal?: AbortSignal): Promise<Draft> {
   return readDraft(await request(`/drafts/${encodeURIComponent(draftId)}`, "GET", undefined, token, signal));
+}
+
+export async function listDrafts(token: string, signal?: AbortSignal): Promise<DraftSummary[]> {
+  const response = await request("/drafts", "GET", undefined, token, signal);
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new DraftRequestError("The API returned an invalid Draft list response.", response.status, "INVALID_RESPONSE");
+  }
+  if (!Array.isArray(payload) || !payload.every(isDraftSummary)) {
+    throw new DraftRequestError("The API returned an unexpected Draft list response.", response.status, "INVALID_RESPONSE");
+  }
+  return payload;
 }
 
 export async function updateDraft(draft: DraftInput & { revision: number; id: string }, token: string, signal?: AbortSignal): Promise<Draft> {
@@ -187,6 +214,17 @@ function isDraft(value: unknown): value is Draft {
     && isVisibility(value.visibility) && isDraftContent(value.content)
     && ["active", "published", "discarded"].includes(String(value.state))
     && Number.isInteger(value.revision) && typeof value.createdAt === "string" && typeof value.updatedAt === "string";
+}
+
+function isDraftSummary(value: unknown): value is DraftSummary {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && (typeof value.artifactId === "string" || value.artifactId === null)
+    && (typeof value.baseVersionId === "string" || value.baseVersionId === null)
+    && typeof value.name === "string" && typeof value.slug === "string"
+    && isVisibility(value.visibility) && value.state === "active"
+    && Number.isInteger(value.revision)
+    && typeof value.createdAt === "string" && typeof value.updatedAt === "string";
 }
 
 function isPublishedVersion(value: unknown): value is PublishedVersion {

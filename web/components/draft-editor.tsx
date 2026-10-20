@@ -104,6 +104,7 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
         <nav className="site-nav" aria-label="Main navigation">
           <Link href="/">Discover</Link>
           <Link className="nav-create-link" href="/create" aria-current="page">Create Draft</Link>
+          <Link href="/drafts">My Drafts</Link>
         </nav>
       </header>
       <section className="intro" aria-labelledby="page-title">
@@ -122,6 +123,11 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
         )}
         {error && <p className="create-error" role="alert">{error}</p>}
         {message && <p className="create-success" role="status">{message}</p>}
+        {draft?.state === "active" && (
+          <p className="field-help">
+            Saved Draft: <Link href={`/draft/${encodeURIComponent(draft.id)}`}>open this Draft</Link> or <Link href="/drafts">find it in My Drafts</Link>.
+          </p>
+        )}
         <form className="create-form" onSubmit={submit} noValidate>
           <label className="field" htmlFor="draft-token">
             <span>Developer bearer token <span className="required-mark">(required)</span></span>

@@ -71,6 +71,8 @@ describe("Draft editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
 
     expect(await screen.findByRole("button", { name: "Save Draft" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "open this Draft" })).toHaveAttribute("href", "/draft/draft-123");
+    expect(screen.getByRole("link", { name: "find it in My Drafts" })).toHaveAttribute("href", "/drafts");
     expect(screen.getByText("Draft — not published")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Preview Draft content"));
     expect(screen.getByText("guide.md")).toBeInTheDocument();

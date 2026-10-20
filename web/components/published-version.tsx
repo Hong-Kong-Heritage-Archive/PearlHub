@@ -41,7 +41,7 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
     <main className="page-shell">
       <header className="site-header">
         <Link className="wordmark" href="/">PearlHub</Link>
-        <nav className="site-nav" aria-label="Main navigation"><Link href="/">Discover</Link><Link href="/create">Create Draft</Link></nav>
+        <nav className="site-nav" aria-label="Main navigation"><Link href="/">Discover</Link><Link href="/create">Create Draft</Link><Link href="/drafts">My Drafts</Link></nav>
       </header>
       <section className="intro">
         <p className="eyebrow">IMMUTABLE VERSION</p>

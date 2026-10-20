@@ -23,6 +23,7 @@ const version = ArtifactVersion.create({
 function makeApp(overrides: Partial<DraftWorkflow> = {}) {
   const drafts: DraftWorkflow = {
     create: vi.fn(async () => storedDraft),
+    list: vi.fn(async () => [storedDraft]),
     get: vi.fn(async () => storedDraft),
     update: vi.fn(async () => storedDraft),
     discard: vi.fn(async () => {}),
@@ -36,6 +37,7 @@ function makeApp(overrides: Partial<DraftWorkflow> = {}) {
     authenticate: async (headers) => {
       if (headers.get("authorization") === "Bearer owner-token") return { userId: "owner-id" };
       if (headers.get("authorization") === "Bearer other-token") return { userId: "other-id" };
+      if (headers.has("authorization")) return { userId: "owner-id" };
       return null;
     },
   };
@@ -44,6 +46,28 @@ function makeApp(overrides: Partial<DraftWorkflow> = {}) {
 }
 
 describe("Draft and published-version HTTP routes", () => {
+  it("requires authentication and returns owner-scoped Draft summaries without content", async () => {
+    const { app, drafts } = makeApp();
+    const anonymous = await app.request("/api/v1/drafts");
+    expect(anonymous.status).toBe(401);
+
+    const response = await app.request("/api/v1/drafts", { headers: { authorization: "******" } });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([{
+      id: "draft-id",
+      artifactId: null,
+      baseVersionId: null,
+      name: "Pearl",
+      slug: "pearl",
+      visibility: "public",
+      state: "active",
+      revision: 1,
+      createdAt: date.toISOString(),
+      updatedAt: date.toISOString(),
+    }]);
+    expect(drafts.list).toHaveBeenCalledWith({ actorId: "owner-id" });
+  });
+
   it("creates an owner-bound Draft and publishes it through one request", async () => {
     const { app, drafts } = makeApp();
     const created = await app.request("/api/v1/drafts", {

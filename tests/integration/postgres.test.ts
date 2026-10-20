@@ -9,6 +9,7 @@ import { PostgresArtifactDiscoveryRepository, PostgresArtifactRepository, Postgr
 import { MemoryArtifactContentStore } from "../../src/adapters/content-store.js";
 import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
+import { Draft } from "../../src/domain/draft.js";
 import { Dependency } from "../../src/domain/dependency.js";
 import { DevelopmentOnlyFakeAuthenticator } from "../../src/http/testing/development-fake-authenticator.js";
 import { createPostgresRuntime } from "../../src/runtime.js";
@@ -151,12 +152,27 @@ describe("PostgreSQL persistence hardening", () => {
       expect(draft).toMatchObject({ ownerId: owners[0], revision: 1, state: "active" });
       expect((await pool.query("SELECT id FROM artifacts WHERE owner_id=$1 AND slug=$2", [owners[0], requestBody.slug])).rows).toEqual([]);
 
+      const otherOwnerDraft = Draft.create({
+        id: randomUUID(), ownerId: owners[1]!, artifactId: null, baseVersionId: null,
+        name: "Other owner's private Draft", slug: `other-owner-${randomUUID().slice(0, 8)}`,
+        visibility: "private", content: { instructions: "Private", knowledgeFiles: [], dependencies: [] },
+        createdAt: new Date(), updatedAt: new Date(),
+      });
+      await new PostgresDraftRepository(pool).create(otherOwnerDraft);
+      const draftList = await runtime.app.request("/api/v1/drafts", { headers });
+      expect(draftList.status).toBe(200);
+      const listedDrafts = await draftList.json() as Array<Record<string, unknown>>;
+      expect(listedDrafts.map((item) => item.id)).toEqual([draft.id]);
+      expect(listedDrafts[0]).not.toHaveProperty("content");
+
       const publish = await runtime.app.request(`/api/v1/drafts/${draft.id}/publish`, {
         method: "POST",
         headers,
         body: JSON.stringify({ revision: draft.revision }),
       });
       expect(publish.status, await publish.clone().text()).toBe(201);
+      const emptyDraftList = await runtime.app.request("/api/v1/drafts", { headers });
+      expect(await emptyDraftList.json()).toEqual([]);
       const body = await publish.json() as { artifact: { id: string; ownerId: string; name: string; slug: string; visibility: string; createdAt: string; updatedAt: string }; version: { id: string; version: string; contentHash: string; content: { instructions: string; knowledgeFiles: Array<{ path: string; content: string; contentHash: string }>; dependencies: unknown[] } } };
       expect(body.artifact).toMatchObject({ ownerId: owners[0], name: requestBody.name, slug: requestBody.slug, visibility: requestBody.visibility });
       expect(body.version).toMatchObject({ version: "0.1.0", contentHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/), content: { instructions: requestBody.content.instructions, knowledgeFiles: [{ path: "guide/usage.md", content: "Reference content.", contentHash: expect.stringMatching(/^sha256:/) }], dependencies: [] } });

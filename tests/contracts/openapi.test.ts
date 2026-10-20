@@ -73,6 +73,8 @@ describe("canonical OpenAPI contract", () => {
     expect(canonicalDocument.paths).toHaveProperty("/api/v1/artifacts");
     expect(canonicalDocument.paths).not.toHaveProperty("/api/v1/pearls");
     expect(Object.keys(canonicalDocument.paths)).toContain("/api/v1/drafts");
+    expect(canonicalDocument.paths["/api/v1/drafts"]?.get).toBeDefined();
+    expect(canonicalDocument.paths["/api/v1/drafts"]?.post).toBeDefined();
     expect(Object.keys(canonicalDocument.paths)).toContain("/api/v1/artifacts");
     expect(canonicalDocument.paths["/api/v1/artifacts"]?.get).toBeDefined();
     expect(canonicalDocument.paths["/api/v1/artifacts"]?.post).toBeDefined();
@@ -171,6 +173,12 @@ describe("canonical OpenAPI contract", () => {
     );
 
     expect(response.status).toBe(200);
+    const canonicalDraftList = canonicalDocument.paths["/api/v1/drafts"]?.get;
+    const runtimeDraftList = runtimeDocument.paths["/api/v1/drafts"]?.get;
+    expect(runtimeDraftList?.security).toEqual(canonicalDraftList?.security);
+    expect(Object.keys(runtimeDraftList?.responses ?? {}).sort()).toEqual(
+      Object.keys(canonicalDraftList?.responses ?? {}).sort(),
+    );
     expect(runtimeDocument.openapi).toBe("3.1.0");
     const canonicalDiscovery = canonicalDocument.paths["/api/v1/artifacts"]?.get;
     const runtimeDiscovery = runtimeDocument.paths["/api/v1/artifacts"]?.get;

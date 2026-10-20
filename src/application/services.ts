@@ -37,6 +37,7 @@ export interface RestoreAccessPolicy {
 
 export interface DraftWorkflow {
   create(input: { actorId: string; name: string; slug: string; visibility: ArtifactVisibility; content: DraftContent }): Promise<Draft>;
+  list(input: { actorId: string }): Promise<Draft[]>;
   get(input: { actorId: string; draftId: string }): Promise<Draft>;
   update(input: { actorId: string; draftId: string; revision: number; name: string; slug: string; visibility: ArtifactVisibility; content: DraftContent }): Promise<Draft>;
   discard(input: { actorId: string; draftId: string; revision: number }): Promise<void>;
@@ -70,6 +71,11 @@ export class DraftWorkflowService implements DraftWorkflow {
     });
     await this.drafts.create(draft);
     return draft;
+  }
+
+  async list(input: { actorId: string }): Promise<Draft[]> {
+    const drafts = await this.drafts.findActiveByOwner(input.actorId);
+    return drafts.filter((draft) => draft.ownerId === input.actorId && draft.state === "active");
   }
 
   async get(input: { actorId: string; draftId: string }): Promise<Draft> {

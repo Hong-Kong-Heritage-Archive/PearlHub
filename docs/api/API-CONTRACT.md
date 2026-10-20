@@ -144,6 +144,7 @@ version atomically; direct Artifact creation is retired.
 | Method | Endpoint | Purpose | Status |
 |---|---|---|---|
 | POST | `/drafts` | Create a private unpublished Draft | Implemented |
+| GET | `/drafts` | List the caller's active Draft summaries | Implemented |
 | GET | `/drafts/{draftId}` | Read an owner-authorized Draft | Implemented |
 | PUT | `/drafts/{draftId}` | Update with revision-based concurrency | Implemented |
 | DELETE | `/drafts/{draftId}?revision={revision}` | Discard an unpublished Draft | Implemented |

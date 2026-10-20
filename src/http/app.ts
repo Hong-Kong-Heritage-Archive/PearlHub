@@ -40,6 +40,18 @@ const draftResponseSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 }).openapi("Draft");
+const draftSummaryResponseSchema = z.object({
+  id: z.string(),
+  artifactId: z.string().nullable(),
+  baseVersionId: z.string().nullable(),
+  name: z.string(),
+  slug: z.string(),
+  visibility: z.enum(["private", "unlisted", "public"]),
+  state: z.literal("active"),
+  revision: z.number().int(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+}).openapi("DraftSummary");
 
 const artifactResponseSchema = z.object({
   id: z.string(),
@@ -181,6 +193,14 @@ const createDraftRoute = createRoute({
   request: { body: { required: true, content: { "application/json": { schema: draftInputSchema } } } },
   responses: { 201: { description: "Draft created.", content: { "application/json": { schema: draftResponseSchema } } }, 400: { description: "Invalid Draft.", content: { "application/json": { schema: errorResponseSchema } } }, 401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } } },
 });
+const listDraftsRoute = createRoute({
+  method: "get", path: "/api/v1/drafts", tags: ["Drafts"], summary: "List the caller's active Drafts",
+  security: [{ BearerAuth: [] }],
+  responses: {
+    200: { description: "Active Draft summaries owned by the authenticated caller.", content: { "application/json": { schema: z.array(draftSummaryResponseSchema) } } },
+    401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
 const draftIdParams = z.object({ draftId: z.string().min(1) });
 const artifactVersionParams = z.object({ artifactId: z.string().min(1), version: z.string().min(1) });
 const artifactIdParams = z.object({ artifactId: z.string().min(1) });
@@ -287,6 +307,12 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
     const draft = await dependencies.drafts.create({ actorId: actor.userId, ...context.req.valid("json") });
     return context.json(toDraftResponse(draft), 201);
   });
+  app.openapi(listDraftsRoute, async (context) => {
+    const actor = await requirePrincipal(dependencies.authenticator, context.req.raw.headers);
+    if (!dependencies.drafts) throw new Error("Draft workflow is not configured.");
+    const drafts = await dependencies.drafts.list({ actorId: actor.userId });
+    return context.json(drafts.map(toDraftSummaryResponse), 200);
+  });
   app.openapi(getDraftRoute, async (context) => {
     const actor = await requirePrincipal(dependencies.authenticator, context.req.raw.headers);
     if (!dependencies.drafts) throw new Error("Draft workflow is not configured.");
@@ -360,6 +386,22 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
 function toDraftResponse(draft: import("../domain/draft.js").Draft) {
   const value = draft.snapshot();
   return { ...value, createdAt: value.createdAt.toISOString(), updatedAt: value.updatedAt.toISOString() };
+}
+
+function toDraftSummaryResponse(draft: import("../domain/draft.js").Draft) {
+  const value = draft.snapshot();
+  return {
+    id: value.id,
+    artifactId: value.artifactId,
+    baseVersionId: value.baseVersionId,
+    name: value.name,
+    slug: value.slug,
+    visibility: value.visibility,
+    state: "active" as const,
+    revision: value.revision,
+    createdAt: value.createdAt.toISOString(),
+    updatedAt: value.updatedAt.toISOString(),
+  };
 }
 
 interface CompleteSnapshot {

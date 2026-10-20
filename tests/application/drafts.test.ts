@@ -34,6 +34,7 @@ function fixture() {
     create: async (version) => { versions.push(version); },
   };
   const draftRepo: DraftRepository = {
+    findActiveByOwner: async (ownerId) => [...drafts.values()].filter((draft) => draft.ownerId === ownerId && draft.state === "active"),
     findById: async (value) => drafts.get(value) ?? null,
     findByIdForUpdate: async (value) => drafts.get(value) ?? null,
     create: async (draft) => { drafts.set(draft.id, draft); },
@@ -84,6 +85,17 @@ function fixture() {
 }
 
 describe("Draft workflow application service", () => {
+  it("lists only the caller's active Drafts", async () => {
+    const state = fixture();
+    const own = await state.service.create({ actorId: "owner", name: "Mine", slug: "mine", visibility: "private", content });
+    await state.service.create({ actorId: "other", name: "Theirs", slug: "theirs", visibility: "private", content });
+    await state.service.update({ actorId: "owner", draftId: own.id, revision: 1, name: "Mine", slug: "mine", visibility: "private", content });
+
+    expect(await state.service.list({ actorId: "owner" })).toEqual([
+      expect.objectContaining({ id: own.id, ownerId: "owner", state: "active", revision: 2 }),
+    ]);
+  });
+
   it("publishes a complete first 0.1.0 version and consumes the Draft exactly once", async () => {
     const state = fixture();
     const draft = await state.service.create({ actorId: "owner", name: "Pearl", slug: "pearl", visibility: "public", content });
