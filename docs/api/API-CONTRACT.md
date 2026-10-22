@@ -156,6 +156,14 @@ version atomically; direct Artifact creation is retired.
 | PATCH | `/artifacts/{artifactId}` | Update mutable metadata only | Planned |
 | DELETE | `/artifacts/{artifactId}` | Create tombstone | Planned |
 
+Until the Artifact PATCH endpoint is implemented, an owner can change an
+existing Artifact's visibility through the published-version workflow: create
+a work-copy, update its Draft with the desired `visibility` and current
+`revision`, then publish the updated revision. For example, setting
+`visibility` to `public` and publishing makes a private or unlisted Artifact
+public atomically with its next immutable Version. This requires owner
+authorization; updating a Draft alone does not change the Artifact.
+
 ### Version endpoints
 
 | Method | Endpoint | Purpose | Status |
@@ -606,12 +614,14 @@ Results use `{ "items": [...], "nextCursor": "..." }`. `nextCursor` is `null`
 when there is no next page. The API does not return totals. Pages use keyset
 pagination with `id` as a same-direction tie-breaker for every sort.
 
-Search tags are optional top-level fields in immutable Pearl version content;
-they are not accepted in the strict Artifact-create request. Tags are trimmed,
-lowercased, limited to 10 per Pearl and 50 characters each, and must match
-lowercase kebab syntax (`[a-z0-9]+(-[a-z0-9]+)*`). Empty, malformed, and
-duplicate tags are rejected. Matching is exact and case-insensitive after
-normalization.
+Search tags are optional top-level fields in Draft content and are retained in
+the immutable published Version content; they are not accepted in the retired
+strict Artifact-create request. Tags are trimmed, lowercased, limited to 10 per
+Pearl and 50 characters each, and must match lowercase kebab syntax
+(`[a-z0-9]+(-[a-z0-9]+)*`). Empty, malformed, and duplicate tags are rejected.
+Matching is exact and case-insensitive after normalization. Publishing projects
+the selected Version's normalized tags into Artifact discovery; creating a
+work-copy carries those tags forward.
 
 Discovery is not enabled until a provider-neutral application reindex has
 projected tags from each Artifact's latest SemVer version through the configured

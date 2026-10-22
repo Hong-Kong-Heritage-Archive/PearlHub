@@ -48,6 +48,8 @@ const initialState: DiscoveryState = {
 export default function ArtifactDiscovery() {
   const [filters, setFilters] = useState(defaultFilters);
   const [state, setState] = useState(initialState);
+  const [tokenInput, setTokenInput] = useState("");
+  const [token, setToken] = useState("");
   const [tagDraft, setTagDraft] = useState("");
   const [tagError, setTagError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
@@ -66,7 +68,7 @@ export default function ArtifactDiscovery() {
     });
 
     const timeout = window.setTimeout(() => {
-      void requestArtifacts(filters, null, controller.signal)
+      void requestArtifacts(filters, null, controller.signal, token)
         .then((page) => {
           if (!controller.signal.aborted) setState(makeLoadedState(page));
         })
@@ -82,7 +84,7 @@ export default function ArtifactDiscovery() {
       loadMoreController.current?.abort();
       loadMoreController.current = null;
     };
-  }, [filters, retryCount]);
+  }, [filters, retryCount, token]);
 
   function updateFilters(update: Partial<DiscoveryFilters>) {
     loadMoreController.current?.abort();
@@ -141,7 +143,7 @@ export default function ArtifactDiscovery() {
     loadMoreController.current = controller;
     setState((current) => ({ ...current, loadingMore: true, error: null, unavailable: false }));
     try {
-      const page = await requestArtifacts(filters, state.nextCursor, controller.signal);
+      const page = await requestArtifacts(filters, state.nextCursor, controller.signal, token);
       if (!controller.signal.aborted) setState((current) => appendPage(current, page));
     } catch (error: unknown) {
       if (!controller.signal.aborted) {
@@ -174,6 +176,42 @@ export default function ArtifactDiscovery() {
         <p className="intro-copy">
           Search and explore published Artifacts. Visibility and access are always determined by PearlHub.
         </p>
+      </section>
+
+      <section className="filter-panel" aria-label="Optional owner access">
+        <label className="field" htmlFor="discovery-token">
+          <span>Developer bearer token (optional)</span>
+          <input
+            id="discovery-token"
+            type="password"
+            autoComplete="off"
+            value={tokenInput}
+            onChange={(event) => setTokenInput(event.target.value)}
+            disabled={state.loading}
+          />
+          <span className="field-help">Enter your token to include your private Artifacts. Unlisted Artifacts require an explicit owner request. The token stays in memory and is sent only to the configured API.</span>
+        </label>
+        <div className="filter-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => setToken(tokenInput.trim())}
+            disabled={state.loading}
+          >
+            Apply bearer token
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => {
+              setToken(tokenInput.trim());
+              updateFilters({ visibility: "unlisted" });
+            }}
+            disabled={state.loading || !tokenInput.trim()}
+          >
+            Show my unlisted Artifacts
+          </button>
+        </div>
       </section>
 
       <section className="filter-panel" aria-label="Artifact filters">
@@ -273,7 +311,7 @@ export default function ArtifactDiscovery() {
           </label>
         </div>
         <p className="field-help visibility-help">
-          Filters only narrow what the API allows you to see; they never grant access.
+          Filters only narrow what the API allows you to see; they never grant access. Unlisted Artifacts are excluded by default and require your owner token plus the Unlisted filter.
         </p>
         <div className="filter-actions">
           <button className="secondary-button" type="button" onClick={clearFilters}>Clear filters</button>

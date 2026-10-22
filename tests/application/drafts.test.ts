@@ -13,6 +13,7 @@ function fixture() {
   const artifacts: Artifact[] = [];
   const versions: ArtifactVersion[] = [];
   const dependencies: Array<{ artifactVersionId: string; targetArtifactId: string; declaredRange: string }> = [];
+  const projections: Array<{ artifactId: string; versionId: string | null; tags: string[] }> = [];
   const drafts = new Map<string, Draft>();
   let failDependencyWrite = false;
   let id = 0;
@@ -52,7 +53,7 @@ function fixture() {
   const discovery: ArtifactDiscoveryRepository = {
     findPage: async () => ({ rows: [], hasMore: false }),
     findArtifactIdsAfter: async () => [],
-    replaceTagProjection: async () => {},
+    replaceTagProjection: async (artifactId, versionId, tags) => { projections.push({ artifactId, versionId, tags }); },
     clearTagProjections: async () => {},
     isReady: async () => true,
     setReady: async () => {},
@@ -81,7 +82,7 @@ function fixture() {
     discovery, transactions,
     { next: () => `generated-${++id}` }, { now: () => at },
   );
-  return { service, artifacts, versions, dependencies, drafts, setFailDependencyWrite: (value: boolean) => { failDependencyWrite = value; } };
+  return { service, artifacts, versions, dependencies, drafts, projections, setFailDependencyWrite: (value: boolean) => { failDependencyWrite = value; } };
 }
 
 describe("Draft workflow application service", () => {
@@ -98,12 +99,16 @@ describe("Draft workflow application service", () => {
 
   it("publishes a complete first 0.1.0 version and consumes the Draft exactly once", async () => {
     const state = fixture();
-    const draft = await state.service.create({ actorId: "owner", name: "Pearl", slug: "pearl", visibility: "public", content });
+    const draft = await state.service.create({
+      actorId: "owner", name: "Pearl", slug: "pearl", visibility: "public",
+      content: { ...content, tags: [" RAG ", "Language-Model"] },
+    });
     const result = await state.service.publish({ actorId: "owner", draftId: draft.id, revision: 1 });
 
     expect(result.artifact.name).toBe("Pearl");
     expect(result.version.version).toBe("0.1.0");
-    expect(result.version.contentSnapshot).toMatchObject({ instructions: content.instructions, knowledgeFiles: [{ path: "guide.md", content: "Keep private data safe.", contentHash: expect.stringMatching(/^sha256:/) }], dependencies: content.dependencies });
+    expect(result.version.contentSnapshot).toMatchObject({ instructions: content.instructions, tags: ["rag", "language-model"], knowledgeFiles: [{ path: "guide.md", content: "Keep private data safe.", contentHash: expect.stringMatching(/^sha256:/) }], dependencies: content.dependencies });
+    expect(state.projections).toEqual([{ artifactId: result.artifact.id, versionId: result.version.id, tags: ["rag", "language-model"] }]);
     expect(state.dependencies).toEqual([{ artifactVersionId: result.version.id, ...content.dependencies[0] }]);
     expect(state.drafts.get(draft.id)?.state).toBe("published");
     await expect(state.service.publish({ actorId: "owner", draftId: draft.id, revision: 1 })).rejects.toMatchObject({ code: "DRAFT_NOT_ACTIVE" });
@@ -134,13 +139,47 @@ describe("Draft workflow application service", () => {
   it("creates owner-only work-copies from a selected snapshot without mutating its source", async () => {
     const state = fixture();
     const artifact = Artifact.create({ id: "artifact", ownerId: "owner", name: "Pearl", slug: "pearl", visibility: "public", createdAt: at });
-    const version = ArtifactVersion.create({ id: "version-id", artifactId: artifact.id, version: "2.1.0", contentHash: "sha256:test", contentLocation: "postgres", contentSnapshot: { ...content, knowledgeFiles: [{ ...content.knowledgeFiles[0], contentHash: "sha256:file" }] }, createdAt: at, publishedAt: at });
+    const version = ArtifactVersion.create({ id: "version-id", artifactId: artifact.id, version: "2.1.0", contentHash: "sha256:test", contentLocation: "postgres", contentSnapshot: { ...content, tags: ["rag"], knowledgeFiles: [{ ...content.knowledgeFiles[0], contentHash: "sha256:file" }] }, createdAt: at, publishedAt: at });
     state.artifacts.push(artifact);
     state.versions.push(version);
     const copy = await state.service.createWorkCopy({ actorId: "owner", artifactId: artifact.id, version: version.version });
     expect(copy.baseVersionId).toBe(version.id);
-    expect(copy.content).toEqual(content);
+    expect(copy.content).toEqual({ ...content, tags: ["rag"] });
     expect(version.snapshot().version).toBe("2.1.0");
     await expect(state.service.createWorkCopy({ actorId: "someone-else", artifactId: artifact.id, version: version.version })).rejects.toBeInstanceOf(DomainError);
+  });
+
+  it.each(["private", "unlisted"] as const)("publishes an owner work-copy from %s visibility as public", async (visibility) => {
+    const state = fixture();
+    const artifact = Artifact.create({ id: "artifact", ownerId: "owner", name: "Pearl", slug: "pearl", visibility, createdAt: at });
+    const version = ArtifactVersion.create({
+      id: "version-id",
+      artifactId: artifact.id,
+      version: "2.1.0",
+      contentHash: "sha256:test",
+      contentLocation: "postgres",
+      contentSnapshot: { ...content, tags: ["rag"], knowledgeFiles: [{ ...content.knowledgeFiles[0], contentHash: "sha256:file" }] },
+      createdAt: at,
+      publishedAt: at,
+    });
+    state.artifacts.push(artifact);
+    state.versions.push(version);
+
+    const draft = await state.service.createWorkCopy({ actorId: "owner", artifactId: artifact.id, version: version.version });
+    const updated = await state.service.update({
+      actorId: "owner",
+      draftId: draft.id,
+      revision: draft.revision,
+      name: draft.name,
+      slug: draft.slug,
+      visibility: "public",
+      content: draft.content,
+    });
+    const result = await state.service.publish({ actorId: "owner", draftId: draft.id, revision: updated.revision });
+
+    expect(result.artifact.visibility).toBe("public");
+    expect(state.artifacts[0]?.visibility).toBe("public");
+    expect(result.version.version).toBe("2.1.1");
+    expect(version.version).toBe("2.1.0");
   });
 });

@@ -119,10 +119,12 @@ describe("PostgreSQL persistence hardening", () => {
   });
 
   it("creates a private Draft and atomically publishes a complete 0.1.0 PostgreSQL snapshot", async () => {
+    const ownerId = randomUUID();
+    await pool.query("INSERT INTO users (id, external_subject) VALUES ($1,$2)", [ownerId, `draft-owner-${ownerId}`]);
     const runtime = await createPostgresRuntime({
       databaseUrl,
       pool,
-      authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "integration-test-token"),
+      authenticator: new DevelopmentOnlyFakeAuthenticator(ownerId, "integration-test-token"),
       contentStore: new MemoryArtifactContentStore(),
     });
 
@@ -133,11 +135,12 @@ describe("PostgreSQL persistence hardening", () => {
     const requestBody = {
       name: "PostgreSQL HTTP Artifact",
       slug: "postgresql-http-artifact",
-      visibility: "public",
+      visibility: "private",
       content: {
         instructions: "Use the knowledge file.",
         knowledgeFiles: [{ path: "guide/usage.md", content: "Reference content." }],
         dependencies: [],
+        tags: [" RAG ", "language-model"],
       },
     };
 
@@ -149,8 +152,8 @@ describe("PostgreSQL persistence hardening", () => {
       });
       expect(response.status).toBe(201);
       const draft = await response.json() as { id: string; ownerId: string; revision: number; state: string };
-      expect(draft).toMatchObject({ ownerId: owners[0], revision: 1, state: "active" });
-      expect((await pool.query("SELECT id FROM artifacts WHERE owner_id=$1 AND slug=$2", [owners[0], requestBody.slug])).rows).toEqual([]);
+      expect(draft).toMatchObject({ ownerId, revision: 1, state: "active" });
+      expect((await pool.query("SELECT id FROM artifacts WHERE owner_id=$1 AND slug=$2", [ownerId, requestBody.slug])).rows).toEqual([]);
 
       const otherOwnerDraft = Draft.create({
         id: randomUUID(), ownerId: owners[1]!, artifactId: null, baseVersionId: null,
@@ -173,9 +176,9 @@ describe("PostgreSQL persistence hardening", () => {
       expect(publish.status, await publish.clone().text()).toBe(201);
       const emptyDraftList = await runtime.app.request("/api/v1/drafts", { headers });
       expect(await emptyDraftList.json()).toEqual([]);
-      const body = await publish.json() as { artifact: { id: string; ownerId: string; name: string; slug: string; visibility: string; createdAt: string; updatedAt: string }; version: { id: string; version: string; contentHash: string; content: { instructions: string; knowledgeFiles: Array<{ path: string; content: string; contentHash: string }>; dependencies: unknown[] } } };
-      expect(body.artifact).toMatchObject({ ownerId: owners[0], name: requestBody.name, slug: requestBody.slug, visibility: requestBody.visibility });
-      expect(body.version).toMatchObject({ version: "0.1.0", contentHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/), content: { instructions: requestBody.content.instructions, knowledgeFiles: [{ path: "guide/usage.md", content: "Reference content.", contentHash: expect.stringMatching(/^sha256:/) }], dependencies: [] } });
+      const body = await publish.json() as { artifact: { id: string; ownerId: string; name: string; slug: string; visibility: string; createdAt: string; updatedAt: string }; version: { id: string; version: string; contentHash: string; content: { instructions: string; tags: string[]; knowledgeFiles: Array<{ path: string; content: string; contentHash: string }>; dependencies: unknown[] } } };
+      expect(body.artifact).toMatchObject({ ownerId, name: requestBody.name, slug: requestBody.slug, visibility: requestBody.visibility });
+      expect(body.version).toMatchObject({ version: "0.1.0", contentHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/), content: { instructions: requestBody.content.instructions, tags: ["rag", "language-model"], knowledgeFiles: [{ path: "guide/usage.md", content: "Reference content.", contentHash: expect.stringMatching(/^sha256:/) }], dependencies: [] } });
 
       const stored = await pool.query<{ id: string; owner_id: string; name: string; slug: string; visibility: string; status: string; created_at: Date; updated_at: Date }>(
         "SELECT id,owner_id,name,slug,visibility,status,created_at,updated_at FROM artifacts WHERE id=$1",
@@ -183,7 +186,7 @@ describe("PostgreSQL persistence hardening", () => {
       );
       expect(stored.rows[0]).toEqual({
         id: body.artifact.id,
-        owner_id: owners[0],
+        owner_id: ownerId,
         name: requestBody.name,
         slug: requestBody.slug,
         visibility: requestBody.visibility,
@@ -198,9 +201,22 @@ describe("PostgreSQL persistence hardening", () => {
       expect(persistedVersion.rows[0]).toMatchObject({ version: "0.1.0", content_snapshot: body.version.content });
       expect(await pool.query("SELECT state FROM drafts WHERE id=$1", [draft.id])).toMatchObject({ rows: [{ state: "published" }] });
 
-      const readVersion = await runtime.app.request(`/api/v1/artifacts/${body.artifact.id}/versions/0.1.0`);
+      const readVersion = await runtime.app.request(`/api/v1/artifacts/${body.artifact.id}/versions/0.1.0`, { headers });
       expect(readVersion.status).toBe(200);
       expect(await readVersion.json()).toMatchObject({ version: { content: body.version.content, contentHash: body.version.contentHash } });
+
+      const ownerDiscovery = await runtime.app.request("/api/v1/artifacts?visibility=private", { headers });
+      expect(ownerDiscovery.status).toBe(200);
+      const ownerPage = await ownerDiscovery.json() as { items: Array<{ id: string; visibility: string; tags: string[] }> };
+      expect(ownerPage.items).toContainEqual(expect.objectContaining({
+        id: body.artifact.id,
+        visibility: "private",
+        tags: ["rag", "language-model"],
+      }));
+      const anonymousDiscovery = await runtime.app.request("/api/v1/artifacts?visibility=private");
+      expect(anonymousDiscovery.status).toBe(200);
+      expect((await anonymousDiscovery.json() as { items: Array<{ id: string }> }).items)
+        .not.toContainEqual(expect.objectContaining({ id: body.artifact.id }));
 
       const repeatPublish = await runtime.app.request(`/api/v1/drafts/${draft.id}/publish`, {
         method: "POST",

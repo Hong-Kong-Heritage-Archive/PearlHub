@@ -5,7 +5,7 @@ import { ArtifactVersion } from "../domain/artifact-version.js";
 import { Draft, hashDraftContent, hashKnowledgeFile, type DraftContent } from "../domain/draft.js";
 import { Dependency } from "../domain/dependency.js";
 import { DomainError } from "../domain/errors.js";
-import { normalizePearlContent, readPearlTags } from "../domain/discovery.js";
+import { normalizePearlContent, normalizePearlTags, readPearlTags } from "../domain/discovery.js";
 import { parsePearlContent } from "../domain/pearl.js";
 import { createForkLineage, type CompatibilityReport, type DependencyResolution, type Provenance } from "../domain/records.js";
 import type {
@@ -114,6 +114,7 @@ export class DraftWorkflowService implements DraftWorkflow {
     }
     const contentInput: DraftContent = {
       instructions: content.instructions,
+      tags: normalizePearlTags(content.tags ?? []),
       knowledgeFiles: content.knowledgeFiles.map((file) => {
         if (!file || typeof file !== "object" || !("path" in file) || !("content" in file) || typeof file.path !== "string" || typeof file.content !== "string") {
           throw new DomainError("VERSION_CONTENT_UNAVAILABLE", "Artifact Version content snapshot is invalid.");
@@ -178,6 +179,7 @@ export class DraftWorkflowService implements DraftWorkflow {
       const contentHash = hashDraftContent(content);
       const contentSnapshot = {
         instructions: content.instructions,
+        tags: content.tags ?? [],
         knowledgeFiles: content.knowledgeFiles.map((file) => ({ ...file, contentHash: hashKnowledgeFile(file.content) })),
         dependencies: content.dependencies,
       };
@@ -193,7 +195,7 @@ export class DraftWorkflowService implements DraftWorkflow {
           declaredRange: declaration.declaredRange, createdAt: now,
         }));
       }
-      await this.discovery.replaceTagProjection(artifact.id, version.id, []);
+      await this.discovery.replaceTagProjection(artifact.id, version.id, content.tags ?? []);
       await this.drafts.save(draft.consume(input.revision, now));
       return { artifact, version };
     });

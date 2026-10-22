@@ -8,7 +8,7 @@ import { createHttpApp } from "../../src/http/app.js";
 import type { Authenticator } from "../../src/http/authentication.js";
 
 const date = new Date("2026-01-01T00:00:00.000Z");
-const pearlContent = { instructions: "Do work", knowledgeFiles: [{ path: "guide.md", content: "Knowledge" }], dependencies: [] };
+const pearlContent = { instructions: "Do work", knowledgeFiles: [{ path: "guide.md", content: "Knowledge" }], dependencies: [], tags: ["rag"] };
 const storedDraft = Draft.create({
   id: "draft-id", ownerId: "owner-id", artifactId: null, baseVersionId: null,
   name: "Pearl", slug: "pearl", visibility: "public", content: pearlContent, createdAt: date, updatedAt: date,
@@ -86,7 +86,7 @@ describe("Draft and published-version HTTP routes", () => {
     expect(published.status).toBe(201);
     expect(await published.json()).toMatchObject({
       artifact: { id: "artifact-id", name: "Pearl" },
-      version: { id: "version-id", version: "0.1.0", content: { instructions: "Do work" } },
+      version: { id: "version-id", version: "0.1.0", content: { instructions: "Do work", tags: ["rag"] } },
     });
     expect(drafts.publish).toHaveBeenCalledWith({ actorId: "owner-id", draftId: "draft-id", revision: 1 });
   });

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import PublishedVersionView from "../components/published-version";
 
@@ -41,7 +41,11 @@ describe("published version view", () => {
     expect(screen.getByText("dependency-1 ^2.1.0")).toBeInTheDocument();
     expect(screen.queryByLabelText(/Instructions/)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Create work-copy from this version" }));
+    const workCopyButton = screen.getByRole("button", { name: "Create work-copy from this version" });
+    act(() => {
+      fireEvent.click(workCopyButton);
+      fireEvent.click(workCopyButton);
+    });
     await vi.waitFor(() => expect(routerPush).toHaveBeenCalledWith("/draft/draft-copy"));
     expect(mock).toHaveBeenCalledTimes(2);
     const [url, init = {}] = mock.mock.calls[1]!;

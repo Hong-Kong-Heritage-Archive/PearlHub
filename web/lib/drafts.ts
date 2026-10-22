@@ -4,6 +4,7 @@ export interface DraftContent {
   instructions: string;
   knowledgeFiles: Array<{ path: string; content: string }>;
   dependencies: Array<{ targetArtifactId: string; declaredRange: string }>;
+  tags?: string[];
 }
 
 export interface DraftInput {
@@ -130,12 +131,13 @@ export async function createWorkCopy(artifactId: string, version: string, token:
 }
 
 async function request(path: string, method: string, body: unknown, token?: string, signal?: AbortSignal): Promise<Response> {
+  const url = buildApiUrl(path);
   const headers = new Headers({ Accept: "application/json" });
   if (token?.trim()) headers.set("Authorization", `Bearer ${token.trim()}`);
   if (body !== undefined) headers.set("Content-Type", "application/json");
   let response: Response;
   try {
-    response = await fetch(buildApiUrl(path), {
+    response = await fetch(url, {
       method,
       headers,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -150,7 +152,10 @@ async function request(path: string, method: string, body: unknown, token?: stri
 }
 
 function buildApiUrl(path: string): URL {
-  const base = process.env.NEXT_PUBLIC_PEARLHUB_API_BASE_URL ?? "http://localhost:8080";
+  const base = process.env.NEXT_PUBLIC_PEARLHUB_API_BASE_URL;
+  if (!base?.trim()) {
+    throw new DraftRequestError("The PearlHub API base URL is not configured.", 0, "API_URL_NOT_CONFIGURED");
+  }
   let url: URL;
   try {
     url = new URL(base);
@@ -238,12 +243,14 @@ function isPublishedVersion(value: unknown): value is PublishedVersion {
 
 function isDraftContent(value: unknown): value is DraftContent {
   return isRecord(value) && typeof value.instructions === "string"
+    && (value.tags === undefined || (Array.isArray(value.tags) && value.tags.every((tag) => typeof tag === "string")))
     && Array.isArray(value.knowledgeFiles) && value.knowledgeFiles.every((file) => isRecord(file) && typeof file.path === "string" && typeof file.content === "string")
     && Array.isArray(value.dependencies) && value.dependencies.every((dependency) => isRecord(dependency) && typeof dependency.targetArtifactId === "string" && typeof dependency.declaredRange === "string");
 }
 
 function isPublishedContent(value: unknown): value is PublishedContent {
   return isRecord(value) && typeof value.instructions === "string"
+    && (value.tags === undefined || (Array.isArray(value.tags) && value.tags.every((tag) => typeof tag === "string")))
     && Array.isArray(value.knowledgeFiles) && value.knowledgeFiles.every((file) => isRecord(file) && typeof file.path === "string" && typeof file.content === "string" && typeof file.contentHash === "string")
     && Array.isArray(value.dependencies) && value.dependencies.every((dependency) => isRecord(dependency) && typeof dependency.targetArtifactId === "string" && typeof dependency.declaredRange === "string");
 }

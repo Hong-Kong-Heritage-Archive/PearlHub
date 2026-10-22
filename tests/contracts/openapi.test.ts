@@ -75,6 +75,8 @@ describe("canonical OpenAPI contract", () => {
     expect(Object.keys(canonicalDocument.paths)).toContain("/api/v1/drafts");
     expect(canonicalDocument.paths["/api/v1/drafts"]?.get).toBeDefined();
     expect(canonicalDocument.paths["/api/v1/drafts"]?.post).toBeDefined();
+    expect(canonicalDocument.components.schemas.DraftContent?.properties).toHaveProperty("tags");
+    expect(canonicalDocument.components.schemas.DraftContent?.required).not.toContain("tags");
     expect(Object.keys(canonicalDocument.paths)).toContain("/api/v1/artifacts");
     expect(canonicalDocument.paths["/api/v1/artifacts"]?.get).toBeDefined();
     expect(canonicalDocument.paths["/api/v1/artifacts"]?.post).toBeDefined();

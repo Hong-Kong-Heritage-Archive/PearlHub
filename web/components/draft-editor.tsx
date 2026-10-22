@@ -9,6 +9,8 @@ interface DraftEditorProps {
   draftId?: string;
 }
 
+const tagPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
 export default function DraftEditor({ draftId }: DraftEditorProps) {
   const router = useRouter();
   const [token, setToken] = useState("");
@@ -19,6 +21,9 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
   const [instructions, setInstructions] = useState("");
   const [knowledgeFiles, setKnowledgeFiles] = useState<DraftContent["knowledgeFiles"]>([]);
   const [dependencies, setDependencies] = useState<DraftContent["dependencies"]>([]);
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagDraft, setTagDraft] = useState("");
+  const [tagError, setTagError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -32,10 +37,34 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
     setInstructions(value.content.instructions);
     setKnowledgeFiles(value.content.knowledgeFiles);
     setDependencies(value.content.dependencies);
+    setTags(value.content.tags ?? []);
   }
 
   function currentInput(): DraftInput {
-    return { name: name.trim(), slug, visibility, content: { instructions, knowledgeFiles, dependencies } };
+    return { name: name.trim(), slug, visibility, content: { instructions, knowledgeFiles, dependencies, tags } };
+  }
+
+  function addTags() {
+    const candidates = tagDraft.split(",").map((tag) => tag.trim().toLowerCase()).filter(Boolean);
+    if (candidates.length === 0) {
+      setTagError("Enter one or more tags separated by commas.");
+      return;
+    }
+    if (candidates.some((tag) => tag.length > 50 || !tagPattern.test(tag))) {
+      setTagError("Tags must use lowercase letters, numbers, and single hyphens (up to 50 characters).");
+      return;
+    }
+    if (new Set([...tags, ...candidates]).size !== tags.length + candidates.length) {
+      setTagError("Each tag can only be added once.");
+      return;
+    }
+    if (tags.length + candidates.length > 10) {
+      setTagError("You can add at most 10 tags.");
+      return;
+    }
+    setTags((current) => [...current, ...candidates]);
+    setTagDraft("");
+    setTagError(null);
   }
 
   async function perform(action: () => Promise<void>) {
@@ -150,6 +179,38 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
               <option value="public">Public</option>
             </select>
           </label>
+          <fieldset className="draft-editor-list">
+            <legend>Search tags</legend>
+            <label className="field" htmlFor="draft-tags">
+              <span>Tags</span>
+              <input
+                id="draft-tags"
+                value={tagDraft}
+                maxLength={560}
+                placeholder="rag, language-model"
+                aria-describedby={tagError ? "draft-tag-error draft-tag-help" : "draft-tag-help"}
+                aria-invalid={tagError !== null}
+                disabled={busy}
+                onChange={(event) => {
+                  setTagDraft(event.target.value);
+                  setTagError(null);
+                }}
+              />
+            </label>
+            <button className="secondary-button add-tag-button" type="button" onClick={addTags} disabled={busy}>Add tags</button>
+            <p className="field-help" id="draft-tag-help">Optional; comma-separated, up to 10 lowercase kebab-case tags.</p>
+            {tagError && <p className="field-error" id="draft-tag-error" role="alert">{tagError}</p>}
+            {tags.length > 0 && (
+              <ul className="tag-list" aria-label="Draft tags">
+                {tags.map((tag) => (
+                  <li className="tag-chip" key={tag}>
+                    <span>{tag}</span>
+                    <button type="button" aria-label={`Remove ${tag} tag`} onClick={() => setTags((current) => current.filter((item) => item !== tag))} disabled={busy}>×</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </fieldset>
           {editingExistingArtifact && <p className="field-help">This work-copy keeps its Artifact identity: name and slug cannot be changed.</p>}
           <label className="field" htmlFor="draft-instructions">
             <span>Instructions</span>
@@ -203,6 +264,7 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
             <p><strong>Name:</strong> {name}</p>
             <p><strong>Slug:</strong> {slug}</p>
             <p><strong>Visibility after publish:</strong> {visibility}</p>
+            <p><strong>Tags:</strong> {tags.length > 0 ? tags.join(", ") : "None"}</p>
             <h3>Instructions</h3><pre>{instructions}</pre>
             <h3>Knowledge files</h3>{knowledgeFiles.map((file, index) => <section key={`preview-file-${index}`}><h4>{file.path || "(no path)"}</h4><pre>{file.content}</pre></section>)}
             <h3>Dependencies</h3><pre>{JSON.stringify(dependencies, null, 2)}</pre>

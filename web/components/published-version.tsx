@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { createWorkCopy, DraftRequestError, getPublishedVersion, type PublishedVersion } from "../lib/drafts";
 
 export default function PublishedVersionView({ artifactId, version }: { artifactId: string; version: string }) {
   const router = useRouter();
+  const workCopyPending = useRef(false);
   const [token, setToken] = useState("");
   const [published, setPublished] = useState<PublishedVersion | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -25,6 +26,8 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
   }
 
   async function workCopy() {
+    if (workCopyPending.current) return;
+    workCopyPending.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -33,6 +36,7 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
     } catch (caught: unknown) {
       setError(caught instanceof DraftRequestError ? caught.message : "Could not create a work-copy.");
     } finally {
+      workCopyPending.current = false;
       setLoading(false);
     }
   }
@@ -62,6 +66,7 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
             <dl className="created-details">
               <div><dt>Artifact</dt><dd><Link href={`/artifacts/${encodeURIComponent(artifactId)}/versions`}>{published.artifact.slug} versions</Link></dd></div>
               <div><dt>Visibility</dt><dd>{published.artifact.visibility}</dd></div>
+              <div><dt>Tags</dt><dd>{published.version.content.tags?.length ? published.version.content.tags.join(", ") : "None"}</dd></div>
               <div><dt>Content hash</dt><dd><code>{published.version.contentHash}</code></dd></div>
               <div><dt>Published</dt><dd>{new Date(published.version.publishedAt).toLocaleString()}</dd></div>
             </dl>

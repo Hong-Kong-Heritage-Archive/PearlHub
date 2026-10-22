@@ -62,6 +62,8 @@ describe("Draft editor", () => {
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: "Pearl" } });
     fireEvent.change(screen.getByLabelText(/^Slug/), { target: { value: "pearl" } });
     fireEvent.change(screen.getByLabelText(/Instructions/), { target: { value: "Instructions" } });
+    fireEvent.change(screen.getByLabelText("Tags"), { target: { value: "RAG, Language-Model" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add tags" }));
     fireEvent.click(screen.getByRole("button", { name: "Add knowledge file" }));
     fireEvent.change(screen.getByLabelText("Relative path"), { target: { value: "guide.md" } });
     fireEvent.change(screen.getByLabelText("File content"), { target: { value: "Knowledge" } });
@@ -74,6 +76,8 @@ describe("Draft editor", () => {
     expect(screen.getByRole("link", { name: "open this Draft" })).toHaveAttribute("href", "/draft/draft-123");
     expect(screen.getByRole("link", { name: "find it in My Drafts" })).toHaveAttribute("href", "/drafts");
     expect(screen.getByText("Draft — not published")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Tags"), { target: { value: "Search" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add tags" }));
     fireEvent.click(screen.getByText("Preview Draft content"));
     expect(screen.getByText("guide.md")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText(/Instructions/), { target: { value: "Updated instructions" } });
@@ -88,7 +92,10 @@ describe("Draft editor", () => {
     expect(new Headers(requests[0]?.init.headers).get("authorization")).toBe("Bearer temporary-token");
     expect(JSON.parse(String(requests[0]?.init.body))).toMatchObject({
       name: "Pearl", slug: "pearl", visibility: "private",
-      content: { instructions: "Instructions", knowledgeFiles: [{ path: "guide.md", content: "Knowledge" }], dependencies: [{ targetArtifactId: "target-id", declaredRange: "^2.1.0" }] },
+      content: { instructions: "Instructions", knowledgeFiles: [{ path: "guide.md", content: "Knowledge" }], dependencies: [{ targetArtifactId: "target-id", declaredRange: "^2.1.0" }], tags: ["rag", "language-model"] },
+    });
+    expect(JSON.parse(String(requests[1]?.init.body))).toMatchObject({
+      content: { tags: ["rag", "language-model", "search"] },
     });
     expect(requests[2]?.url.pathname).toBe("/api/v1/drafts/draft-123/publish");
     expect(JSON.parse(String(requests[2]?.init.body))).toEqual({ revision: 2 });

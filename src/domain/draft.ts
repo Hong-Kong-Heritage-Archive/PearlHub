@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { DomainError } from "./errors.js";
+import { normalizePearlTags } from "./discovery.js";
 import { validateSemVerRange } from "./semver.js";
 import type { ArtifactVisibility } from "./artifact.js";
 
@@ -17,6 +18,7 @@ export interface DraftContent {
   instructions: string;
   knowledgeFiles: KnowledgeFile[];
   dependencies: DraftDependency[];
+  tags?: string[] | undefined;
 }
 
 export interface DraftState {
@@ -112,6 +114,7 @@ export function validateDraftContent(value: DraftContent): DraftContent {
   if (!value || typeof value.instructions !== "string" || !Array.isArray(value.knowledgeFiles) || !Array.isArray(value.dependencies)) {
     throw invalidDraft("Draft content requires instructions, knowledge files, and dependencies.");
   }
+  const tags = normalizePearlTags(value.tags ?? []);
   const paths = new Set<string>();
   const knowledgeFiles = value.knowledgeFiles.map((file) => {
     if (!file || typeof file.path !== "string" || typeof file.content !== "string") {
@@ -130,7 +133,7 @@ export function validateDraftContent(value: DraftContent): DraftContent {
     validateSemVerRange(dependency.declaredRange);
     return { targetArtifactId: dependency.targetArtifactId, declaredRange: dependency.declaredRange };
   }).sort((left, right) => compareStrings(left.targetArtifactId, right.targetArtifactId) || compareStrings(left.declaredRange, right.declaredRange));
-  return { instructions: value.instructions, knowledgeFiles: knowledgeFiles.sort((left, right) => compareStrings(left.path, right.path)), dependencies };
+  return { instructions: value.instructions, knowledgeFiles: knowledgeFiles.sort((left, right) => compareStrings(left.path, right.path)), dependencies, tags };
 }
 
 export function normalizeKnowledgePath(value: string): string {
@@ -173,7 +176,7 @@ function validateMetadata(name: string, slug: string, visibility: ArtifactVisibi
 }
 
 function copyContent(content: DraftContent): DraftContent {
-  return { instructions: content.instructions, knowledgeFiles: content.knowledgeFiles.map((file) => ({ ...file })), dependencies: content.dependencies.map((dependency) => ({ ...dependency })) };
+  return { instructions: content.instructions, knowledgeFiles: content.knowledgeFiles.map((file) => ({ ...file })), dependencies: content.dependencies.map((dependency) => ({ ...dependency })), tags: [...(content.tags ?? [])] };
 }
 
 function compareStrings(left: string, right: string): number {

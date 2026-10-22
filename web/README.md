@@ -17,7 +17,7 @@ npm start
 
 For an existing or manually migrated database, follow the backend's [development environment guide](../docs/backend/DEV_ENVIRONMENT_SETUP.md) before running migrations.
 
-The backend needs the local development fake-auth variables in `.env` to start, but the discovery page itself makes anonymous requests and does not send a token. This fake authenticator is development-only and is not a PearlHub login flow.
+The backend needs the local development fake-auth variables in `.env` to start. Discovery is anonymous by default; owners can enter a temporary bearer token to include their private Artifacts. This fake authenticator is development-only and is not a PearlHub login flow.
 
 In a second terminal:
 
@@ -27,11 +27,13 @@ npm ci
 npm run dev
 ```
 
-Open <http://localhost:3000>. The API base URL defaults to `http://localhost:8080`, matching the backend's `PORT` default. To use another backend origin, set `NEXT_PUBLIC_PEARLHUB_API_BASE_URL` before starting/building the frontend, for example:
+Open <http://localhost:3000>. Configure `NEXT_PUBLIC_PEARLHUB_API_BASE_URL` before starting or building the frontend; there is no hard-coded API-host fallback. For the local backend's default port:
 
 ```sh
-NEXT_PUBLIC_PEARLHUB_API_BASE_URL=http://localhost:8081 npm run dev
+NEXT_PUBLIC_PEARLHUB_API_BASE_URL=http://localhost:8080 npm run dev
 ```
+
+To use another backend origin, set the same variable to that origin. If it is missing or invalid, API requests show a configuration error instead of silently targeting a local server.
 
 The value is a public API origin/base path, not a credential. In development mode, the backend allows the default frontend origins `http://localhost:3000` and `http://127.0.0.1:3000`. Set `PEARLHUB_DEV_CORS_ORIGINS` in the backend environment to a comma-separated list of exact HTTP(S) origins if your frontend uses another origin. This allowlist is enabled only in development; the UI calls the configured API directly and does not proxy requests.
 
@@ -40,7 +42,7 @@ The value is a public API origin/base path, not a credential. In development mod
 - Search by Artifact name or slug, repeated tag filters, sort field/direction, visibility narrowing, and page-size controls.
 - Cursor-based “Load more” uses the opaque cursor returned by the API and deduplicates Artifact IDs.
 - Loading, empty, validation, network/API error, retry, and discovery-unavailable states.
-- Create Draft, find active private Drafts, edit/save with revision conflict handling, private preview, knowledge-file/dependency editing, and one-request Publish are provided through `GET/POST /api/v1/drafts`, `PUT /api/v1/drafts/{draftId}`, and `POST /api/v1/drafts/{draftId}/publish`.
+- Create Draft, find active private Drafts, edit/save with revision conflict handling, private preview, tag/knowledge-file/dependency editing, and one-request Publish are provided through `GET/POST /api/v1/drafts`, `PUT /api/v1/drafts/{draftId}`, and `POST /api/v1/drafts/{draftId}/publish`.
 - Published-version lists and immutable version views use `GET /api/v1/artifacts/{artifactId}/versions` and `GET /api/v1/artifacts/{artifactId}/versions/{version}`. The owner can create a work-copy from a selected version.
 - Authenticated operations require a bearer token entered into a temporary developer-only password field. The token stays in component memory, is sent only to the configured API URL, and is never persisted in browser storage. It is not a production login flow.
 - No production authentication or login flow is available. The developer token field is not a login system; the backend remains responsible for authentication and ownership.

@@ -19,6 +19,7 @@ const filters: DiscoveryFilters = {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 function artifact(id: string, name = `Pearl ${id}`): ArtifactSummary {
@@ -43,6 +44,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 function installFetch(handler: (url: URL, init: RequestInit) => Response | Promise<Response>) {
   const mock = vi.fn((input: RequestInfo | URL, init: RequestInit = {}) =>
     handler(new URL(input instanceof Request ? input.url : String(input)), init));
+  vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
   vi.stubGlobal("fetch", mock);
   return mock;
 }
@@ -92,6 +94,59 @@ describe("Artifact discovery page", () => {
     expect(screen.queryByText(/total results/i)).not.toBeInTheDocument();
   });
 
+  it("uses an optional owner token to list private Artifacts", async () => {
+    const mock = installFetch((_url, init) => new Headers(init.headers).has("authorization")
+      ? jsonResponse({
+        items: [{ ...artifact("owner-private", "My private Pearl"), visibility: "private" }],
+        nextCursor: null,
+      })
+      : jsonResponse({ items: [], nextCursor: null }));
+    render(<ArtifactDiscovery />);
+    expect(await screen.findByRole("heading", { name: "No Artifacts found" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply bearer token" }));
+
+    expect(await screen.findByRole("heading", { name: "My private Pearl" })).toBeInTheDocument();
+    const ownerRequest = mock.mock.calls.find(([, init]) =>
+      new Headers(init?.headers).get("authorization") === "Bearer owner-token");
+    expect(ownerRequest).toBeDefined();
+    expect(screen.getByLabelText(/Developer bearer token/)).toHaveAttribute("type", "password");
+  });
+
+  it("lists an owner's unlisted Artifacts only when the owner token and Unlisted filter are applied", async () => {
+    const mock = installFetch((url, init) => {
+      const isOwner = new Headers(init.headers).get("authorization") === "Bearer owner-token";
+      if (isOwner && url.searchParams.get("visibility") === "unlisted") {
+        return jsonResponse({
+          items: [{ ...artifact("owner-unlisted", "My unlisted Pearl"), visibility: "unlisted" }],
+          nextCursor: null,
+        });
+      }
+      return jsonResponse({ items: [], nextCursor: null });
+    });
+    render(<ArtifactDiscovery />);
+    expect(await screen.findByRole("heading", { name: "No Artifacts found" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Show my unlisted Artifacts" }));
+    expect(await screen.findByRole("heading", { name: "My unlisted Pearl" })).toBeInTheDocument();
+    expect(mock.mock.calls.some(([input, init]) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      return url.searchParams.get("visibility") === "unlisted"
+        && new Headers(init?.headers).get("authorization") === "Bearer owner-token";
+    })).toBe(true);
+  });
+
+  it("explains rejected owner tokens", async () => {
+    installFetch(() => jsonResponse({
+      error: { code: "UNAUTHENTICATED", message: "Authentication is required.", details: {} },
+    }, 401));
+    render(<ArtifactDiscovery />);
+    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "invalid-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply bearer token" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("The bearer token was rejected.");
+  });
+
   it("shows a useful API validation message for a 400 response", async () => {
     installFetch(() => jsonResponse({
       error: { code: "INVALID_REQUEST", message: "Search query must contain 1 to 100 characters.", details: {} },
@@ -103,6 +158,7 @@ describe("Artifact discovery page", () => {
 
   it("announces loading and shows a concise retryable network error", async () => {
     const mock = vi.fn().mockRejectedValue(new TypeError("network detail must not be shown"));
+    vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
     vi.stubGlobal("fetch", mock);
     render(<ArtifactDiscovery />);
 

@@ -19,6 +19,7 @@ const draftContentSchema = z.object({
   instructions: z.string(),
   knowledgeFiles: z.array(z.object({ path: z.string(), content: z.string() }).strict()),
   dependencies: z.array(z.object({ targetArtifactId: z.string().min(1), declaredRange: z.string() }).strict()),
+  tags: z.array(z.string()).optional(),
 }).strict().openapi("DraftContent");
 const draftInputSchema = z.object({
   name: z.string().trim().min(1).max(200),
@@ -74,6 +75,7 @@ const publishedVersionResponseSchema = z.object({
     publishedAt: z.string().datetime(),
     content: z.object({
       instructions: z.string(),
+      tags: z.array(z.string()).optional(),
       knowledgeFiles: z.array(z.object({
         path: z.string(),
         content: z.string(),
@@ -207,6 +209,7 @@ const artifactIdParams = z.object({ artifactId: z.string().min(1) });
 const revisionBody = z.object({ revision: z.number().int().positive() }).strict();
 const publishRoute = createRoute({
   method: "post", path: "/api/v1/drafts/{draftId}/publish", tags: ["Drafts"], summary: "Publish a Draft",
+  description: "Publishing an Artifact work-copy applies its Draft visibility to the Artifact in the same transaction that creates the next immutable Version.",
   security: [{ BearerAuth: [] }], request: { params: draftIdParams, body: { required: true, content: { "application/json": { schema: revisionBody } } } },
   responses: { 201: { description: "Artifact and immutable version published atomically.", content: { "application/json": { schema: publishedVersionResponseSchema } } }, 400: { description: "Invalid Draft or version.", content: { "application/json": { schema: errorResponseSchema } } }, 401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } }, 409: { description: "Stale Draft, slug, or version conflict.", content: { "application/json": { schema: errorResponseSchema } } } },
 });
@@ -217,6 +220,7 @@ const getDraftRoute = createRoute({
 });
 const updateDraftRoute = createRoute({
   method: "put", path: "/api/v1/drafts/{draftId}", tags: ["Drafts"], summary: "Update a Draft",
+  description: "For an Artifact work-copy, changing Draft visibility takes effect on the Artifact only when the updated Draft revision is published.",
   security: [{ BearerAuth: [] }], request: { params: draftIdParams, body: { required: true, content: { "application/json": { schema: draftInputSchema.extend({ revision: z.number().int().positive() }) } } } },
   responses: { 200: { description: "Draft updated.", content: { "application/json": { schema: draftResponseSchema } } }, 400: { description: "Invalid Draft.", content: { "application/json": { schema: errorResponseSchema } } }, 401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } }, 409: { description: "Stale Draft revision.", content: { "application/json": { schema: errorResponseSchema } } } },
 });

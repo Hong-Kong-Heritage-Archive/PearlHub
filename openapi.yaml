@@ -252,6 +252,9 @@ paths:
     put:
       tags: [Drafts]
       summary: Update a Draft with optimistic concurrency
+      description: >-
+        For an Artifact work-copy, changing Draft visibility takes effect on
+        the Artifact only when the updated Draft revision is published.
       operationId: updateDraft
       security:
         - BearerAuth: []
@@ -337,6 +340,10 @@ paths:
     post:
       tags: [Drafts]
       summary: Publish a Draft atomically
+      description: >-
+        Publishing an Artifact work-copy applies its Draft visibility to the
+        Artifact in the same transaction that creates the next immutable
+        Version.
       operationId: publishDraft
       security:
         - BearerAuth: []
@@ -360,7 +367,7 @@ paths:
                   minimum: 1
       responses:
         "201":
-          description: Artifact and complete immutable version created in one PostgreSQL transaction.
+          description: Artifact and complete immutable version created or updated in one PostgreSQL transaction.
           content:
             application/json:
               schema:
@@ -518,6 +525,15 @@ components:
       properties:
         instructions:
           type: string
+        tags:
+          type: array
+          maxItems: 10
+          description: >-
+            Optional search tags retained in the published Version and Artifact
+            discovery index. Values are trimmed, lowercased, and validated
+            against the Pearl tag rules before persistence.
+          items:
+            type: string
         knowledgeFiles:
           type: array
           items:
