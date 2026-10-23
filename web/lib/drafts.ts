@@ -103,6 +103,11 @@ export async function discardDraft(draft: Pick<Draft, "id" | "revision">, token:
   if (response.status !== 204) throw await readError(response);
 }
 
+export async function tombstoneArtifact(artifactId: string, token: string): Promise<void> {
+  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}`, "DELETE", undefined, token);
+  if (response.status !== 204) throw await readError(response);
+}
+
 export async function publishDraft(draft: Pick<Draft, "id" | "revision">, token: string): Promise<PublishedVersion> {
   const response = await request(`/drafts/${encodeURIComponent(draft.id)}/publish`, "POST", { revision: draft.revision }, token);
   return readPublishedVersion(response);
@@ -166,10 +171,8 @@ function buildApiUrl(path: string): URL {
     throw new DraftRequestError("The PearlHub API base URL must use HTTP(S) and must not include credentials.", 0, "INVALID_API_URL");
   }
   const root = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${root.endsWith("/api/v1") ? root : `${root}/api/v1`}${path}`;
-  url.search = "";
-  url.hash = "";
-  return url;
+  const apiRoot = root.endsWith("/api/v1") ? root : `${root}/api/v1`;
+  return new URL(`${apiRoot}${path}`, url.origin);
 }
 
 async function readDraft(response: Response): Promise<Draft> {

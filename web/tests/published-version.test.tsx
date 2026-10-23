@@ -53,4 +53,35 @@ describe("published version view", () => {
     expect(init.method).toBe("POST");
     expect(init.body).toBeUndefined();
   });
+
+  it("tombstones an Artifact only after confirmation and reports success", async () => {
+    const requests: Array<{ url: URL; init: RequestInit }> = [];
+    const fetch = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      requests.push({ url, init });
+      if (init.method === "DELETE") return new Response(null, { status: 204 });
+      return new Response(JSON.stringify({
+        artifact: { id: "artifact-1", ownerId: "owner-1", name: "Pearl", slug: "pearl", visibility: "public", status: "active", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
+        version: { id: "version-1", artifactId: "artifact-1", version: "0.1.0", contentHash: `sha256:${"a".repeat(64)}`, publishedAt: "2026-01-01T00:00:00.000Z", content: { instructions: "Instructions", knowledgeFiles: [], dependencies: [] } },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetch);
+    vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
+    render(<PublishedVersionView artifactId="artifact-1" version="0.1.0" />);
+    fireEvent.change(screen.getByLabelText(/bearer token/), { target: { value: "owner-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Load published version" }));
+    expect(await screen.findByRole("heading", { name: "Pearl — 0.1.0" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Tombstone Artifact" }));
+    expect(screen.getByText(/make the Artifact unavailable for normal use/)).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm tombstone" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Artifact tombstoned");
+    expect(screen.queryByRole("heading", { name: "Pearl — 0.1.0" })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(requests[1]?.url.pathname).toBe("/api/v1/artifacts/artifact-1");
+    expect(requests[1]?.init.method).toBe("DELETE");
+    expect(new Headers(requests[1]?.init.headers).get("authorization")).toMatch(/^Bearer\s+\S+$/);
+  });
 });

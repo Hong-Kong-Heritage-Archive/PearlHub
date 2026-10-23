@@ -215,9 +215,12 @@ async function verifyExistingFinalSchema(client: PoolClient): Promise<void> {
     ["drafts", "content"],
     ["drafts", "state"],
     ["drafts", "revision"],
+    ["drafts", "fork_source_artifact_id"],
+    ["drafts", "fork_source_version_id"],
+    ["drafts", "provenance"],
   ];
   const columns = await client.query<{ table_name: string; column_name: string }>(
-    "SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema() AND (table_name,column_name) IN (('artifact_lineage','source_version_id'),('dependency_resolutions','target_artifact_id'),('user_identities','provider'),('user_identities','subject'),('tombstone_snapshots','snapshot_number'),('artifact_discovery_index','artifact_version_id'),('artifact_discovery_index','tags'),('artifact_discovery_index_state','ready'),('artifact_versions','content_snapshot'),('drafts','content'),('drafts','state'),('drafts','revision'))",
+    "SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema() AND (table_name,column_name) IN (('artifact_lineage','source_version_id'),('dependency_resolutions','target_artifact_id'),('user_identities','provider'),('user_identities','subject'),('tombstone_snapshots','snapshot_number'),('artifact_discovery_index','artifact_version_id'),('artifact_discovery_index','tags'),('artifact_discovery_index_state','ready'),('artifact_versions','content_snapshot'),('drafts','content'),('drafts','state'),('drafts','revision'),('drafts','fork_source_artifact_id'),('drafts','fork_source_version_id'),('drafts','provenance'))",
   );
   if (columns.rows.length !== requiredColumns.length) {
     throw new Error("Baseline schema is missing a migration column; no application data was changed.");

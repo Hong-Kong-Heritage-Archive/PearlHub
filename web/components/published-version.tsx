@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
-import { createWorkCopy, DraftRequestError, getPublishedVersion, type PublishedVersion } from "../lib/drafts";
+import { createWorkCopy, DraftRequestError, getPublishedVersion, tombstoneArtifact, type PublishedVersion } from "../lib/drafts";
 
 export default function PublishedVersionView({ artifactId, version }: { artifactId: string; version: string }) {
   const router = useRouter();
@@ -12,10 +12,14 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
   const [published, setPublished] = useState<PublishedVersion | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [confirmingTombstone, setConfirmingTombstone] = useState(false);
+  const [tombstoning, setTombstoning] = useState(false);
+  const [tombstoned, setTombstoned] = useState(false);
 
   async function load() {
     setLoading(true);
     setError(null);
+    setTombstoned(false);
     try {
       setPublished(await getPublishedVersion(artifactId, version, token));
     } catch (caught: unknown) {
@@ -25,8 +29,27 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
     }
   }
 
+  async function tombstone() {
+    if (!token.trim()) {
+      setError("Enter the Artifact owner's developer bearer token to tombstone this Artifact.");
+      return;
+    }
+    setTombstoning(true);
+    setError(null);
+    try {
+      await tombstoneArtifact(artifactId, token);
+      setPublished(null);
+      setConfirmingTombstone(false);
+      setTombstoned(true);
+    } catch (caught: unknown) {
+      setError(caught instanceof DraftRequestError ? caught.message : "Could not tombstone this Artifact.");
+    } finally {
+      setTombstoning(false);
+    }
+  }
+
   async function workCopy() {
-    if (workCopyPending.current) return;
+    if (workCopyPending.current || tombstoning) return;
     workCopyPending.current = true;
     setLoading(true);
     setError(null);
@@ -58,8 +81,14 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
           <input id="version-token" type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} />
           <span className="field-help">Temporary in-memory token only; no login flow is available.</span>
         </label>
-        <button className="primary-button" type="button" onClick={load} disabled={loading}>{loading ? "Loading…" : "Load published version"}</button>
+        <button className="primary-button" type="button" onClick={load} disabled={loading || tombstoning}>{loading ? "Loading…" : "Load published version"}</button>
         {error && <p className="create-error" role="alert">{error}</p>}
+        {tombstoned && (
+          <div className="create-success" role="status">
+            <h2>Artifact tombstoned</h2>
+            <p>The Artifact is now unlisted and unavailable for normal use. Its published history has been retained.</p>
+          </div>
+        )}
         {published && (
           <article className="published-version">
             <h2>{published.artifact.name} — {published.version.version}</h2>
@@ -81,7 +110,25 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
             {published.version.content.dependencies.length
               ? <ul>{published.version.content.dependencies.map((dependency) => <li key={`${dependency.targetArtifactId}:${dependency.declaredRange}`}>{dependency.targetArtifactId} {dependency.declaredRange}</li>)}</ul>
               : <p>No dependencies.</p>}
-            <button className="secondary-button" type="button" onClick={workCopy} disabled={loading}>Create work-copy from this version</button>
+            <button className="secondary-button" type="button" onClick={workCopy} disabled={loading || tombstoning}>Create work-copy from this version</button>
+            <div className="artifact-delete-actions">
+              <button className="danger-button" type="button" onClick={() => setConfirmingTombstone(true)} disabled={loading || tombstoning}>
+                Tombstone Artifact
+              </button>
+              {confirmingTombstone && (
+                <div className="delete-confirmation" role="group" aria-label="Confirm Artifact tombstone">
+                  <p>This will make the Artifact unavailable for normal use. Its published history is retained, but this cannot be undone here.</p>
+                  <div className="delete-confirmation-actions">
+                    <button className="secondary-button" type="button" onClick={() => setConfirmingTombstone(false)} disabled={tombstoning}>
+                      Cancel
+                    </button>
+                    <button className="danger-button" type="button" onClick={() => void tombstone()} disabled={tombstoning}>
+                      {tombstoning ? "Tombstoning…" : "Confirm tombstone"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </article>
         )}
       </section>

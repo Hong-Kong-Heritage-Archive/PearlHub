@@ -1,6 +1,6 @@
 import { Pool } from "pg";
 import { RebuildArtifactDiscoveryIndexService, ListArtifactsService } from "./application/discovery.js";
-import { DraftWorkflowService } from "./application/services.js";
+import { DeleteArtifactService, DraftWorkflowService, ImportDraftService } from "./application/services.js";
 import { assertPostgresMigrationsCurrent } from "./adapters/postgres-migrations.js";
 import {
   PostgresArtifactDiscoveryRepository,
@@ -9,8 +9,11 @@ import {
   PostgresArtifactRepository,
   PostgresArtifactVersionRepository,
   PostgresDiscoveryReindexLock,
+  PostgresLineageRepository,
+  PostgresProvenanceRepository,
   PostgresTransactionManager,
 } from "./adapters/postgres.js";
+import { SafeGitHubRawSource } from "./adapters/github-raw-source.js";
 import { createHttpApp } from "./http/app.js";
 import type { Authenticator } from "./http/authentication.js";
 import type { ArtifactContentStore } from "./ports/repositories.js";
@@ -33,6 +36,8 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
     const transactions = new PostgresTransactionManager(pool);
     const artifacts = new PostgresArtifactRepository(transactions.database);
     const versions = new PostgresArtifactVersionRepository(transactions.database);
+    const lineage = new PostgresLineageRepository(transactions.database);
+    const provenances = new PostgresProvenanceRepository(transactions.database);
     const discovery = new PostgresArtifactDiscoveryRepository(transactions.database);
     await new RebuildArtifactDiscoveryIndexService(
       discovery,
@@ -41,22 +46,31 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
       transactions,
       new PostgresDiscoveryReindexLock(pool),
     ).execute();
+    const access = {
+      canRead: async (actorId: string, artifact: import("./domain/artifact.js").Artifact) => artifact.ownerId === actorId || artifact.visibility === "public",
+      canWrite: async (actorId: string, artifact: import("./domain/artifact.js").Artifact) => artifact.ownerId === actorId,
+    };
     const drafts = new DraftWorkflowService(
       new PostgresDraftRepository(transactions.database),
       artifacts,
       versions,
       new PostgresDependencyRepository(transactions.database),
-      {
-        canRead: async (actorId, artifact) => artifact.ownerId === actorId || artifact.visibility === "public",
-        canWrite: async (actorId, artifact) => artifact.ownerId === actorId,
-      },
+      access,
       discovery,
       transactions,
+      undefined,
+      undefined,
+      lineage,
+      provenances,
     );
+    const deleteArtifact = new DeleteArtifactService(artifacts, access, undefined, transactions);
+    const importDraft = new ImportDraftService(new SafeGitHubRawSource(), drafts);
     const listArtifacts = new ListArtifactsService(discovery);
     return {
       app: createHttpApp({
         drafts,
+        deleteArtifact,
+        importDraft,
         listArtifacts,
         authenticator: options.authenticator,
         ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),

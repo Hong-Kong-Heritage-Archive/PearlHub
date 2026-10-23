@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CloneArtifactService, DeleteArtifactService, DraftWorkflowService, ForkArtifactService, PublishVersionService, RestoreArtifactService } from "../../src/application/services.js";
+import { CloneArtifactService, DeleteArtifactService, DraftWorkflowService, ImportDraftService, PublishVersionService, RestoreArtifactService } from "../../src/application/services.js";
 import { baselinePostgresMigrations, runPostgresMigrations } from "../../src/adapters/postgres-migrations.js";
 import { PostgresArtifactDiscoveryRepository, PostgresArtifactRepository, PostgresArtifactVersionRepository, PostgresCompatibilityReportRepository, PostgresDependencyRepository, PostgresDraftRepository, PostgresLineageRepository, PostgresProvenanceRepository, PostgresTransactionManager, PostgresUserIdentityRepository } from "../../src/adapters/postgres.js";
 import { MemoryArtifactContentStore } from "../../src/adapters/content-store.js";
@@ -75,12 +75,13 @@ describe("PostgreSQL persistence hardening", () => {
       "003_identity_mapping_and_tombstone_snapshots.sql",
       "004_artifact_discovery.sql",
       "005_drafts_and_version_snapshots.sql",
+      "006_draft_origins.sql",
     ]);
     expect(repeatedMigrationRun).toEqual([]);
     const ledger = await pool.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM schema_migrations",
     );
-    expect(ledger.rows[0]?.count).toBe(5);
+    expect(ledger.rows[0]?.count).toBe(6);
   });
 
   it("baselines a complete manually migrated schema without rerunning SQL", async () => {
@@ -99,6 +100,7 @@ describe("PostgreSQL persistence hardening", () => {
         "003_identity_mapping_and_tombstone_snapshots.sql",
         "004_artifact_discovery.sql",
         "005_drafts_and_version_snapshots.sql",
+        "006_draft_origins.sql",
       ]) {
         const sql = await readFile(resolve(process.cwd(), "migrations", migrationName), "utf8");
         await baselinePool.query(sql);
@@ -110,6 +112,7 @@ describe("PostgreSQL persistence hardening", () => {
         "003_identity_mapping_and_tombstone_snapshots.sql",
         "004_artifact_discovery.sql",
         "005_drafts_and_version_snapshots.sql",
+        "006_draft_origins.sql",
       ]);
       expect(await runPostgresMigrations(baselinePool)).toEqual([]);
     } finally {
@@ -411,7 +414,7 @@ describe("PostgreSQL persistence hardening", () => {
       users: ["id", "external_subject", "created_at", "updated_at"],
       artifacts: ["id", "owner_id", "name", "slug", "visibility", "status", "created_at", "updated_at"],
       artifact_versions: ["id", "artifact_id", "version", "content_hash", "content_location", "content_snapshot", "created_at", "published_at"],
-      drafts: ["id", "owner_id", "artifact_id", "base_version_id", "name", "slug", "visibility", "content", "state", "revision", "created_at", "updated_at"],
+      drafts: ["id", "owner_id", "artifact_id", "base_version_id", "fork_source_artifact_id", "fork_source_version_id", "provenance", "name", "slug", "visibility", "content", "state", "revision", "created_at", "updated_at"],
       artifact_discovery_index: ["artifact_id", "artifact_version_id", "tags"],
       artifact_discovery_index_state: ["singleton", "ready"],
       artifact_lineage: ["id", "parent_artifact_id", "child_artifact_id", "source_version_id", "relationship_type", "created_at"],
@@ -471,9 +474,12 @@ describe("PostgreSQL persistence hardening", () => {
       ["drafts_base_version_artifact_fkey", "f"],
       ["drafts_check", "c"],
       ["drafts_content_check", "c"],
+      ["drafts_fork_source_pair", "c"],
+      ["drafts_fork_source_version_fkey", "f"],
       ["drafts_name_check", "c"],
       ["drafts_owner_id_fkey", "f"],
       ["drafts_pkey", "p"],
+      ["drafts_provenance_object", "c"],
       ["drafts_revision_check", "c"],
       ["drafts_slug_check", "c"],
       ["drafts_state_check", "c"],
@@ -555,9 +561,9 @@ describe("PostgreSQL persistence hardening", () => {
     return id;
   }
 
-  async function createVersion(artifactId: string, version = "1.0.0", contentHash: string = randomUUID()): Promise<string> {
+  async function createVersion(artifactId: string, version = "1.0.0", contentHash: string = randomUUID(), contentSnapshot: Record<string, unknown> = {}): Promise<string> {
     const id = randomUUID();
-    await pool!.query("INSERT INTO artifact_versions (id,artifact_id,version,content_hash,content_location,published_at) VALUES ($1,$2,$3,$4,'loc',now())", [id, artifactId, version, contentHash]);
+    await pool!.query("INSERT INTO artifact_versions (id,artifact_id,version,content_hash,content_location,content_snapshot,published_at) VALUES ($1,$2,$3,$4,'loc',$5,now())", [id, artifactId, version, contentHash, contentSnapshot]);
     return id;
   }
 
@@ -800,7 +806,8 @@ describe("PostgreSQL persistence hardening", () => {
       .rejects.toMatchObject({ code: "55000", constraint: "tombstone_snapshots_immutable" });
     await expect(pool!.query("TRUNCATE tombstone_snapshots"))
       .rejects.toMatchObject({ code: "55000", constraint: "tombstone_snapshots_immutable" });
-    await remove.execute({ actorId: owners[0]!, artifactId });
+    await expect(remove.execute({ actorId: owners[0]!, artifactId }))
+      .rejects.toMatchObject({ code: "ARTIFACT_GONE" });
     expect((await pool!.query("SELECT snapshot_number,snapshot FROM tombstone_snapshots WHERE artifact_id=$1", [artifactId])).rows)
       .toEqual([{ snapshot_number: 1, snapshot }]);
 
@@ -900,25 +907,61 @@ describe("PostgreSQL persistence hardening", () => {
     await expect(pool!.query("INSERT INTO compatibility_reports (id,artifact_version_id,target_artifact_version_id,status,report) VALUES ($1,$2,$3,'ok','{}')", [randomUUID(), versionId, badId])).rejects.toMatchObject({ code: "23503" });
   });
 
-  it("preserves fork lineage, clone behavior, and lineage after tombstoning", async () => {
+  it("publishes Fork and Import Drafts with permanent relationships and preserves them after tombstoning", async () => {
     const sourceId = await createArtifact();
-    await createVersion(sourceId);
+    const sourceVersionId = await createVersion(sourceId, "1.0.0", randomUUID(), {
+      instructions: "Source instructions",
+      tags: ["rag"],
+      knowledgeFiles: [{ path: "guide.md", content: "Source knowledge", contentHash: "sha256:abc" }],
+      dependencies: [],
+    });
     const transactions = new PostgresTransactionManager(pool!);
     const artifacts = new PostgresArtifactRepository(transactions.database);
     const versions = new PostgresArtifactVersionRepository(transactions.database);
     const discovery = new PostgresArtifactDiscoveryRepository(transactions.database);
     const dependencies = new PostgresDependencyRepository(transactions.database);
     const lineage = new PostgresLineageRepository(transactions.database);
-    const access = { canRead: async () => false, canWrite: async () => false };
+    const provenance = new PostgresProvenanceRepository(transactions.database);
+    const access = { canRead: async () => true, canWrite: async () => true };
     const contentStore = { put: async () => "loc", get: async () => "{}", exists: async () => true };
     const clone = await new CloneArtifactService(artifacts, versions, contentStore, dependencies, access, discovery, transactions).execute({ actorId: owners[0]!, sourceArtifactId: sourceId, name: "Clone", slug: randomUUID() });
     expect(await lineage.getParents(clone.id)).toEqual([]);
-    const fork = await new ForkArtifactService(artifacts, versions, contentStore, dependencies, lineage, access, discovery, transactions).execute({ actorId: owners[0]!, sourceArtifactId: sourceId, name: "Fork", slug: randomUUID() });
-    expect((await lineage.getParents(fork.id)).map((item) => item.parentArtifactId)).toEqual([sourceId]);
-    await expect(lineage.createFork(sourceId, fork.id)).rejects.toMatchObject({ code: "LINEAGE_INVALID" });
+    const workflow = new DraftWorkflowService(new PostgresDraftRepository(transactions.database), artifacts, versions, dependencies, access, discovery, transactions, undefined, undefined, lineage, provenance);
+    const forkDraft = await workflow.createFork({
+      actorId: owners[0]!, sourceArtifactId: sourceId, sourceVersion: "1.0.0",
+      name: "Fork", slug: randomUUID(), visibility: "private",
+    });
+    expect(await artifacts.findByOwnerAndSlug(owners[0]!, forkDraft.slug)).toBeNull();
+    expect(forkDraft.forkOrigin).toEqual({ artifactId: sourceId, versionId: sourceVersionId });
+    const fork = await workflow.publish({ actorId: owners[0]!, draftId: forkDraft.id, revision: 1 });
+    expect(fork.version.version).toBe("0.1.0");
+    expect((await lineage.getParents(fork.artifact.id)).map((item) => item.parentArtifactId)).toEqual([sourceId]);
+    await expect(lineage.createFork(sourceId, fork.artifact.id)).rejects.toMatchObject({ code: "LINEAGE_INVALID" });
     await expect(lineage.createFork(sourceId, sourceId)).rejects.toMatchObject({ code: "LINEAGE_INVALID" });
-    await new DeleteArtifactService(artifacts, access).execute({ actorId: owners[0]!, artifactId: sourceId });
+    const importer = new ImportDraftService({ fetch: async () => ({ content: "# Imported\n\nText", ref: "main" }) }, workflow);
+    const importDraft = await importer.execute({
+      actorId: owners[0]!, sourceType: "github", sourceUrl: "https://raw.githubusercontent.com/acme/test/main/SKILL.md",
+      name: "Imported", slug: randomUUID(), visibility: "private",
+    });
+    const imported = await workflow.publish({ actorId: owners[0]!, draftId: importDraft.id, revision: 1 });
+    expect(imported.version.version).toBe("0.1.0");
+    expect((await provenance.findForVersion(imported.version.id)).map((item) => item.sourceUrl)).toEqual([
+      "https://raw.githubusercontent.com/acme/test/main/SKILL.md",
+    ]);
+    expect(await lineage.getParents(imported.artifact.id)).toEqual([]);
+
+    await new DeleteArtifactService(artifacts, access, undefined, transactions).execute({ actorId: owners[0]!, artifactId: sourceId });
     expect(await lineage.getChildren(sourceId)).toHaveLength(1);
+    expect((await artifacts.findById(sourceId))?.snapshot()).toMatchObject({ status: "tombstone", visibility: "unlisted" });
+    expect(await versions.findForArtifact(sourceId)).toHaveLength(1);
+    expect((await pool!.query("SELECT id FROM artifact_lineage WHERE parent_artifact_id=$1", [sourceId])).rows).toHaveLength(1);
+
+    await new DeleteArtifactService(artifacts, access, undefined, transactions).execute({ actorId: owners[0]!, artifactId: imported.artifact.id });
+    const tombstone = await pool!.query<{ version_count: number; provenance_count: number }>(
+      "SELECT jsonb_array_length(snapshot->'versions') AS version_count,jsonb_array_length(snapshot->'provenances') AS provenance_count FROM tombstone_snapshots WHERE artifact_id=$1",
+      [imported.artifact.id],
+    );
+    expect(tombstone.rows[0]).toEqual({ version_count: 1, provenance_count: 1 });
   });
 
   it("rolls back Artifact, Version, and Dependency writes in a real transaction", async () => {

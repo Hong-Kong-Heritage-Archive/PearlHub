@@ -2,13 +2,16 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { DraftRequestError, listDrafts, type DraftSummary } from "../lib/drafts";
+import { discardDraft, DraftRequestError, listDrafts, type DraftSummary } from "../lib/drafts";
 
 export default function MyDrafts() {
   const [token, setToken] = useState("");
   const [drafts, setDrafts] = useState<DraftSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [confirmingDraftId, setConfirmingDraftId] = useState<string | null>(null);
+  const [deletingDraftId, setDeletingDraftId] = useState<string | null>(null);
 
   async function load() {
     if (!token.trim()) {
@@ -17,12 +20,33 @@ export default function MyDrafts() {
     }
     setLoading(true);
     setError(null);
+    setStatus(null);
     try {
       setDrafts(await listDrafts(token));
     } catch (caught: unknown) {
       setError(caught instanceof DraftRequestError ? caught.message : "Could not load your Drafts.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function deleteDraft(draft: DraftSummary) {
+    if (!token.trim()) {
+      setError("Enter a developer bearer token to delete your Draft.");
+      return;
+    }
+    setDeletingDraftId(draft.id);
+    setError(null);
+    setStatus(null);
+    try {
+      await discardDraft(draft, token);
+      setDrafts((current) => current?.filter(({ id }) => id !== draft.id) ?? null);
+      setConfirmingDraftId(null);
+      setStatus(`Draft "${draft.name}" was deleted.`);
+    } catch (caught: unknown) {
+      setError(caught instanceof DraftRequestError ? caught.message : "Could not delete this Draft.");
+    } finally {
+      setDeletingDraftId(null);
     }
   }
 
@@ -57,6 +81,7 @@ export default function MyDrafts() {
           </div>
         </div>
         {error && <p className="create-error" role="alert">{error}</p>}
+        {status && <p className="create-success-message" role="status">{status}</p>}
         {drafts?.length === 0 && <p className="empty-drafts" role="status">No active Drafts found for this account.</p>}
         {drafts && drafts.length > 0 && (
           <ul className="my-draft-list" aria-label="Active Drafts">
@@ -76,6 +101,29 @@ export default function MyDrafts() {
                 <Link className="secondary-button draft-open-link" href={`/draft/${encodeURIComponent(draft.id)}`}>
                   Open Draft
                 </Link>
+                <div className="draft-delete-actions">
+                  <button
+                    className="danger-button"
+                    type="button"
+                    onClick={() => setConfirmingDraftId(draft.id)}
+                    disabled={loading || deletingDraftId !== null}
+                  >
+                    Delete Draft
+                  </button>
+                  {confirmingDraftId === draft.id && (
+                    <div className="delete-confirmation" role="group" aria-label={`Confirm deletion of ${draft.name}`}>
+                      <p>This permanently discards the unpublished Draft. It cannot be recovered.</p>
+                      <div className="delete-confirmation-actions">
+                        <button className="secondary-button" type="button" onClick={() => setConfirmingDraftId(null)} disabled={deletingDraftId !== null}>
+                          Cancel
+                        </button>
+                        <button className="danger-button" type="button" onClick={() => void deleteDraft(draft)} disabled={deletingDraftId !== null}>
+                          {deletingDraftId === draft.id ? "Deleting…" : "Confirm delete"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </li>
             ))}
           </ul>

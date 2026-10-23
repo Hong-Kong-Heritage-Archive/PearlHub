@@ -5,6 +5,7 @@ import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Draft } from "../../src/domain/draft.js";
 import { DomainError } from "../../src/domain/errors.js";
 import { createHttpApp } from "../../src/http/app.js";
+import type { HttpAppDependencies } from "../../src/http/app.js";
 import type { Authenticator } from "../../src/http/authentication.js";
 
 const date = new Date("2026-01-01T00:00:00.000Z");
@@ -28,6 +29,7 @@ function makeApp(overrides: Partial<DraftWorkflow> = {}) {
     update: vi.fn(async () => storedDraft),
     discard: vi.fn(async () => {}),
     createWorkCopy: vi.fn(async () => storedDraft),
+    createFork: vi.fn(async () => storedDraft),
     publish: vi.fn(async () => ({ artifact, version })),
     getPublishedVersion: vi.fn(async () => ({ artifact, version })),
     listPublishedVersions: vi.fn(async () => ({ artifact, versions: [version] })),
@@ -66,6 +68,111 @@ describe("Draft and published-version HTTP routes", () => {
       updatedAt: date.toISOString(),
     }]);
     expect(drafts.list).toHaveBeenCalledWith({ actorId: "owner-id" });
+  });
+
+  describe("Phase 2 HTTP routes", () => {
+    it("requires authentication and creates a Fork Draft for the authenticated actor", async () => {
+      const createFork = vi.fn(async () => storedDraft);
+      const { app } = makeApp({ createFork });
+      const body = {
+        sourceVersion: "1.2.0",
+        name: "Forked Pearl",
+        slug: "forked-pearl",
+        visibility: "private",
+      };
+      const anonymous = await app.request("/api/v1/artifacts/source-id/fork", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(anonymous.status).toBe(401);
+      expect(createFork).not.toHaveBeenCalled();
+
+      const response = await app.request("/api/v1/artifacts/source-id/fork", {
+        method: "POST",
+        headers: { authorization: "******", "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(201);
+      expect(createFork).toHaveBeenCalledWith({
+        actorId: "owner-id",
+        sourceArtifactId: "source-id",
+        ...body,
+      });
+    });
+
+    it("creates pasted Import Drafts without accepting caller ownership or unknown fields", async () => {
+      const importExecute = vi.fn(async () => storedDraft);
+      const app = createHttpApp({
+        listArtifacts: { execute: async () => ({ items: [], nextCursor: null }) },
+        drafts: {
+          create: async () => storedDraft, list: async () => [storedDraft], get: async () => storedDraft,
+          update: async () => storedDraft, discard: async () => {}, createWorkCopy: async () => storedDraft,
+          createFork: async () => storedDraft, publish: async () => ({ artifact, version }),
+          getPublishedVersion: async () => ({ artifact, version }),
+          listPublishedVersions: async () => ({ artifact, versions: [version] }),
+        },
+        importDraft: { execute: importExecute },
+        authenticator: { authenticate: async (headers) => headers.has("authorization") ? { userId: "owner-id" } : null },
+      } satisfies HttpAppDependencies);
+      const body = {
+        sourceType: "pasted",
+        name: "Imported Skill",
+        slug: "imported-skill",
+        visibility: "private",
+        content: "# Keep this Markdown",
+      };
+      const anonymous = await app.request("/api/v1/imports/github", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(anonymous.status).toBe(401);
+
+      const response = await app.request("/api/v1/imports/github", {
+        method: "POST",
+        headers: { authorization: "******", "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(201);
+      expect(importExecute).toHaveBeenCalledWith({ actorId: "owner-id", ...body });
+
+      const invalid = await app.request("/api/v1/imports/github", {
+        method: "POST",
+        headers: { authorization: "******", "content-type": "application/json" },
+        body: JSON.stringify({ ...body, ownerId: "attacker" }),
+      });
+      expect(invalid.status).toBe(400);
+      expect(importExecute).toHaveBeenCalledTimes(1);
+    });
+
+    it("tombstones an Artifact through the delete service and maps repeated deletion to Gone", async () => {
+      const deleteExecute = vi.fn(async () => artifact);
+      const app = createHttpApp({
+        listArtifacts: { execute: async () => ({ items: [], nextCursor: null }) },
+        deleteArtifact: { execute: deleteExecute },
+        authenticator: { authenticate: async (headers) => headers.has("authorization") ? { userId: "owner-id" } : null },
+      });
+      const anonymous = await app.request("/api/v1/artifacts/artifact-id", { method: "DELETE" });
+      expect(anonymous.status).toBe(401);
+
+      const response = await app.request("/api/v1/artifacts/artifact-id", {
+        method: "DELETE", headers: { authorization: "******" },
+      });
+      expect(response.status).toBe(204);
+      expect(deleteExecute).toHaveBeenCalledWith({ actorId: "owner-id", artifactId: "artifact-id" });
+
+      const gone = createHttpApp({
+        listArtifacts: { execute: async () => ({ items: [], nextCursor: null }) },
+        deleteArtifact: { execute: async () => { throw new DomainError("ARTIFACT_GONE", "Artifact has already been tombstoned."); } },
+        authenticator: { authenticate: async (headers) => headers.has("authorization") ? { userId: "owner-id" } : null },
+      });
+      const repeated = await gone.request("/api/v1/artifacts/artifact-id", {
+        method: "DELETE", headers: { authorization: "******" },
+      });
+      expect(repeated.status).toBe(410);
+      expect(await repeated.json()).toMatchObject({ error: { code: "ARTIFACT_GONE" } });
+    });
   });
 
   it("creates an owner-bound Draft and publishes it through one request", async () => {

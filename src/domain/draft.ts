@@ -21,6 +21,18 @@ export interface DraftContent {
   tags?: string[] | undefined;
 }
 
+export interface ForkOrigin {
+  artifactId: string;
+  versionId: string;
+}
+
+export interface DraftProvenance {
+  sourceType: string;
+  sourceUrl: string;
+  sourceRef: string;
+  importedAt: Date;
+}
+
 export interface DraftState {
   id: string;
   ownerId: string;
@@ -30,6 +42,8 @@ export interface DraftState {
   slug: string;
   visibility: ArtifactVisibility;
   content: DraftContent;
+  forkOrigin: ForkOrigin | null;
+  provenance: DraftProvenance | null;
   state: "active" | "published" | "discarded";
   revision: number;
   createdAt: Date;
@@ -39,7 +53,7 @@ export interface DraftState {
 export class Draft {
   private constructor(private readonly value: DraftState) {}
 
-  static create(input: Omit<DraftState, "state" | "revision">): Draft {
+  static create(input: Omit<DraftState, "state" | "revision" | "forkOrigin" | "provenance"> & Partial<Pick<DraftState, "forkOrigin" | "provenance">>): Draft {
     const content = validateDraftContent(input.content);
     validateMetadata(input.name, input.slug, input.visibility);
     if (!input.id || !input.ownerId) throw invalidDraft("Draft identity and owner are required.");
@@ -47,6 +61,10 @@ export class Draft {
       ...input,
       name: input.name.trim(),
       content,
+      forkOrigin: input.forkOrigin ?? null,
+      provenance: input.provenance === null || input.provenance === undefined
+        ? null
+        : { ...input.provenance, importedAt: new Date(input.provenance.importedAt) },
       state: "active",
       revision: 1,
       createdAt: new Date(input.createdAt),
@@ -57,7 +75,14 @@ export class Draft {
   static reconstitute(value: DraftState): Draft {
     const validContent = validateDraftContent(value.content);
     validateMetadata(value.name, value.slug, value.visibility);
-    return new Draft({ ...value, content: validContent, createdAt: new Date(value.createdAt), updatedAt: new Date(value.updatedAt) });
+    return new Draft({
+      ...value,
+      content: validContent,
+      forkOrigin: value.forkOrigin ? { ...value.forkOrigin } : null,
+      provenance: value.provenance ? { ...value.provenance, importedAt: new Date(value.provenance.importedAt) } : null,
+      createdAt: new Date(value.createdAt),
+      updatedAt: new Date(value.updatedAt),
+    });
   }
 
   get id(): string { return this.value.id; }
@@ -68,6 +93,10 @@ export class Draft {
   get slug(): string { return this.value.slug; }
   get visibility(): ArtifactVisibility { return this.value.visibility; }
   get content(): DraftContent { return copyContent(this.value.content); }
+  get forkOrigin(): ForkOrigin | null { return this.value.forkOrigin ? { ...this.value.forkOrigin } : null; }
+  get provenance(): DraftProvenance | null {
+    return this.value.provenance ? { ...this.value.provenance, importedAt: new Date(this.value.provenance.importedAt) } : null;
+  }
   get state(): DraftState["state"] { return this.value.state; }
   get revision(): number { return this.value.revision; }
   get createdAt(): Date { return new Date(this.value.createdAt); }
@@ -101,7 +130,14 @@ export class Draft {
   }
 
   snapshot(): DraftState {
-    return { ...this.value, content: copyContent(this.value.content), createdAt: this.createdAt, updatedAt: this.updatedAt };
+    return {
+      ...this.value,
+      content: copyContent(this.value.content),
+      forkOrigin: this.forkOrigin,
+      provenance: this.provenance,
+      createdAt: this.createdAt,
+      updatedAt: this.updatedAt,
+    };
   }
 
   private assertEditable(revision: number): void {

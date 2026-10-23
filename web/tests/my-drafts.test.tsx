@@ -51,4 +51,45 @@ describe("My Drafts", () => {
 
     expect(await screen.findByRole("status")).toHaveTextContent("No active Drafts found");
   });
+
+  it("deletes a Draft only after confirmation and removes it from the list", async () => {
+    const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ input, init });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      return new Response(JSON.stringify([{
+        id: "draft-123",
+        artifactId: null,
+        baseVersionId: null,
+        name: "Private Pearl",
+        slug: "private-pearl",
+        visibility: "private",
+        state: "active",
+        revision: 3,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+      }]), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetch);
+    vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
+
+    render(<MyDrafts />);
+    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Load My Drafts" }));
+    expect(await screen.findByRole("heading", { name: "Private Pearl" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete Draft" }));
+    expect(screen.getByText(/permanently discards the unpublished Draft/)).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+
+    expect(await screen.findByText('Draft "Private Pearl" was deleted.')).toHaveAttribute("role", "status");
+    expect(screen.queryByRole("heading", { name: "Private Pearl" })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const { input, init } = requests[1]!;
+    expect(new URL(input instanceof Request ? input.url : String(input)).pathname).toBe("/api/v1/drafts/draft-123");
+    expect(new URL(input instanceof Request ? input.url : String(input)).search).toBe("?revision=3");
+    expect(init?.method).toBe("DELETE");
+    expect(new Headers(init?.headers).get("authorization")).toMatch(/^Bearer\s+\S+$/);
+  });
 });

@@ -154,7 +154,7 @@ version atomically; direct Artifact creation is retired.
 | GET | `/artifacts` | List/search Artifacts | Implemented |
 | GET | `/artifacts/{artifactId}` | Get Artifact | Planned |
 | PATCH | `/artifacts/{artifactId}` | Update mutable metadata only | Planned |
-| DELETE | `/artifacts/{artifactId}` | Create tombstone | Planned |
+| DELETE | `/artifacts/{artifactId}` | Create tombstone | Implemented |
 
 Until the Artifact PATCH endpoint is implemented, an owner can change an
 existing Artifact's visibility through the published-version workflow: create
@@ -178,7 +178,7 @@ There is no Version PATCH or DELETE endpoint in v0.1.
 
 | Method | Endpoint | Purpose | Status |
 |---|---|---|---|
-| POST | `/artifacts/{artifactId}/fork` | Fork with permanent PearlHub lineage | Planned |
+| POST | `/artifacts/{artifactId}/fork` | Create a Fork Draft; lineage is recorded at first publication | Implemented |
 | POST | `/artifacts/{artifactId}/clone` | Clone without PearlHub lineage | Planned |
 | GET | `/artifacts/{artifactId}/lineage` | Get lineage | Planned |
 
@@ -186,7 +186,7 @@ There is no Version PATCH or DELETE endpoint in v0.1.
 
 | Method | Endpoint | Purpose | Status |
 |---|---|---|---|
-| POST | `/imports/github` | Import from GitHub with provenance metadata | Planned |
+| POST | `/imports/github` | Create a pasted-content or GitHub Import Draft | Implemented |
 
 ### Dependencies / compatibility
 
@@ -331,31 +331,38 @@ A resolved dependency contains:
 
 ### Fork
 
-Fork may specify:
-
-- source version
-- new name
-- new slug
-
-Fork response includes lineage reference.
+`POST /api/v1/artifacts/{artifactId}/fork` requires authentication and a strict
+request containing the exact `sourceVersion` SemVer, new `name`, new `slug`,
+and `visibility`. The response is an editable Draft, not a published Artifact.
+The complete source Version snapshot is copied into the Draft; an unavailable
+or incomplete snapshot is rejected. The new Artifact, initial `0.1.0` Version,
+and permanent lineage to the selected source Version are written in the same
+transaction on first publication.
 
 ### Clone
 
 Clone creates a new Pearl with no PearlHub lineage.
 
-### GitHub Import
+### Import
 
-GitHub import accepts:
+`POST /api/v1/imports/github` requires authentication and uses an explicit
+`sourceType` discriminator:
 
-- source URL
-- visibility
+- `pasted`: `name`, `slug`, `visibility`, and Markdown/Skill `content`;
+- `github`: `name`, `slug`, `visibility`, and `sourceUrl`.
 
-Source provenance records:
+The response is an editable Draft. Markdown is preserved as the Draft
+instructions, with empty knowledge-file/dependency lists; no metadata is
+invented from Markdown. Content is limited to 1 MiB in UTF-8. GitHub URLs must
+use HTTPS on `raw.githubusercontent.com`, contain no credentials or query
+data, and identify a repository, ref, and file. Redirects are rejected, DNS
+destinations must be public, and the request is bounded by a 10-second timeout
+and streaming 1 MiB response limit. External content is never executed.
 
-- `type = github`
-- URL
-- repository
-- ref
+GitHub provenance (source type, original URL, source ref, and import time) is
+kept with the Draft and attached to its first published Version in the same
+transaction. Pasted content has no provenance unless a future contract
+explicitly accepts source metadata. Import never creates PearlHub lineage.
 
 ### Compatibility Report
 
@@ -492,10 +499,10 @@ identity provider remains provider-neutral.
 Protected write operations require Bearer authentication.
 
 Implemented protected operations include Draft creation, read, update,
-discard, and publish; creating a work-copy; and owner-scoped access to private
-Artifacts and Drafts. Direct `POST /artifacts` is retired and returns
-`410 ARTIFACT_CREATION_REQUIRES_DRAFT`. Metadata mutation, deletion, Fork,
-Clone, and GitHub Import remain planned.
+discard, and publish; creating a work-copy or Fork Draft; Import Draft
+creation; and owner-authorized Artifact deletion. Direct `POST /artifacts` is
+retired and returns `410 ARTIFACT_CREATION_REQUIRES_DRAFT`. Metadata mutation,
+Clone, and lineage reads remain planned.
 
 OpenAPI security scheme:
 
@@ -635,8 +642,8 @@ These are separate concepts:
 - `GET /artifacts/{artifactId}` = direct resource lookup
 - `GET /artifacts` = discovery/listing
 
-An unlisted Pearl may be retrieved by an authenticated caller who has its secret URL,
-while remaining absent from ordinary discovery.
+An unlisted Pearl may be retrieved through an authorized direct resource
+lookup while remaining absent from ordinary discovery.
 
 ### 9. Tombstones
 
@@ -648,18 +655,20 @@ A tombstoned Pearl:
 - has `status = tombstone`
 - has `visibility = unlisted`
 - is unreadable to normal users; non-admin reads return `410 Gone`
+- repeated normal-user DELETE requests return `410 ARTIFACT_GONE`
 - may only be restored by a privileged Admin operation; no restore endpoint is
   implemented
 - cannot be restored by normal user operations
 
 ### 10. Fork / Clone ownership
 
-Fork (planned):
+Fork:
 
 - requires authentication
 - creates a new Pearl
 - authenticated user becomes owner
-- establishes permanent PearlHub lineage
+- creates a Draft from the exact selected Version
+- establishes permanent PearlHub lineage only when first published
 
 Clone (planned):
 
@@ -669,6 +678,30 @@ Clone (planned):
 - establishes no PearlHub lineage
 
 Anonymous users cannot Fork or Clone.
+
+## 2.3.7 — Phase 2 Fork, Import, and Tombstone Operations
+
+The following lifecycle rules supplement this API version:
+
+- Fork and Import never create a published Artifact directly; their responses
+  are active, owner-bound Drafts that use the standard Publish endpoint.
+- First publication creates the Artifact and `0.1.0` Version atomically. Fork
+  lineage and GitHub provenance are persisted in that same transaction.
+- Deleting an active Artifact is a transactional tombstone transition to
+  `status=tombstone` and `visibility=unlisted`. Historical Versions, lineage,
+  provenance, dependencies, and immutable snapshots remain intact.
+- A tombstoned Artifact cannot be read, forked, used for a work-copy, or
+  published to; normal-user operations return `410 ARTIFACT_GONE`. A never
+  existing Artifact remains `404 ARTIFACT_NOT_FOUND`.
+- A Draft associated with an Artifact cannot publish after that Artifact has
+  been tombstoned. The publication path locks and rechecks Artifact status
+  inside its transaction.
+- Stable Import errors are `IMPORT_SOURCE_INVALID`,
+  `IMPORT_SOURCE_UNAVAILABLE`, `IMPORT_SOURCE_TIMEOUT`,
+  `IMPORT_CONTENT_TOO_LARGE`, and `IMPORT_INVALID_FORMAT`.
+- A GitHub Import accepts only the fixed raw-content host; arbitrary URLs,
+  redirects, private/loopback destinations, and content larger than 1 MiB are
+  rejected. Pasted content is also limited to 1 MiB.
 
 ### 11. Identity provider
 
@@ -730,5 +763,6 @@ At minimum, tests must verify:
 | 2.3.4 OpenAPI Contract | FROZEN |
 | 2.3.5 Error Contract | FROZEN |
 | 2.3.6 Authentication + Authorization + Visibility Contract | FROZEN |
+| 2.3.7 Phase 2 Fork, Import, and Tombstone Operations | FROZEN |
 
-**PearlHub API Contract v0.1 — Frozen through 2.3.6**
+**PearlHub API Contract v0.1 — Frozen through 2.3.7**

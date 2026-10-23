@@ -1,7 +1,7 @@
 import type { ApiErrorResponse } from "../contracts/dto.js";
 import { DomainError } from "../domain/errors.js";
 
-export type HttpErrorStatus = 400 | 401 | 403 | 404 | 409 | 410 | 500 | 503;
+export type HttpErrorStatus = 400 | 401 | 403 | 404 | 409 | 410 | 500 | 502 | 503 | 504;
 
 export interface MappedHttpError {
   status: HttpErrorStatus;
@@ -15,6 +15,8 @@ export function mapHttpError(error: unknown): MappedHttpError {
       case "INVALID_SEMVER":
       case "INVALID_SEMVER_RANGE":
       case "IMPORT_INVALID_FORMAT":
+      case "IMPORT_SOURCE_INVALID":
+      case "IMPORT_CONTENT_TOO_LARGE":
       case "ARTIFACT_NAME_IMMUTABLE":
       case "ARTIFACT_SLUG_IMMUTABLE":
       case "ARTIFACT_OWNER_IMMUTABLE":
@@ -29,6 +31,8 @@ export function mapHttpError(error: unknown): MappedHttpError {
       case "VERSION_NOT_FOUND":
       case "DRAFT_NOT_FOUND":
         return { status: 404, body: toErrorResponse(error) };
+      case "ARTIFACT_GONE":
+        return { status: 410, body: toErrorResponse(error) };
       case "ARTIFACT_SLUG_CONFLICT":
       case "VERSION_ALREADY_EXISTS":
       case "VERSION_IMMUTABLE":
@@ -41,6 +45,10 @@ export function mapHttpError(error: unknown): MappedHttpError {
         return { status: 410, body: toErrorResponse(error) };
       case "DISCOVERY_NOT_READY":
         return { status: 503, body: toErrorResponse(error) };
+      case "IMPORT_SOURCE_UNAVAILABLE":
+        return { status: 502, body: toErrorResponse(error) };
+      case "IMPORT_SOURCE_TIMEOUT":
+        return { status: 504, body: toErrorResponse(error) };
     }
   }
 

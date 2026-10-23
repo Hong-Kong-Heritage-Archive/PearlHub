@@ -82,6 +82,9 @@ export class Artifact {
   }
 
   tombstone(at: Date): Artifact {
+    if (this.state.status === "tombstone") {
+      throw new DomainError("ARTIFACT_GONE", "Artifact has already been tombstoned.");
+    }
     return new Artifact({ ...this.state, status: "tombstone", visibility: "unlisted", updatedAt: new Date(at) });
   }
 

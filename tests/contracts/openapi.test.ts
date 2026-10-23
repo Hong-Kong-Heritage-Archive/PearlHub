@@ -19,6 +19,7 @@ interface OpenApiSchema {
   maximum?: number;
   default?: unknown;
   $ref?: string;
+  oneOf?: OpenApiSchema[];
 }
 
 interface OpenApiOperation {
@@ -158,6 +159,46 @@ describe("canonical OpenAPI contract", () => {
     expect(errorSchema?.required).toContain("error");
     expect(errorObject?.required?.slice().sort()).toEqual(["code", "details", "message"]);
     expect(errorObject?.properties?.details?.type).toBe("object");
+  });
+
+  it("documents Fork, Import, and tombstone routes with strict inputs and lifecycle responses", async () => {
+    const fork = canonicalDocument.paths["/api/v1/artifacts/{artifactId}/fork"]?.post;
+    const imported = canonicalDocument.paths["/api/v1/imports/github"]?.post;
+    const deleted = canonicalDocument.paths["/api/v1/artifacts/{artifactId}"]?.delete;
+    const forkRequest = fork?.requestBody?.content?.["application/json"]?.schema;
+    const importRequest = canonicalDocument.components.schemas.ImportRequest;
+
+    expect(fork?.security).toEqual([{ BearerAuth: [] }]);
+    expect(fork?.responses).toHaveProperty("201");
+    expect(fork?.responses).toHaveProperty("410");
+    expect(forkRequest).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["sourceVersion", "name", "slug", "visibility"],
+    });
+    expect(imported?.security).toEqual([{ BearerAuth: [] }]);
+    expect(imported?.responses).toHaveProperty("201");
+    expect(imported?.responses).toHaveProperty("502");
+    expect(imported?.responses).toHaveProperty("504");
+    expect(importRequest?.oneOf).toHaveLength(2);
+    expect(deleted?.security).toEqual([{ BearerAuth: [] }]);
+    expect(deleted?.responses).toHaveProperty("204");
+    expect(deleted?.responses).toHaveProperty("410");
+
+    const runtimeResponse = await createRuntimeApp().request("/openapi.json");
+    const runtime = parse(await runtimeResponse.text()) as OpenApiDocument;
+    for (const [path, method] of [
+      ["/api/v1/artifacts/{artifactId}/fork", "post"],
+      ["/api/v1/imports/github", "post"],
+      ["/api/v1/artifacts/{artifactId}", "delete"],
+    ] as const) {
+      const canonical = canonicalDocument.paths[path]?.[method];
+      const actual = runtime.paths[path]?.[method];
+      expect(actual?.security).toEqual(canonical?.security);
+      expect(Object.keys(actual?.responses ?? {}).sort()).toEqual(
+        Object.keys(canonical?.responses ?? {}).sort(),
+      );
+    }
   });
 
   it("matches the canonical create contract to the runtime-generated /openapi.json", async () => {

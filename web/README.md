@@ -44,6 +44,7 @@ The value is a public API origin/base path, not a credential. In development mod
 - Loading, empty, validation, network/API error, retry, and discovery-unavailable states.
 - Create Draft, find active private Drafts, edit/save with revision conflict handling, private preview, tag/knowledge-file/dependency editing, and one-request Publish are provided through `GET/POST /api/v1/drafts`, `PUT /api/v1/drafts/{draftId}`, and `POST /api/v1/drafts/{draftId}/publish`.
 - Published-version lists and immutable version views use `GET /api/v1/artifacts/{artifactId}/versions` and `GET /api/v1/artifacts/{artifactId}/versions/{version}`. The owner can create a work-copy from a selected version.
+- My Drafts supports deleting an unpublished Draft with confirmation. Published-version views support tombstoning an Artifact with confirmation; the backend enforces ownership, preserves history, and makes repeat deletion return `410 ARTIFACT_GONE`.
 - Authenticated operations require a bearer token entered into a temporary developer-only password field. The token stays in component memory, is sent only to the configured API URL, and is never persisted in browser storage. It is not a production login flow.
 - No production authentication or login flow is available. The developer token field is not a login system; the backend remains responsible for authentication and ownership.
 - Direct `POST /api/v1/artifacts` is retired with HTTP 410 so a new Artifact cannot exist without its first version.

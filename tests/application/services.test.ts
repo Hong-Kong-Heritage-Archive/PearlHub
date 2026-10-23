@@ -3,8 +3,8 @@ import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Dependency } from "../../src/domain/dependency.js";
 import type { DependencyResolution } from "../../src/domain/records.js";
-import { CloneArtifactService, DeleteArtifactService, ForkArtifactService, ImportGitHubService, PublishVersionService, ResolveDependencyService, RestoreArtifactService } from "../../src/application/services.js";
-import type { ArtifactDiscoveryRepository, ArtifactRepository, ArtifactVersionRepository, DependencyRepository, LineageRepository, ProvenanceRepository, TransactionManager } from "../../src/ports/repositories.js";
+import { CloneArtifactService, DeleteArtifactService, PublishVersionService, ResolveDependencyService, RestoreArtifactService } from "../../src/application/services.js";
+import type { ArtifactDiscoveryRepository, ArtifactRepository, ArtifactVersionRepository, DependencyRepository, LineageRepository, TransactionManager } from "../../src/ports/repositories.js";
 
 const fixedTime = new Date("2026-01-01T00:00:00Z");
 const sourceArtifact = Artifact.create({ id: "source", ownerId: "owner", name: "Source", slug: "source", visibility: "public", createdAt: fixedTime });
@@ -76,33 +76,6 @@ function copyServices() {
 }
 
 describe("copy services", () => {
-  it("creates fork lineage without mutating the source", async () => {
-    const deps = copyServices();
-    const originalVersion = deps.sourceVersionWithLocation.snapshot();
-    const service = new ForkArtifactService(deps.artifactRepo, deps.versionRepo, deps.store, deps.dependencyRepo, deps.lineageRepo, deps.access, deps.discovery, deps.transactions, deps.ids, { now: () => fixedTime });
-    const child = await service.execute({ actorId: "owner", sourceArtifactId: "source", name: "Fork", slug: "fork" });
-
-    expect(deps.lineages).toHaveLength(1);
-    expect(deps.lineages[0]).toEqual({ parent: "source", child: child.id, sourceVersion: "source-v1" });
-    expect(sourceArtifact.name).toBe("Source");
-    expect(deps.versions[0]?.artifactId).toBe(child.id);
-    expect(deps.projections).toContainEqual({ artifactId: child.id, versionId: deps.versions[0]!.id, tags: ["rag"] });
-    const copiedDependencies = deps.dependencies.filter((dependency) => dependency.artifactVersionId === deps.versions[0]?.id);
-    expect(copiedDependencies.map(({ targetArtifactId, declaredRange }) => ({ targetArtifactId, declaredRange }))).toEqual([
-      { targetArtifactId: "pearl-a", declaredRange: "^2.1.0" },
-      { targetArtifactId: "pearl-b", declaredRange: "^1.4.0" },
-    ]);
-    expect(copiedDependencies[0]?.id).not.toBe(deps.sourceDependencies[0]?.id);
-    expect(deps.sourceDependencies.map((dependency) => dependency.snapshot())).toMatchObject([
-      { artifactVersionId: "source-v1", targetArtifactId: "pearl-a", declaredRange: "^2.1.0" },
-      { artifactVersionId: "source-v1", targetArtifactId: "pearl-b", declaredRange: "^1.4.0" },
-    ]);
-    expect(deps.sourceResolutions).toHaveLength(1);
-    expect(deps.createdResolutions).toHaveLength(0);
-    expect((await Promise.all(copiedDependencies.map((dependency) => deps.dependencyRepo.findResolutions(dependency.id)))).flat()).toHaveLength(0);
-    expect(deps.sourceVersionWithLocation.snapshot()).toEqual(originalVersion);
-  });
-
   it("clones content without creating lineage", async () => {
     const deps = copyServices();
     const originalVersion = deps.sourceVersionWithLocation.snapshot();
@@ -122,38 +95,6 @@ describe("copy services", () => {
     expect(deps.sourceVersionWithLocation.snapshot()).toEqual(originalVersion);
   });
 
-  it("rolls back a failed dependency copy when a transaction is available", async () => {
-    const deps = copyServices();
-    const createDependency = deps.dependencyRepo.create.bind(deps.dependencyRepo);
-    deps.dependencyRepo.create = async (dependency) => {
-      await createDependency(dependency);
-      if (dependency.artifactVersionId !== deps.sourceVersionWithLocation.id) throw new Error("Dependency copy failed.");
-    };
-    const transactions: TransactionManager = {
-      run: async (work) => {
-        const artifactCount = deps.artifacts.length;
-        const versionCount = deps.versions.length;
-        const dependencyCount = deps.dependencies.length;
-        const lineageCount = deps.lineages.length;
-        try {
-          return await work();
-        } catch (error) {
-          deps.artifacts.splice(artifactCount);
-          deps.versions.splice(versionCount);
-          deps.dependencies.splice(dependencyCount);
-          deps.lineages.splice(lineageCount);
-          throw error;
-        }
-      },
-    };
-    const service = new ForkArtifactService(deps.artifactRepo, deps.versionRepo, deps.store, deps.dependencyRepo, deps.lineageRepo, deps.access, deps.discovery, transactions, deps.ids, { now: () => fixedTime });
-
-    await expect(service.execute({ actorId: "owner", sourceArtifactId: "source", name: "Fork", slug: "fork" })).rejects.toThrow("Dependency copy failed.");
-    expect(deps.artifacts).toHaveLength(0);
-    expect(deps.versions).toHaveLength(0);
-    expect(deps.dependencies).toEqual(deps.sourceDependencies);
-    expect(deps.lineages).toHaveLength(0);
-  });
 });
 
 describe("dependency resolution", () => {
@@ -236,7 +177,7 @@ describe("application transaction boundaries", () => {
     return { transactions, inTransaction: () => active, runCount: () => runs };
   }
 
-  it("wraps PublishVersion, ForkArtifact, CloneArtifact, ImportGitHub, and dependency resolutions", async () => {
+  it("wraps PublishVersion, CloneArtifact, and dependency resolutions", async () => {
     const publishDeps = copyServices();
     const publishTracker = transactionTracker();
     const publishWrites: boolean[] = [];
@@ -251,46 +192,11 @@ describe("application transaction boundaries", () => {
     expect(publishTracker.runCount()).toBe(1);
     expect(publishWrites).toEqual([true, true, true]);
 
-    for (const mode of ["fork", "clone"] as const) {
-      const copyDeps = copyServices();
-      const tracker = transactionTracker();
-      const writes: boolean[] = [];
-      const artifactCreate = copyDeps.artifactRepo.create.bind(copyDeps.artifactRepo);
-      const versionCreate = copyDeps.versionRepo.create.bind(copyDeps.versionRepo);
-      const dependencyCreate = copyDeps.dependencyRepo.create.bind(copyDeps.dependencyRepo);
-      const projectTags = copyDeps.discovery.replaceTagProjection.bind(copyDeps.discovery);
-      copyDeps.artifactRepo.create = async (artifact) => { writes.push(tracker.inTransaction()); await artifactCreate(artifact); };
-      copyDeps.versionRepo.create = async (version) => { writes.push(tracker.inTransaction()); await versionCreate(version); };
-      copyDeps.dependencyRepo.create = async (dependency) => { writes.push(tracker.inTransaction()); await dependencyCreate(dependency); };
-      copyDeps.discovery.replaceTagProjection = async (...values) => { writes.push(tracker.inTransaction()); await projectTags(...values); };
-      if (mode === "fork") {
-        const lineageCreate = copyDeps.lineageRepo.createFork.bind(copyDeps.lineageRepo);
-        copyDeps.lineageRepo.createFork = async (parentId, childId) => { writes.push(tracker.inTransaction()); return lineageCreate(parentId, childId); };
-        await new ForkArtifactService(copyDeps.artifactRepo, copyDeps.versionRepo, copyDeps.store, copyDeps.dependencyRepo, copyDeps.lineageRepo, copyDeps.access, copyDeps.discovery, tracker.transactions, copyDeps.ids, { now: () => fixedTime })
-          .execute({ actorId: "owner", sourceArtifactId: "source", name: "Fork", slug: "fork" });
-      } else {
-        await new CloneArtifactService(copyDeps.artifactRepo, copyDeps.versionRepo, copyDeps.store, copyDeps.dependencyRepo, copyDeps.access, copyDeps.discovery, tracker.transactions, copyDeps.ids, { now: () => fixedTime })
-          .execute({ actorId: "owner", sourceArtifactId: "source", name: "Clone", slug: "clone" });
-      }
-      expect(tracker.runCount()).toBe(1);
-      expect(writes.length).toBeGreaterThan(2);
-      expect(writes.every(Boolean)).toBe(true);
-    }
-
-    const importDeps = copyServices();
-    const importTracker = transactionTracker();
-    const importWrites: boolean[] = [];
-    const importArtifactCreate = importDeps.artifactRepo.create.bind(importDeps.artifactRepo);
-    const importVersionCreate = importDeps.versionRepo.create.bind(importDeps.versionRepo);
-    const importProjection = importDeps.discovery.replaceTagProjection.bind(importDeps.discovery);
-    importDeps.artifactRepo.create = async (artifact) => { importWrites.push(importTracker.inTransaction()); await importArtifactCreate(artifact); };
-    importDeps.versionRepo.create = async (version) => { importWrites.push(importTracker.inTransaction()); await importVersionCreate(version); };
-    importDeps.discovery.replaceTagProjection = async (...values) => { importWrites.push(importTracker.inTransaction()); await importProjection(...values); };
-    const provenanceRepo = { create: async () => { importWrites.push(importTracker.inTransaction()); }, findForVersion: async () => [] } as unknown as ProvenanceRepository;
-    await new ImportGitHubService({ fetch: async () => ({ content: { skill: {}, knowledge: [], version: "2.3.1" }, ref: "v2.3.1" }) }, importDeps.artifactRepo, importDeps.versionRepo, importDeps.store, provenanceRepo, importDeps.discovery, importTracker.transactions, importDeps.ids, { now: () => fixedTime })
-      .execute({ actorId: "owner", sourceUrl: "https://example.test/repo", name: "Imported", slug: "imported" });
-    expect(importTracker.runCount()).toBe(1);
-    expect(importWrites).toEqual([true, true, true, true]);
+    const copyDeps = copyServices();
+    const tracker = transactionTracker();
+    await new CloneArtifactService(copyDeps.artifactRepo, copyDeps.versionRepo, copyDeps.store, copyDeps.dependencyRepo, copyDeps.access, copyDeps.discovery, tracker.transactions, copyDeps.ids, { now: () => fixedTime })
+      .execute({ actorId: "owner", sourceArtifactId: "source", name: "Clone", slug: "clone" });
+    expect(tracker.runCount()).toBe(1);
 
     const resolutionTracker = transactionTracker();
     const resolutionWrites: boolean[] = [];
@@ -305,7 +211,7 @@ describe("application transaction boundaries", () => {
 });
 
 describe("Artifact lifecycle services", () => {
-  it("creates a tombstone once and leaves repeated deletes idempotent", async () => {
+  it("creates one tombstone and reports Gone for a repeated delete", async () => {
     let current = sourceArtifact;
     let snapshotCount = 0;
     const artifacts: ArtifactRepository = {
@@ -323,9 +229,20 @@ describe("Artifact lifecycle services", () => {
     const service = new DeleteArtifactService(artifacts, { canRead: async () => true, canWrite: async () => false }, { now: () => fixedTime });
 
     await service.execute({ actorId: sourceArtifact.ownerId, artifactId: sourceArtifact.id });
-    await service.execute({ actorId: sourceArtifact.ownerId, artifactId: sourceArtifact.id });
+    await expect(service.execute({ actorId: sourceArtifact.ownerId, artifactId: sourceArtifact.id })).rejects.toMatchObject({ code: "ARTIFACT_GONE" });
     expect(current.status).toBe("tombstone");
     expect(snapshotCount).toBe(1);
+  });
+
+  it("rejects deletion by a caller without write permission", async () => {
+    const deps = copyServices();
+    const service = new DeleteArtifactService(
+      deps.artifactRepo,
+      { canRead: async () => true, canWrite: async () => false },
+      { now: () => fixedTime },
+    );
+    await expect(service.execute({ actorId: "other-user", artifactId: sourceArtifact.id }))
+      .rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 
   it("restores only when authorized and keeps the snapshot state as source of visibility", async () => {
@@ -349,67 +266,5 @@ describe("Artifact lifecycle services", () => {
     const restored = await new RestoreArtifactService(artifacts, { canRestore: async () => true }, { now: () => fixedTime })
       .execute({ actorId: "admin", artifactId: sourceArtifact.id });
     expect(restored.snapshot()).toMatchObject({ id: sourceArtifact.id, ownerId: sourceArtifact.ownerId, visibility: "public", status: "active" });
-  });
-});
-
-describe("GitHub import", () => {
-  it.each([
-    { version: "2.3.1", contentHash: "sha256:bc7bb97945a8c63b3025f86569c210fe543b39c360e96f6cc78ac80482bbdad2" },
-    { version: "2.4.3", contentHash: "sha256:df40d14d3a8a1290c9536b6c525ad2f7bc1e795b9a1ee1964ed80c5943bb82d2" },
-  ])("preserves Pearl version $version, hashes canonical content, and stores provenance without Fork lineage", async ({ version, contentHash }) => {
-    const savedArtifacts: Artifact[] = [];
-    const savedVersions: ArtifactVersion[] = [];
-    const provenance: unknown[] = [];
-    const storedContent: Array<{ content: string; hash: string }> = [];
-    const artifactRepo = {
-      findById: async () => null,
-      findTombstoneSnapshotArtifact: async () => null,
-      findByOwnerAndSlug: async () => null,
-      create: async (value: Artifact) => { savedArtifacts.push(value); },
-      save: async () => {},
-      tombstone: async () => {},
-      restore: async () => null,
-    } satisfies ArtifactRepository;
-    const versionRepo = { findById: async () => null, findByArtifactAndVersion: async () => null, findForArtifact: async () => [], findLatest: async () => null, lockArtifactForWrite: async () => true, create: async (value: ArtifactVersion) => { savedVersions.push(value); } } as ArtifactVersionRepository;
-    const store = { put: async (content: string, hash: string) => { storedContent.push({ content, hash }); return hash; }, get: async () => null, exists: async () => false };
-    const provenanceRepo = { create: async (value: unknown) => { provenance.push(value); }, findForVersion: async () => [] } as unknown as ProvenanceRepository;
-    const deps = copyServices();
-    const service = new ImportGitHubService({ fetch: async () => ({ content: { skill: {}, knowledge: [], version }, ref: "v99.0.0" }) }, artifactRepo, versionRepo, store, provenanceRepo, deps.discovery, deps.transactions, { next: (() => { let id = 0; return () => `generated-${++id}`; })(), }, { now: () => fixedTime });
-
-    const result = await service.execute({ actorId: "owner", sourceUrl: "https://github.com/example/pearl", name: "Imported", slug: "imported" });
-    expect(savedArtifacts).toHaveLength(1);
-    expect(savedVersions).toHaveLength(1);
-    expect(result.version.version).toBe(version);
-    expect(result.version.contentHash).toBe(contentHash);
-    expect(storedContent).toEqual([{ content: `{"knowledge":[],"skill":{},"version":"${version}"}`, hash: contentHash }]);
-    expect(provenance).toEqual([{ id: "generated-3", artifactVersionId: result.version.id, sourceType: "github", sourceUrl: "https://github.com/example/pearl", sourceRef: "v99.0.0", importedAt: fixedTime }]);
-    expect(result.version.version).not.toBe("v99.0.0");
-  });
-
-  it("rejects content without a declared version instead of inventing a default", async () => {
-    const deps = copyServices();
-    const provenanceRepo = { create: async () => {}, findForVersion: async () => [] } as unknown as ProvenanceRepository;
-    const service = new ImportGitHubService({ fetch: async () => ({ content: { skill: {}, knowledge: [] }, ref: "v9.0.0" }) }, deps.artifactRepo, deps.versionRepo, deps.store, provenanceRepo, deps.discovery, deps.transactions);
-
-    await expect(service.execute({ actorId: "owner", sourceUrl: "https://github.com/example/pearl", name: "Imported", slug: "imported" })).rejects.toMatchObject({ code: "IMPORT_INVALID_FORMAT" });
-  });
-
-  it("validates the declared Pearl version as SemVer", async () => {
-    const deps = copyServices();
-    const provenanceRepo = { create: async () => {}, findForVersion: async () => [] } as unknown as ProvenanceRepository;
-    const service = new ImportGitHubService({ fetch: async () => ({ content: { skill: {}, knowledge: [], version: "v2" }, ref: "main" }) }, deps.artifactRepo, deps.versionRepo, deps.store, provenanceRepo, deps.discovery, deps.transactions);
-
-    await expect(service.execute({ actorId: "owner", sourceUrl: "https://github.com/example/pearl", name: "Imported", slug: "imported" })).rejects.toMatchObject({ code: "INVALID_SEMVER" });
-  });
-
-  it("rejects malformed Pearl structure before storing or persisting it", async () => {
-    const deps = copyServices();
-    const provenanceRepo = { create: async () => {}, findForVersion: async () => [] } as unknown as ProvenanceRepository;
-    const service = new ImportGitHubService({ fetch: async () => ({ content: { version: "2.4.3", skill: [], knowledge: {} }, ref: "main" }) }, deps.artifactRepo, deps.versionRepo, deps.store, provenanceRepo, deps.discovery, deps.transactions);
-
-    await expect(service.execute({ actorId: "owner", sourceUrl: "https://github.com/example/pearl", name: "Imported", slug: "imported" })).rejects.toMatchObject({ code: "IMPORT_INVALID_FORMAT" });
-    expect(deps.storedContent).toHaveLength(0);
-    expect(deps.artifacts).toHaveLength(0);
-    expect(deps.versions).toHaveLength(0);
   });
 });

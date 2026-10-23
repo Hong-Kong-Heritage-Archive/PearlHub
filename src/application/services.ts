@@ -2,12 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import * as semver from "semver";
 import { Artifact, type ArtifactVisibility } from "../domain/artifact.js";
 import { ArtifactVersion } from "../domain/artifact-version.js";
-import { Draft, hashDraftContent, hashKnowledgeFile, type DraftContent } from "../domain/draft.js";
+import { Draft, hashDraftContent, hashKnowledgeFile, type DraftContent, type DraftProvenance } from "../domain/draft.js";
 import { Dependency } from "../domain/dependency.js";
 import { DomainError } from "../domain/errors.js";
+import { MAX_IMPORT_CONTENT_BYTES } from "../domain/import.js";
 import { normalizePearlContent, normalizePearlTags, readPearlTags } from "../domain/discovery.js";
-import { parsePearlContent } from "../domain/pearl.js";
-import { createForkLineage, type CompatibilityReport, type DependencyResolution, type Provenance } from "../domain/records.js";
+import type { CompatibilityReport, DependencyResolution, Provenance } from "../domain/records.js";
 import type {
   ArtifactContentStore,
   ArtifactDiscoveryRepository,
@@ -36,12 +36,13 @@ export interface RestoreAccessPolicy {
 }
 
 export interface DraftWorkflow {
-  create(input: { actorId: string; name: string; slug: string; visibility: ArtifactVisibility; content: DraftContent }): Promise<Draft>;
+  create(input: { actorId: string; name: string; slug: string; visibility: ArtifactVisibility; content: DraftContent; provenance?: DraftProvenance | null }): Promise<Draft>;
   list(input: { actorId: string }): Promise<Draft[]>;
   get(input: { actorId: string; draftId: string }): Promise<Draft>;
   update(input: { actorId: string; draftId: string; revision: number; name: string; slug: string; visibility: ArtifactVisibility; content: DraftContent }): Promise<Draft>;
   discard(input: { actorId: string; draftId: string; revision: number }): Promise<void>;
   createWorkCopy(input: { actorId: string; artifactId: string; version: string }): Promise<Draft>;
+  createFork(input: { actorId: string; sourceArtifactId: string; sourceVersion: string; name: string; slug: string; visibility: ArtifactVisibility }): Promise<Draft>;
   publish(input: { actorId: string; draftId: string; revision: number }): Promise<{ artifact: Artifact; version: ArtifactVersion }>;
   getPublishedVersion(input: { actorId: string | null; artifactId: string; version: string }): Promise<{ artifact: Artifact; version: ArtifactVersion }>;
   listPublishedVersions(input: { actorId: string | null; artifactId: string }): Promise<{ artifact: Artifact; versions: ArtifactVersion[] }>;
@@ -58,15 +59,18 @@ export class DraftWorkflowService implements DraftWorkflow {
     private readonly transactions: TransactionManager,
     private readonly ids = uuidGenerator,
     private readonly clock = systemClock,
+    private readonly lineage?: LineageRepository,
+    private readonly provenances?: ProvenanceRepository,
   ) {}
 
-  async create(input: { actorId: string; name: string; slug: string; visibility: ArtifactVisibility; content: DraftContent }): Promise<Draft> {
+  async create(input: { actorId: string; name: string; slug: string; visibility: ArtifactVisibility; content: DraftContent; provenance?: DraftProvenance | null }): Promise<Draft> {
     const existing = await this.artifacts.findByOwnerAndSlug(input.actorId, input.slug);
     if (existing) throw new DomainError("ARTIFACT_SLUG_CONFLICT", "Artifact slug is already used by this owner.", { slug: input.slug });
     const now = this.clock.now();
     const draft = Draft.create({
       id: this.ids.next(), ownerId: input.actorId, artifactId: null, baseVersionId: null,
       name: input.name, slug: input.slug, visibility: input.visibility, content: input.content,
+      provenance: input.provenance ?? null,
       createdAt: now, updatedAt: now,
     });
     await this.drafts.create(draft);
@@ -104,35 +108,43 @@ export class DraftWorkflowService implements DraftWorkflow {
 
   async createWorkCopy(input: { actorId: string; artifactId: string; version: string }): Promise<Draft> {
     const artifact = await this.artifacts.findById(input.artifactId);
-    if (!artifact || artifact.status !== "active") throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+    if (!artifact) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+    if (artifact.status !== "active") throw new DomainError("ARTIFACT_GONE", "Artifact has been tombstoned.");
     await authorizeWrite(this.access, input.actorId, artifact);
     const version = await this.versions.findByArtifactAndVersion(artifact.id, input.version);
     if (!version) throw new DomainError("VERSION_NOT_FOUND", "Artifact Version was not found.");
-    const content = version.contentSnapshot;
-    if (!content || typeof content.instructions !== "string" || !Array.isArray(content.knowledgeFiles) || !Array.isArray(content.dependencies)) {
-      throw new DomainError("VERSION_CONTENT_UNAVAILABLE", "This legacy Artifact Version has no PostgreSQL content snapshot.");
-    }
-    const contentInput: DraftContent = {
-      instructions: content.instructions,
-      tags: normalizePearlTags(content.tags ?? []),
-      knowledgeFiles: content.knowledgeFiles.map((file) => {
-        if (!file || typeof file !== "object" || !("path" in file) || !("content" in file) || typeof file.path !== "string" || typeof file.content !== "string") {
-          throw new DomainError("VERSION_CONTENT_UNAVAILABLE", "Artifact Version content snapshot is invalid.");
-        }
-        return { path: file.path, content: file.content };
-      }),
-      dependencies: content.dependencies.map((dependency) => {
-        if (!dependency || typeof dependency !== "object" || !("targetArtifactId" in dependency) || !("declaredRange" in dependency) || typeof dependency.targetArtifactId !== "string" || typeof dependency.declaredRange !== "string") {
-          throw new DomainError("VERSION_CONTENT_UNAVAILABLE", "Artifact Version dependency snapshot is invalid.");
-        }
-        return { targetArtifactId: dependency.targetArtifactId, declaredRange: dependency.declaredRange };
-      }),
-    };
+    const contentInput = draftContentFromSnapshot(version.contentSnapshot);
     const now = this.clock.now();
     const draft = Draft.create({
       id: this.ids.next(), ownerId: input.actorId, artifactId: artifact.id, baseVersionId: version.id,
       name: artifact.name, slug: artifact.slug, visibility: artifact.visibility, content: contentInput,
       createdAt: now, updatedAt: now,
+    });
+    await this.drafts.create(draft);
+    return draft;
+  }
+
+  async createFork(input: { actorId: string; sourceArtifactId: string; sourceVersion: string; name: string; slug: string; visibility: ArtifactVisibility }): Promise<Draft> {
+    const source = await this.artifacts.findById(input.sourceArtifactId);
+    if (!source) throw new DomainError("ARTIFACT_NOT_FOUND", "Source Artifact was not found.");
+    if (source.status !== "active") throw new DomainError("ARTIFACT_GONE", "Source Artifact has been tombstoned.");
+    await authorizeRead(this.access, input.actorId, source);
+    const version = await this.versions.findByArtifactAndVersion(source.id, input.sourceVersion);
+    if (!version) throw new DomainError("VERSION_NOT_FOUND", "Source Artifact Version was not found.");
+    const content = draftContentFromSnapshot(version.contentSnapshot);
+    const now = this.clock.now();
+    const draft = Draft.create({
+      id: this.ids.next(),
+      ownerId: input.actorId,
+      artifactId: null,
+      baseVersionId: null,
+      name: input.name,
+      slug: input.slug,
+      visibility: input.visibility,
+      content,
+      forkOrigin: { artifactId: source.id, versionId: version.id },
+      createdAt: now,
+      updatedAt: now,
     });
     await this.drafts.create(draft);
     return draft;
@@ -160,7 +172,7 @@ export class DraftWorkflowService implements DraftWorkflow {
       } else {
         if (!await this.versions.lockArtifactForWrite(draft.artifactId)) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
         artifact = await this.artifacts.findById(draft.artifactId) ?? (() => { throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found."); })();
-        if (artifact.status !== "active") throw new DomainError("INVALID_REQUEST", "Cannot publish to a tombstoned Artifact.");
+        if (artifact.status !== "active") throw new DomainError("ARTIFACT_GONE", "Cannot publish to a tombstoned Artifact.");
         await authorizeWrite(this.access, input.actorId, artifact);
         if (artifact.visibility !== draft.visibility) {
           artifact = artifact.changeVisibility(draft.visibility, this.clock.now());
@@ -196,6 +208,22 @@ export class DraftWorkflowService implements DraftWorkflow {
         }));
       }
       await this.discovery.replaceTagProjection(artifact.id, version.id, content.tags ?? []);
+      if (draft.forkOrigin) {
+        if (!this.lineage) throw new Error("Fork lineage persistence is not configured.");
+        await this.lineage.createFork(draft.forkOrigin.artifactId, artifact.id, draft.forkOrigin.versionId);
+      }
+      if (draft.provenance) {
+        if (!this.provenances) throw new Error("Import provenance persistence is not configured.");
+        const provenance: Provenance = {
+          id: this.ids.next(),
+          artifactVersionId: version.id,
+          sourceType: draft.provenance.sourceType,
+          sourceUrl: draft.provenance.sourceUrl,
+          sourceRef: draft.provenance.sourceRef,
+          importedAt: draft.provenance.importedAt,
+        };
+        await this.provenances.create(provenance);
+      }
       await this.drafts.save(draft.consume(input.revision, now));
       return { artifact, version };
     });
@@ -215,7 +243,8 @@ export class DraftWorkflowService implements DraftWorkflow {
 
   private async readableArtifact(actorId: string | null, artifactId: string): Promise<Artifact> {
     const artifact = await this.artifacts.findById(artifactId);
-    if (!artifact || artifact.status !== "active") throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+    if (!artifact) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+    if (artifact.status !== "active") throw new DomainError("ARTIFACT_GONE", "Artifact has been tombstoned.");
     if (artifact.visibility === "public") return artifact;
     if (actorId === null || artifact.ownerId !== actorId) {
       throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
@@ -262,7 +291,7 @@ export class PublishVersionService {
     const artifact = await this.artifacts.findById(input.artifactId);
     if (!artifact) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
     await authorizeWrite(this.access, input.actorId, artifact);
-    if (artifact.status !== "active") throw new DomainError("INVALID_REQUEST", "Cannot publish to a tombstoned Artifact.");
+    if (artifact.status !== "active") throw new DomainError("ARTIFACT_GONE", "Cannot publish to a tombstoned Artifact.");
     if (await this.versions.findByArtifactAndVersion(artifact.id, input.version)) throw new DomainError("VERSION_ALREADY_EXISTS", "This version already exists.");
     const normalizedContent = normalizePearlContent(input.content);
     const dependencyDeclarations = [...(input.dependencies ?? [])]
@@ -282,7 +311,7 @@ export class PublishVersionService {
       const current = await this.artifacts.findById(artifact.id);
       if (!current) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
       await authorizeWrite(this.access, input.actorId, current);
-      if (current.status !== "active") throw new DomainError("INVALID_REQUEST", "Cannot publish to a tombstoned Artifact.");
+      if (current.status !== "active") throw new DomainError("ARTIFACT_GONE", "Cannot publish to a tombstoned Artifact.");
       if (await this.versions.findByArtifactAndVersion(artifact.id, input.version)) throw new DomainError("VERSION_ALREADY_EXISTS", "This version already exists.");
       await this.versions.create(version);
       for (const declaration of input.dependencies ?? []) {
@@ -336,20 +365,6 @@ abstract class CopyArtifactService {
   }
 }
 
-export class ForkArtifactService extends CopyArtifactService {
-  constructor(artifacts: ArtifactRepository, versions: ArtifactVersionRepository, contentStore: ArtifactContentStore, dependencies: DependencyRepository, private readonly lineage: LineageRepository, access: AccessPolicy, discovery: ArtifactDiscoveryRepository, transactions: TransactionManager, ids = uuidGenerator, clock = systemClock) {
-    super(artifacts, versions, contentStore, dependencies, access, discovery, transactions, ids, clock);
-  }
-
-  async execute(input: { actorId: string; sourceArtifactId: string; name: string; slug: string; sourceVersionId?: string }): Promise<Artifact> {
-    const copied = await this.copy(input, async (artifact, sourceVersion) => {
-      const relation = createForkLineage(input.sourceArtifactId, artifact.id, this.ids.next(), this.clock.now(), sourceVersion.id);
-      await this.lineage.createFork(relation.parentArtifactId, relation.childArtifactId, relation.sourceVersionId ?? undefined);
-    });
-    return copied.artifact;
-  }
-}
-
 export class CloneArtifactService extends CopyArtifactService {
   async execute(input: { actorId: string; sourceArtifactId: string; name: string; slug: string; sourceVersionId?: string }): Promise<Artifact> {
     return (await this.copy(input)).artifact;
@@ -361,8 +376,8 @@ export class DeleteArtifactService {
   async execute(input: { actorId: string; artifactId: string }): Promise<Artifact> {
     const artifact = await this.artifacts.findById(input.artifactId);
     if (!artifact) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+    if (artifact.status !== "active") throw new DomainError("ARTIFACT_GONE", "Artifact has already been tombstoned.");
     await authorizeWrite(this.access, input.actorId, artifact);
-    if (artifact.status === "tombstone") return artifact;
     const deleted = artifact.tombstone(this.clock.now());
     const tombstone = () => this.artifacts.tombstone(deleted);
     if (this.transactions) await this.transactions.run(tombstone); else await tombstone();
@@ -390,29 +405,47 @@ export class RestoreArtifactService {
 }
 
 export interface GitHubSource {
-  fetch(sourceUrl: string): Promise<{ content: unknown; ref: string }>;
+  fetch(sourceUrl: string): Promise<{ content: string; ref: string }>;
 }
 
-export class ImportGitHubService {
-  constructor(private readonly source: GitHubSource, private readonly artifacts: ArtifactRepository, private readonly versions: ArtifactVersionRepository, private readonly contentStore: ArtifactContentStore, private readonly provenances: ProvenanceRepository, private readonly discovery: ArtifactDiscoveryRepository, private readonly transactions: TransactionManager, private readonly ids = uuidGenerator, private readonly clock = systemClock) {}
-  async execute(input: { actorId: string; sourceUrl: string; name: string; slug: string }): Promise<{ artifact: Artifact; version: ArtifactVersion }> {
-    const fetched = await this.source.fetch(input.sourceUrl);
-    const pearl = parsePearlContent(fetched.content);
-    const canonical = canonicalize(pearl);
-    const hash = `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
-    const location = await this.contentStore.put(canonical, hash);
-    const now = this.clock.now();
-    const artifact = Artifact.create({ id: this.ids.next(), ownerId: input.actorId, name: input.name, slug: input.slug, visibility: "private", createdAt: now });
-    const version = ArtifactVersion.create({ id: this.ids.next(), artifactId: artifact.id, version: pearl.version, contentHash: hash, contentLocation: location, createdAt: now, publishedAt: now });
-    const provenance: Provenance = { id: this.ids.next(), artifactVersionId: version.id, sourceType: "github", sourceUrl: input.sourceUrl, sourceRef: fetched.ref, importedAt: now };
-    const work = async () => {
-      await this.artifacts.create(artifact);
-      await this.versions.create(version);
-      await this.provenances.create(provenance);
-      await this.discovery.replaceTagProjection(artifact.id, version.id, Array.isArray(pearl.tags) ? pearl.tags : []);
-    };
-    await this.transactions.run(work);
-    return { artifact, version };
+export class ImportDraftService {
+  constructor(private readonly source: GitHubSource, private readonly drafts: Pick<DraftWorkflow, "create">, private readonly clock = systemClock) {}
+
+  async execute(input:
+    | { actorId: string; sourceType: "pasted"; name: string; slug: string; visibility: ArtifactVisibility; content: string }
+    | { actorId: string; sourceType: "github"; name: string; slug: string; visibility: ArtifactVisibility; sourceUrl: string },
+  ): Promise<Draft> {
+    let content: string;
+    let provenance: DraftProvenance | undefined;
+    if (input.sourceType === "pasted") {
+      content = input.content;
+    } else {
+      const fetched = await this.source.fetch(input.sourceUrl);
+      content = fetched.content;
+      provenance = {
+        sourceType: "github",
+        sourceUrl: input.sourceUrl,
+        sourceRef: fetched.ref,
+        importedAt: this.clock.now(),
+      };
+    }
+
+    const byteLength = Buffer.byteLength(content, "utf8");
+    if (byteLength === 0 || content.trim().length === 0) {
+      throw new DomainError("IMPORT_INVALID_FORMAT", "Imported Markdown content must not be empty.");
+    }
+    if (byteLength > MAX_IMPORT_CONTENT_BYTES) {
+      throw new DomainError("IMPORT_CONTENT_TOO_LARGE", "Imported content exceeds the 1 MiB limit.");
+    }
+
+    return this.drafts.create({
+      actorId: input.actorId,
+      name: input.name,
+      slug: input.slug,
+      visibility: input.visibility,
+      content: { instructions: content, knowledgeFiles: [], dependencies: [], tags: [] },
+      ...(provenance ? { provenance } : {}),
+    });
   }
 }
 
@@ -456,6 +489,31 @@ export function canonicalize(value: unknown): string {
     return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => `${JSON.stringify(key)}:${canonicalize(child)}`).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function draftContentFromSnapshot(snapshot: Record<string, unknown> | null): DraftContent {
+  if (!snapshot || typeof snapshot.instructions !== "string" || !Array.isArray(snapshot.knowledgeFiles) || !Array.isArray(snapshot.dependencies)) {
+    throw new DomainError("VERSION_CONTENT_UNAVAILABLE", "This Artifact Version has no usable complete content snapshot.");
+  }
+  const knowledgeFiles = snapshot.knowledgeFiles.map((file) => {
+    if (!file || typeof file !== "object" || !("path" in file) || !("content" in file) || typeof file.path !== "string" || typeof file.content !== "string") {
+      throw new DomainError("VERSION_CONTENT_UNAVAILABLE", "Artifact Version content snapshot is invalid.");
+    }
+    return { path: file.path, content: file.content };
+  });
+  const dependencies = snapshot.dependencies.map((dependency) => {
+    if (!dependency || typeof dependency !== "object" || !("targetArtifactId" in dependency) || !("declaredRange" in dependency)
+      || typeof dependency.targetArtifactId !== "string" || typeof dependency.declaredRange !== "string") {
+      throw new DomainError("VERSION_CONTENT_UNAVAILABLE", "Artifact Version dependency snapshot is invalid.");
+    }
+    return { targetArtifactId: dependency.targetArtifactId, declaredRange: dependency.declaredRange };
+  });
+  return {
+    instructions: snapshot.instructions,
+    tags: normalizePearlTags(snapshot.tags ?? []),
+    knowledgeFiles,
+    dependencies,
+  };
 }
 
 async function authorizeRead(access: AccessPolicy, actorId: string, artifact: Artifact): Promise<void> {

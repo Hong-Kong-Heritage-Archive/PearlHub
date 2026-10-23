@@ -1,7 +1,7 @@
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { cors } from "hono/cors";
 import type { ListArtifactsService } from "../application/discovery.js";
-import type { DraftWorkflow } from "../application/services.js";
+import type { DeleteArtifactService, DraftWorkflow, ImportDraftService } from "../application/services.js";
 import { parseArtifactDiscoveryQuery } from "../contracts/discovery.js";
 import { toArtifactDiscoveryResponse, toArtifactResponse } from "../contracts/dto.js";
 import { DomainError } from "../domain/errors.js";
@@ -36,6 +36,13 @@ const draftResponseSchema = z.object({
   slug: z.string(),
   visibility: z.enum(["private", "unlisted", "public"]),
   content: draftContentSchema,
+  forkOrigin: z.object({ artifactId: z.string(), versionId: z.string() }).nullable(),
+  provenance: z.object({
+    sourceType: z.string(),
+    sourceUrl: z.string(),
+    sourceRef: z.string(),
+    importedAt: z.string().datetime(),
+  }).nullable(),
   state: z.enum(["active", "published", "discarded"]),
   revision: z.number().int(),
   createdAt: z.string().datetime(),
@@ -53,6 +60,9 @@ const draftSummaryResponseSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 }).openapi("DraftSummary");
+const draftIdParams = z.object({ draftId: z.string().min(1) });
+const artifactVersionParams = z.object({ artifactId: z.string().min(1), version: z.string().min(1) });
+const artifactIdParams = z.object({ artifactId: z.string().min(1) });
 
 const artifactResponseSchema = z.object({
   id: z.string(),
@@ -146,6 +156,77 @@ const listArtifactsRoute = createRoute({
     },
   },
 });
+const forkRoute = createRoute({
+  method: "post", path: "/api/v1/artifacts/{artifactId}/fork", tags: ["Forks"], summary: "Create a Fork Draft",
+  description: "Copies the selected immutable Version into a private Draft. The Artifact and permanent lineage are created atomically when the Draft is first published.",
+  security: [{ BearerAuth: [] }],
+  request: {
+    params: artifactIdParams,
+    body: {
+      required: true,
+      content: {
+        "application/json": {
+          schema: z.object({
+            sourceVersion: z.string().min(1).max(128),
+            name: z.string().trim().min(1).max(200),
+            slug: z.string().regex(artifactSlugPattern),
+            visibility: z.enum(["private", "unlisted", "public"]),
+          }).strict(),
+        },
+      },
+    },
+  },
+  responses: {
+    201: { description: "Editable Fork Draft created from the selected Version.", content: { "application/json": { schema: draftResponseSchema } } },
+    400: { description: "Invalid Fork request or unavailable source snapshot.", content: { "application/json": { schema: errorResponseSchema } } },
+    401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } },
+    403: { description: "The caller cannot read the source Artifact.", content: { "application/json": { schema: errorResponseSchema } } },
+    404: { description: "Source Artifact or Version was not found.", content: { "application/json": { schema: errorResponseSchema } } },
+    410: { description: "Source Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
+const deleteArtifactRoute = createRoute({
+  method: "delete", path: "/api/v1/artifacts/{artifactId}", tags: ["Artifacts"], summary: "Tombstone an Artifact",
+  security: [{ BearerAuth: [] }],
+  request: { params: artifactIdParams },
+  responses: {
+    204: { description: "Artifact tombstoned; historical content and relationships are retained." },
+    401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } },
+    403: { description: "The caller cannot delete this Artifact.", content: { "application/json": { schema: errorResponseSchema } } },
+    404: { description: "Artifact was never found.", content: { "application/json": { schema: errorResponseSchema } } },
+    410: { description: "Artifact has already been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
+    500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
+const importBodySchema = z.discriminatedUnion("sourceType", [
+  z.object({
+    sourceType: z.literal("pasted"),
+    name: z.string().trim().min(1).max(200),
+    slug: z.string().regex(artifactSlugPattern),
+    visibility: z.enum(["private", "unlisted", "public"]),
+    content: z.string().min(1).max(1_048_576),
+  }).strict(),
+  z.object({
+    sourceType: z.literal("github"),
+    name: z.string().trim().min(1).max(200),
+    slug: z.string().regex(artifactSlugPattern),
+    visibility: z.enum(["private", "unlisted", "public"]),
+    sourceUrl: z.string().min(1).max(2_048),
+  }).strict(),
+]).openapi("ImportRequest");
+const importRoute = createRoute({
+  method: "post", path: "/api/v1/imports/github", tags: ["Imports"], summary: "Create an Import Draft",
+  description: "Accepts pasted Markdown/Skill content or fetches an allowlisted raw.githubusercontent.com URL. Returns an editable Draft; publication is a separate operation.",
+  security: [{ BearerAuth: [] }],
+  request: { body: { required: true, content: { "application/json": { schema: importBodySchema } } } },
+  responses: {
+    201: { description: "Editable Import Draft created.", content: { "application/json": { schema: draftResponseSchema } } },
+    400: { description: "Invalid input, unsupported URL, or invalid content.", content: { "application/json": { schema: errorResponseSchema } } },
+    401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } },
+    502: { description: "GitHub source could not be retrieved.", content: { "application/json": { schema: errorResponseSchema } } },
+    504: { description: "GitHub source request timed out.", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
 
 const createArtifactRoute = createRoute({
   method: "post",
@@ -203,15 +284,12 @@ const listDraftsRoute = createRoute({
     401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } },
   },
 });
-const draftIdParams = z.object({ draftId: z.string().min(1) });
-const artifactVersionParams = z.object({ artifactId: z.string().min(1), version: z.string().min(1) });
-const artifactIdParams = z.object({ artifactId: z.string().min(1) });
 const revisionBody = z.object({ revision: z.number().int().positive() }).strict();
 const publishRoute = createRoute({
   method: "post", path: "/api/v1/drafts/{draftId}/publish", tags: ["Drafts"], summary: "Publish a Draft",
   description: "Publishing an Artifact work-copy applies its Draft visibility to the Artifact in the same transaction that creates the next immutable Version.",
   security: [{ BearerAuth: [] }], request: { params: draftIdParams, body: { required: true, content: { "application/json": { schema: revisionBody } } } },
-  responses: { 201: { description: "Artifact and immutable version published atomically.", content: { "application/json": { schema: publishedVersionResponseSchema } } }, 400: { description: "Invalid Draft or version.", content: { "application/json": { schema: errorResponseSchema } } }, 401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } }, 409: { description: "Stale Draft, slug, or version conflict.", content: { "application/json": { schema: errorResponseSchema } } } },
+  responses: { 201: { description: "Artifact and immutable version published atomically.", content: { "application/json": { schema: publishedVersionResponseSchema } } }, 400: { description: "Invalid Draft or version.", content: { "application/json": { schema: errorResponseSchema } } }, 401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } }, 409: { description: "Stale Draft, slug, or version conflict.", content: { "application/json": { schema: errorResponseSchema } } }, 410: { description: "The Artifact associated with this Draft has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } } },
 });
 const getDraftRoute = createRoute({
   method: "get", path: "/api/v1/drafts/{draftId}", tags: ["Drafts"], summary: "Read a Draft",
@@ -232,17 +310,17 @@ const deleteDraftRoute = createRoute({
 const listVersionsRoute = createRoute({
   method: "get", path: "/api/v1/artifacts/{artifactId}/versions", tags: ["Artifact Versions"], summary: "List published versions",
   security: [{}, { BearerAuth: [] }], request: { params: artifactIdParams },
-  responses: { 200: { description: "Published versions of a visible Artifact.", content: { "application/json": { schema: z.array(publishedVersionResponseSchema) } } }, 404: { description: "Artifact not found.", content: { "application/json": { schema: errorResponseSchema } } }, 409: { description: "A legacy version has no stored PostgreSQL content snapshot.", content: { "application/json": { schema: errorResponseSchema } } } },
+  responses: { 200: { description: "Published versions of a visible Artifact.", content: { "application/json": { schema: z.array(publishedVersionResponseSchema) } } }, 404: { description: "Artifact not found.", content: { "application/json": { schema: errorResponseSchema } } }, 409: { description: "A legacy version has no stored PostgreSQL content snapshot.", content: { "application/json": { schema: errorResponseSchema } } }, 410: { description: "Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } } },
 });
 const getVersionRoute = createRoute({
   method: "get", path: "/api/v1/artifacts/{artifactId}/versions/{version}", tags: ["Artifact Versions"], summary: "Read a published version",
   security: [{}, { BearerAuth: [] }], request: { params: artifactVersionParams },
-  responses: { 200: { description: "Complete immutable version snapshot.", content: { "application/json": { schema: publishedVersionResponseSchema } } }, 404: { description: "Artifact or version not found.", content: { "application/json": { schema: errorResponseSchema } } } },
+  responses: { 200: { description: "Complete immutable version snapshot.", content: { "application/json": { schema: publishedVersionResponseSchema } } }, 404: { description: "Artifact or version not found.", content: { "application/json": { schema: errorResponseSchema } } }, 410: { description: "Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } } },
 });
 const workCopyRoute = createRoute({
   method: "post", path: "/api/v1/artifacts/{artifactId}/versions/{version}/work-copy", tags: ["Drafts"], summary: "Create a Draft work-copy",
   security: [{ BearerAuth: [] }], request: { params: artifactVersionParams },
-  responses: { 201: { description: "New Draft based on the selected immutable version.", content: { "application/json": { schema: draftResponseSchema } } }, 401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } }, 409: { description: "An active Draft already exists or source content is unavailable.", content: { "application/json": { schema: errorResponseSchema } } } },
+  responses: { 201: { description: "New Draft based on the selected immutable version.", content: { "application/json": { schema: draftResponseSchema } } }, 401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } }, 409: { description: "An active Draft already exists or source content is unavailable.", content: { "application/json": { schema: errorResponseSchema } } }, 410: { description: "Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } } },
 });
 
 type HttpEnvironment = {
@@ -254,6 +332,8 @@ type HttpEnvironment = {
 export interface HttpAppDependencies {
   listArtifacts: Pick<ListArtifactsService, "execute">;
   drafts?: DraftWorkflow;
+  deleteArtifact?: Pick<DeleteArtifactService, "execute">;
+  importDraft?: Pick<ImportDraftService, "execute">;
   authenticator: Authenticator;
   corsOrigins?: string[];
 }
@@ -308,7 +388,29 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
   app.openapi(createDraftRoute, async (context) => {
     const actor = await requirePrincipal(dependencies.authenticator, context.req.raw.headers);
     if (!dependencies.drafts) throw new Error("Draft workflow is not configured.");
-    const draft = await dependencies.drafts.create({ actorId: actor.userId, ...context.req.valid("json") });
+    const input = context.req.valid("json");
+    const { name, slug, visibility, content } = input;
+    const draft = await dependencies.drafts.create({ actorId: actor.userId, name, slug, visibility, content });
+    return context.json(toDraftResponse(draft), 201);
+  });
+  app.openapi(forkRoute, async (context) => {
+    const actor = await requirePrincipal(dependencies.authenticator, context.req.raw.headers);
+    if (!dependencies.drafts) throw new Error("Draft workflow is not configured.");
+    const { artifactId } = context.req.valid("param");
+    const draft = await dependencies.drafts.createFork({ actorId: actor.userId, sourceArtifactId: artifactId, ...context.req.valid("json") });
+    return context.json(toDraftResponse(draft), 201);
+  });
+  app.openapi(deleteArtifactRoute, async (context) => {
+    const actor = await requirePrincipal(dependencies.authenticator, context.req.raw.headers);
+    if (!dependencies.deleteArtifact) throw new Error("Artifact deletion is not configured.");
+    await dependencies.deleteArtifact.execute({ actorId: actor.userId, artifactId: context.req.valid("param").artifactId });
+    return context.body(null, 204);
+  });
+  app.openapi(importRoute, async (context) => {
+    const actor = await requirePrincipal(dependencies.authenticator, context.req.raw.headers);
+    if (!dependencies.importDraft) throw new Error("Import workflow is not configured.");
+    const body = context.req.valid("json");
+    const draft = await dependencies.importDraft.execute({ actorId: actor.userId, ...body });
     return context.json(toDraftResponse(draft), 201);
   });
   app.openapi(listDraftsRoute, async (context) => {

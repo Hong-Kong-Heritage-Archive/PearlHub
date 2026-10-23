@@ -158,6 +158,181 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /api/v1/artifacts/{artifactId}:
+    delete:
+      tags: [Artifacts]
+      summary: Tombstone an Artifact
+      description: >-
+        Atomically marks the Artifact tombstone/unlisted and retains its
+        immutable snapshot, Versions, lineage, provenance, and references.
+      operationId: deleteArtifact
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Artifact tombstoned; historical records are retained.
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller cannot delete this Artifact.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Artifact was never found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "410":
+          description: Artifact has already been tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Unexpected internal error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /api/v1/artifacts/{artifactId}/fork:
+    post:
+      tags: [Forks]
+      summary: Create a Fork Draft
+      description: >-
+        Copies the explicitly selected immutable Version into a private Draft.
+        First publication creates the new Artifact, 0.1.0 Version, and permanent
+        lineage atomically.
+      operationId: createForkDraft
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sourceVersion, name, slug, visibility]
+              properties:
+                sourceVersion:
+                  type: string
+                  maxLength: 128
+                  description: Exact source SemVer; the latest Version is never substituted.
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                slug:
+                  type: string
+                  pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+                visibility:
+                  type: string
+                  enum: [private, unlisted, public]
+      responses:
+        "201":
+          description: Editable Draft copied from the selected Version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Draft"
+        "400":
+          description: Invalid request or unusable source content snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller cannot read the source Artifact.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Source Artifact or Version was not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "410":
+          description: Source Artifact has been tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /api/v1/imports/github:
+    post:
+      tags: [Imports]
+      summary: Create an Import Draft
+      description: >-
+        Accepts pasted Markdown/Skill content or a raw.githubusercontent.com
+        source URL. Returns an editable Draft; publication is a separate
+        operation. GitHub fetching is HTTPS-only, allowlisted, redirect-free,
+        timeout-bound, and limited to 1 MiB.
+      operationId: createImportDraft
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportRequest"
+      responses:
+        "201":
+          description: Editable Import Draft created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Draft"
+        "400":
+          description: Invalid input, unsupported URL, or invalid content.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "502":
+          description: GitHub source could not be retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "504":
+          description: GitHub source request timed out.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /api/v1/drafts:
     get:
       tags: [Drafts]
@@ -396,6 +571,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "410":
+          description: The Artifact associated with this Draft has been tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /api/v1/artifacts/{artifactId}/versions:
     get:
       tags: [Artifact Versions]
@@ -431,6 +612,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "410":
+          description: Artifact has been tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /api/v1/artifacts/{artifactId}/versions/{version}:
     get:
       tags: [Artifact Versions]
@@ -459,6 +646,12 @@ paths:
                 $ref: "#/components/schemas/PublishedVersion"
         "404":
           description: Artifact or version is not visible or was not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "410":
+          description: Artifact has been tombstoned.
           content:
             application/json:
               schema:
@@ -508,6 +701,12 @@ paths:
                 $ref: "#/components/schemas/ApiError"
         "409":
           description: An active Draft already exists or source content is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "410":
+          description: Artifact has been tombstoned.
           content:
             application/json:
               schema:
@@ -576,32 +775,66 @@ components:
         content:
           $ref: "#/components/schemas/DraftContent"
     Draft:
-      allOf:
-        - $ref: "#/components/schemas/DraftInput"
-        - type: object
-          required: [id, ownerId, artifactId, baseVersionId, state, revision, createdAt, updatedAt]
+      type: object
+      additionalProperties: false
+      required: [id, ownerId, name, slug, visibility, content, artifactId, baseVersionId, forkOrigin, provenance, state, revision, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          readOnly: true
+        ownerId:
+          type: string
+          readOnly: true
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        slug:
+          type: string
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        visibility:
+          type: string
+          enum: [private, unlisted, public]
+        content:
+          $ref: "#/components/schemas/DraftContent"
+        artifactId:
+          type: [string, "null"]
+        baseVersionId:
+          type: [string, "null"]
+        forkOrigin:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [artifactId, versionId]
           properties:
-            id:
-              type: string
-              readOnly: true
-            ownerId:
-              type: string
-              readOnly: true
             artifactId:
-              type: [string, "null"]
-            baseVersionId:
-              type: [string, "null"]
-            state:
               type: string
-              enum: [active, published, discarded]
-            revision:
-              type: integer
-            createdAt:
+            versionId:
+              type: string
+        provenance:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [sourceType, sourceUrl, sourceRef, importedAt]
+          properties:
+            sourceType:
+              type: string
+            sourceUrl:
+              type: string
+            sourceRef:
+              type: string
+            importedAt:
               type: string
               format: date-time
-            updatedAt:
-              type: string
-              format: date-time
+        state:
+          type: string
+          enum: [active, published, discarded]
+        revision:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     DraftSummary:
       type: object
       additionalProperties: false
@@ -628,6 +861,62 @@ components:
         createdAt:
           type: string
           format: date-time
+    ImportRequest:
+      oneOf:
+        - $ref: "#/components/schemas/PastedImportRequest"
+        - $ref: "#/components/schemas/GitHubImportRequest"
+      discriminator:
+        propertyName: sourceType
+        mapping:
+          pasted: "#/components/schemas/PastedImportRequest"
+          github: "#/components/schemas/GitHubImportRequest"
+    PastedImportRequest:
+      type: object
+      additionalProperties: false
+      required: [sourceType, name, slug, visibility, content]
+      properties:
+        sourceType:
+          type: string
+          const: pasted
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        slug:
+          type: string
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        visibility:
+          type: string
+          enum: [private, unlisted, public]
+        content:
+          type: string
+          minLength: 1
+          maxLength: 1048576
+          description: Markdown/Skill text, limited to 1 MiB when encoded as UTF-8.
+    GitHubImportRequest:
+      type: object
+      additionalProperties: false
+      required: [sourceType, name, slug, visibility, sourceUrl]
+      properties:
+        sourceType:
+          type: string
+          const: github
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        slug:
+          type: string
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        visibility:
+          type: string
+          enum: [private, unlisted, public]
+        sourceUrl:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          format: uri
+          description: HTTPS raw.githubusercontent.com URL; redirects and other hosts are rejected.
         updatedAt:
           type: string
           format: date-time

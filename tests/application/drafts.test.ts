@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DraftWorkflowService } from "../../src/application/services.js";
+import { ImportDraftService } from "../../src/application/services.js";
 import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Draft } from "../../src/domain/draft.js";
@@ -9,11 +10,13 @@ import type { ArtifactDiscoveryRepository, ArtifactRepository, ArtifactVersionRe
 const at = new Date("2026-01-01T00:00:00.000Z");
 const content = { instructions: "Handle requests", knowledgeFiles: [{ path: "guide.md", content: "Keep private data safe." }], dependencies: [{ targetArtifactId: "target-artifact", declaredRange: "^2.1.0" }] };
 
-function fixture() {
+function fixture(canRead: (actorId: string, artifact: Artifact) => Promise<boolean> = async () => true) {
   const artifacts: Artifact[] = [];
   const versions: ArtifactVersion[] = [];
   const dependencies: Array<{ artifactVersionId: string; targetArtifactId: string; declaredRange: string }> = [];
   const projections: Array<{ artifactId: string; versionId: string | null; tags: string[] }> = [];
+  const lineages: Array<{ parentArtifactId: string; childArtifactId: string; sourceVersionId?: string }> = [];
+  const provenances: Array<{ artifactVersionId: string; sourceType: string; sourceUrl: string; sourceRef: string; importedAt: Date }> = [];
   const drafts = new Map<string, Draft>();
   let failDependencyWrite = false;
   let id = 0;
@@ -64,6 +67,8 @@ function fixture() {
       const previousVersions = [...versions];
       const previousDependencies = [...dependencies];
       const previousDrafts = new Map(drafts);
+      const previousLineages = [...lineages];
+      const previousProvenances = [...provenances];
       try {
         return await work();
       } catch (error) {
@@ -72,17 +77,33 @@ function fixture() {
         dependencies.splice(0, dependencies.length, ...previousDependencies);
         drafts.clear();
         for (const [key, value] of previousDrafts) drafts.set(key, value);
+        lineages.splice(0, lineages.length, ...previousLineages);
+        provenances.splice(0, provenances.length, ...previousProvenances);
         throw error;
       }
     },
   };
+  const lineageRepo = {
+    createFork: async (parentArtifactId: string, childArtifactId: string, sourceVersionId?: string) => {
+      lineages.push({ parentArtifactId, childArtifactId, ...(sourceVersionId === undefined ? {} : { sourceVersionId }) });
+      return { id: `lineage-${lineages.length}`, parentArtifactId, childArtifactId, sourceVersionId: sourceVersionId ?? null, relationshipType: "fork" as const, createdAt: at };
+    },
+    getParents: async () => [],
+    getChildren: async () => [],
+  };
+  const provenanceRepo = {
+    create: async (value: { artifactVersionId: string; sourceType: string; sourceUrl: string; sourceRef: string; importedAt: Date }) => {
+      provenances.push(value);
+    },
+    findForVersion: async () => [],
+  };
   const service = new DraftWorkflowService(
     draftRepo, artifactRepo, versionRepo, dependencyRepo,
-    { canRead: async () => true, canWrite: async (actorId, artifact) => actorId === artifact.ownerId },
+    { canRead, canWrite: async (actorId, artifact) => actorId === artifact.ownerId },
     discovery, transactions,
-    { next: () => `generated-${++id}` }, { now: () => at },
+    { next: () => `generated-${++id}` }, { now: () => at }, lineageRepo, provenanceRepo,
   );
-  return { service, artifacts, versions, dependencies, drafts, projections, setFailDependencyWrite: (value: boolean) => { failDependencyWrite = value; } };
+  return { service, artifactRepo, artifacts, versions, dependencies, drafts, projections, lineages, provenances, setFailDependencyWrite: (value: boolean) => { failDependencyWrite = value; } };
 }
 
 describe("Draft workflow application service", () => {
@@ -123,6 +144,138 @@ describe("Draft workflow application service", () => {
     const updated = await state.service.update({ actorId: "owner", draftId: draft.id, revision: 1, name: "Edited", slug: "edited", visibility: "private", content });
     expect(updated.revision).toBe(2);
     await expect(state.service.update({ actorId: "owner", draftId: draft.id, revision: 1, name: "Edited", slug: "edited", visibility: "private", content })).rejects.toMatchObject({ code: "DRAFT_REVISION_CONFLICT" });
+  });
+
+  it("creates a Fork Draft from the explicitly selected complete Version and writes lineage only on first publication", async () => {
+    const state = fixture();
+    const sourceDraft = await state.service.create({
+      actorId: "owner", name: "Source", slug: "source", visibility: "public",
+      content: { ...content, tags: [" RAG ", "Language-Model"] },
+    });
+    const source = await state.service.publish({ actorId: "owner", draftId: sourceDraft.id, revision: 1 });
+    const forkDraft = await state.service.createFork({
+      actorId: "forker", sourceArtifactId: source.artifact.id, sourceVersion: "0.1.0",
+      name: "Fork", slug: "fork", visibility: "private",
+    });
+
+    expect(state.artifacts).toHaveLength(1);
+    expect(forkDraft.forkOrigin).toEqual({ artifactId: source.artifact.id, versionId: source.version.id });
+    expect(forkDraft.content).toMatchObject({
+      instructions: content.instructions,
+      tags: ["rag", "language-model"],
+      knowledgeFiles: [{ path: "guide.md", content: "Keep private data safe." }],
+      dependencies: content.dependencies,
+    });
+    await expect(state.service.createFork({
+      actorId: "forker", sourceArtifactId: source.artifact.id, sourceVersion: "9.9.9",
+      name: "Missing", slug: "missing", visibility: "private",
+    })).rejects.toMatchObject({ code: "VERSION_NOT_FOUND" });
+    expect(state.drafts.size).toBe(2);
+
+    const publishedFork = await state.service.publish({ actorId: "forker", draftId: forkDraft.id, revision: 1 });
+    expect(publishedFork.version.version).toBe("0.1.0");
+    expect(state.lineages).toEqual([{
+      parentArtifactId: source.artifact.id,
+      childArtifactId: publishedFork.artifact.id,
+      sourceVersionId: source.version.id,
+    }]);
+    expect(state.artifacts).toHaveLength(2);
+    expect(publishedFork.version.contentSnapshot).toMatchObject({ instructions: content.instructions });
+  });
+
+  it("does not create a Fork Draft from a private source the caller cannot read", async () => {
+    const state = fixture(async (_actorId, artifact) => artifact.visibility === "public");
+    const sourceDraft = await state.service.create({
+      actorId: "owner", name: "Private Source", slug: "private-source", visibility: "private", content,
+    });
+    const source = await state.service.publish({ actorId: "owner", draftId: sourceDraft.id, revision: 1 });
+
+    await expect(state.service.createFork({
+      actorId: "other-user", sourceArtifactId: source.artifact.id, sourceVersion: "0.1.0",
+      name: "Unauthorized Fork", slug: "unauthorized-fork", visibility: "private",
+    })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(state.drafts.size).toBe(1);
+    expect(state.artifacts).toHaveLength(1);
+  });
+
+  it("creates pasted and GitHub Import Drafts, persisting provenance only when publishing a sourced Draft", async () => {
+    const state = fixture();
+    const importer = new ImportDraftService({
+      fetch: async () => ({ content: "# Imported Pearl\n\nKeep the original text.", ref: "main" }),
+    }, state.service, { now: () => at });
+
+    const pasted = await importer.execute({
+      actorId: "owner", sourceType: "pasted", name: "Pasted", slug: "pasted", visibility: "private",
+      content: "# Pasted Skill\n\nPreserve this text exactly.",
+    });
+    expect(pasted.content.instructions).toBe("# Pasted Skill\n\nPreserve this text exactly.");
+    expect(pasted.provenance).toBeNull();
+
+    const sourced = await importer.execute({
+      actorId: "owner", sourceType: "github", name: "Sourced", slug: "sourced", visibility: "private",
+      sourceUrl: "https://raw.githubusercontent.com/acme/pearl/main/SKILL.md",
+    });
+    expect(state.artifacts).toHaveLength(0);
+    expect(sourced.content.instructions).toBe("# Imported Pearl\n\nKeep the original text.");
+    expect(sourced.provenance).toEqual({
+      sourceType: "github",
+      sourceUrl: "https://raw.githubusercontent.com/acme/pearl/main/SKILL.md",
+      sourceRef: "main",
+      importedAt: at,
+    });
+
+    const result = await state.service.publish({ actorId: "owner", draftId: sourced.id, revision: 1 });
+    expect(result.version.version).toBe("0.1.0");
+    expect(state.provenances).toEqual([expect.objectContaining({
+      artifactVersionId: result.version.id,
+      sourceType: "github",
+      sourceUrl: "https://raw.githubusercontent.com/acme/pearl/main/SKILL.md",
+      sourceRef: "main",
+      importedAt: at,
+    })]);
+    expect(state.lineages).toHaveLength(0);
+  });
+
+  it("rejects work-copy publication when its Artifact has been tombstoned", async () => {
+    const state = fixture();
+    const initial = await state.service.create({
+      actorId: "owner", name: "Retired", slug: "retired", visibility: "private", content,
+    });
+    const published = await state.service.publish({ actorId: "owner", draftId: initial.id, revision: 1 });
+    const workCopy = await state.service.createWorkCopy({
+      actorId: "owner", artifactId: published.artifact.id, version: "0.1.0",
+    });
+    const deleted = published.artifact.tombstone(at);
+    await state.artifactRepo.save(deleted);
+
+    await expect(state.service.publish({ actorId: "owner", draftId: workCopy.id, revision: 1 }))
+      .rejects.toMatchObject({ code: "ARTIFACT_GONE" });
+    expect(state.versions).toHaveLength(1);
+    expect(state.drafts.get(workCopy.id)?.state).toBe("active");
+  });
+
+  it("rejects empty or oversized pasted imports without creating a Draft", async () => {
+    const state = fixture();
+    const importer = new ImportDraftService({ fetch: async () => ({ content: "", ref: "main" }) }, state.service);
+    await expect(importer.execute({
+      actorId: "owner", sourceType: "pasted", name: "Empty", slug: "empty", visibility: "private", content: " \n",
+    })).rejects.toMatchObject({ code: "IMPORT_INVALID_FORMAT" });
+    await expect(importer.execute({
+      actorId: "owner", sourceType: "pasted", name: "Large", slug: "large", visibility: "private", content: "a".repeat(1_048_577),
+    })).rejects.toMatchObject({ code: "IMPORT_CONTENT_TOO_LARGE" });
+    expect(state.drafts.size).toBe(0);
+  });
+
+  it("does not create an Import Draft when source retrieval fails", async () => {
+    const state = fixture();
+    const importer = new ImportDraftService({
+      fetch: async () => { throw new DomainError("IMPORT_SOURCE_UNAVAILABLE", "GitHub source could not be retrieved."); },
+    }, state.service);
+    await expect(importer.execute({
+      actorId: "owner", sourceType: "github", name: "Unavailable", slug: "unavailable",
+      visibility: "private", sourceUrl: "https://raw.githubusercontent.com/acme/missing/main/SKILL.md",
+    })).rejects.toMatchObject({ code: "IMPORT_SOURCE_UNAVAILABLE" });
+    expect(state.drafts.size).toBe(0);
   });
 
   it("rolls back all publication writes and leaves the Draft editable on persistence failure", async () => {

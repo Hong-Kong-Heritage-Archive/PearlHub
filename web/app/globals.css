@@ -231,6 +231,25 @@ h1 {
   font-weight: 700;
 }
 
+.danger-button {
+  min-height: 42px;
+  padding: 8px 15px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #fff1f1;
+}
+
+.danger-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .primary-button {
   min-height: 44px;
   padding: 9px 18px;
@@ -713,6 +732,39 @@ h1 {
   background: #fff7f7;
   color: #762929;
   font-weight: 600;
+}
+
+.create-success-message {
+  margin: 14px 0;
+  color: var(--green-dark);
+  font-weight: 700;
+}
+
+.draft-delete-actions,
+.artifact-delete-actions {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.delete-confirmation {
+  width: 100%;
+  padding: 14px;
+  border: 1px solid #d9a4a4;
+  border-left: 4px solid var(--danger);
+  border-radius: 6px;
+  background: #fff7f7;
+}
+
+.delete-confirmation p {
+  margin: 0 0 12px;
+}
+
+.delete-confirmation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .submission-status {

@@ -1,0 +1,1 @@
+export const MAX_IMPORT_CONTENT_BYTES = 1_048_576;

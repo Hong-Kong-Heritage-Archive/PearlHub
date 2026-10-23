@@ -4,7 +4,7 @@ import * as semver from "semver";
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { Artifact, type ArtifactSnapshot } from "../domain/artifact.js";
 import { ArtifactVersion } from "../domain/artifact-version.js";
-import { Draft, type DraftState } from "../domain/draft.js";
+import { Draft, type DraftProvenance, type DraftState } from "../domain/draft.js";
 import type { ArtifactDiscoveryPageRow, ArtifactDiscoveryQuery, ArtifactSummary } from "../domain/discovery.js";
 import { Dependency } from "../domain/dependency.js";
 import { DomainError } from "../domain/errors.js";
@@ -195,6 +195,7 @@ export class PostgresArtifactVersionRepository implements ArtifactVersionReposit
 type DraftRow = {
   id: string; owner_id: string; artifact_id: string | null; base_version_id: string | null;
   name: string; slug: string; visibility: DraftState["visibility"]; content: DraftState["content"];
+  fork_source_artifact_id: string | null; fork_source_version_id: string | null; provenance: DraftProvenance | null;
   state: DraftState["state"]; revision: number; created_at: Date; updated_at: Date;
 };
 
@@ -202,6 +203,10 @@ function draftFromRow(row: DraftRow): Draft {
   return Draft.reconstitute({
     id: row.id, ownerId: row.owner_id, artifactId: row.artifact_id, baseVersionId: row.base_version_id,
     name: row.name, slug: row.slug, visibility: row.visibility, content: row.content,
+    forkOrigin: row.fork_source_artifact_id && row.fork_source_version_id
+      ? { artifactId: row.fork_source_artifact_id, versionId: row.fork_source_version_id }
+      : null,
+    provenance: row.provenance ? { ...row.provenance, importedAt: new Date(row.provenance.importedAt) } : null,
     state: row.state, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at,
   });
 }
@@ -211,7 +216,7 @@ export class PostgresDraftRepository implements DraftRepository {
 
   async findActiveByOwner(ownerId: string): Promise<Draft[]> {
     const result = await this.db.query<DraftRow>(
-      "SELECT id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,state,revision,created_at,updated_at FROM drafts WHERE owner_id=$1 AND state='active' ORDER BY updated_at DESC,id",
+      "SELECT id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,fork_source_artifact_id,fork_source_version_id,provenance,state,revision,created_at,updated_at FROM drafts WHERE owner_id=$1 AND state='active' ORDER BY updated_at DESC,id",
       [ownerId],
     );
     return result.rows.map(draftFromRow);
@@ -219,7 +224,7 @@ export class PostgresDraftRepository implements DraftRepository {
 
   async findById(id: string): Promise<Draft | null> {
     const result = await this.db.query<DraftRow>(
-      "SELECT id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,state,revision,created_at,updated_at FROM drafts WHERE id=$1",
+      "SELECT id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,fork_source_artifact_id,fork_source_version_id,provenance,state,revision,created_at,updated_at FROM drafts WHERE id=$1",
       [id],
     );
     return result.rows[0] ? draftFromRow(result.rows[0]) : null;
@@ -227,7 +232,7 @@ export class PostgresDraftRepository implements DraftRepository {
 
   async findByIdForUpdate(id: string): Promise<Draft | null> {
     const result = await this.db.query<DraftRow>(
-      "SELECT id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,state,revision,created_at,updated_at FROM drafts WHERE id=$1 FOR UPDATE",
+      "SELECT id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,fork_source_artifact_id,fork_source_version_id,provenance,state,revision,created_at,updated_at FROM drafts WHERE id=$1 FOR UPDATE",
       [id],
     );
     return result.rows[0] ? draftFromRow(result.rows[0]) : null;
@@ -236,8 +241,8 @@ export class PostgresDraftRepository implements DraftRepository {
   async create(draft: Draft): Promise<void> {
     const value = draft.snapshot();
     await this.db.query(
-      "INSERT INTO drafts (id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,state,revision,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-      [value.id, value.ownerId, value.artifactId, value.baseVersionId, value.name, value.slug, value.visibility, value.content, value.state, value.revision, value.createdAt, value.updatedAt],
+      "INSERT INTO drafts (id,owner_id,artifact_id,base_version_id,name,slug,visibility,content,fork_source_artifact_id,fork_source_version_id,provenance,state,revision,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+      [value.id, value.ownerId, value.artifactId, value.baseVersionId, value.name, value.slug, value.visibility, value.content, value.forkOrigin?.artifactId ?? null, value.forkOrigin?.versionId ?? null, value.provenance, value.state, value.revision, value.createdAt, value.updatedAt],
     );
   }
 
