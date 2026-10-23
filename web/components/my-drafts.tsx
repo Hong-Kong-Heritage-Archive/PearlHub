@@ -57,6 +57,7 @@ export default function MyDrafts() {
         <nav className="site-nav" aria-label="Main navigation">
           <Link href="/">Discover</Link>
           <Link href="/create">Create Draft</Link>
+          <Link href="/import">Import</Link>
           <Link href="/drafts" aria-current="page">My Drafts</Link>
         </nav>
       </header>

@@ -17,6 +17,11 @@ const token = process.env.DEV_AUTH_TOKEN;
 if (!userId || !token) {
   throw new Error("DEV_AUTH_USER_ID and DEV_AUTH_TOKEN are required for development authentication.");
 }
+const secondUserId = process.env.DEV_AUTH_USER_ID_2;
+const secondToken = process.env.DEV_AUTH_TOKEN_2;
+if (Boolean(secondUserId) !== Boolean(secondToken)) {
+  throw new Error("DEV_AUTH_USER_ID_2 and DEV_AUTH_TOKEN_2 must be configured together.");
+}
 
 const portText = process.env.PORT ?? "8080";
 const port = Number(portText);
@@ -30,7 +35,11 @@ const corsOrigins = environment === "development"
 
 const runtime = await createPostgresRuntime({
   databaseUrl: requireDatabaseUrl(),
-  authenticator: new DevelopmentOnlyFakeAuthenticator(userId, token),
+  authenticator: new DevelopmentOnlyFakeAuthenticator(
+    userId,
+    token,
+    secondUserId && secondToken ? [{ userId: secondUserId, token: secondToken }] : [],
+  ),
   contentStore: new MemoryArtifactContentStore(),
   ...(corsOrigins === undefined ? {} : { corsOrigins }),
 });

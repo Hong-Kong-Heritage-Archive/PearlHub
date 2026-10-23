@@ -2,12 +2,14 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
-import { createWorkCopy, DraftRequestError, getPublishedVersion, tombstoneArtifact, type PublishedVersion } from "../lib/drafts";
+import { useRef, useState, type FormEvent } from "react";
+import { createForkDraft, createWorkCopy, DraftRequestError, getPublishedVersion, tombstoneArtifact, type ArtifactVisibility, type PublishedVersion } from "../lib/drafts";
 
 export default function PublishedVersionView({ artifactId, version }: { artifactId: string; version: string }) {
   const router = useRouter();
   const workCopyPending = useRef(false);
+  const forkPending = useRef(false);
+  const tombstonePending = useRef(false);
   const [token, setToken] = useState("");
   const [published, setPublished] = useState<PublishedVersion | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -15,6 +17,11 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
   const [confirmingTombstone, setConfirmingTombstone] = useState(false);
   const [tombstoning, setTombstoning] = useState(false);
   const [tombstoned, setTombstoned] = useState(false);
+  const [forkFormOpen, setForkFormOpen] = useState(false);
+  const [forkName, setForkName] = useState("");
+  const [forkSlug, setForkSlug] = useState("");
+  const [forkVisibility, setForkVisibility] = useState<ArtifactVisibility>("private");
+  const [forking, setForking] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -30,10 +37,12 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
   }
 
   async function tombstone() {
+    if (tombstonePending.current) return;
     if (!token.trim()) {
       setError("Enter the Artifact owner's developer bearer token to tombstone this Artifact.");
       return;
     }
+    tombstonePending.current = true;
     setTombstoning(true);
     setError(null);
     try {
@@ -44,7 +53,34 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
     } catch (caught: unknown) {
       setError(caught instanceof DraftRequestError ? caught.message : "Could not tombstone this Artifact.");
     } finally {
+      tombstonePending.current = false;
       setTombstoning(false);
+    }
+  }
+
+  async function fork(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (forkPending.current) return;
+    if (!token.trim()) {
+      setError("Enter a developer bearer token to create a Fork Draft.");
+      return;
+    }
+    forkPending.current = true;
+    setForking(true);
+    setError(null);
+    try {
+      const draft = await createForkDraft(artifactId, {
+        sourceVersion: version,
+        name: forkName.trim(),
+        slug: forkSlug,
+        visibility: forkVisibility,
+      }, token);
+      router.push(`/draft/${encodeURIComponent(draft.id)}`);
+    } catch (caught: unknown) {
+      setError(caught instanceof DraftRequestError ? caught.message : "Could not create a Fork Draft.");
+    } finally {
+      forkPending.current = false;
+      setForking(false);
     }
   }
 
@@ -68,7 +104,7 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
     <main className="page-shell">
       <header className="site-header">
         <Link className="wordmark" href="/">PearlHub</Link>
-        <nav className="site-nav" aria-label="Main navigation"><Link href="/">Discover</Link><Link href="/create">Create Draft</Link><Link href="/drafts">My Drafts</Link></nav>
+        <nav className="site-nav" aria-label="Main navigation"><Link href="/">Discover</Link><Link href="/create">Create Draft</Link><Link href="/import">Import</Link><Link href="/drafts">My Drafts</Link></nav>
       </header>
       <section className="intro">
         <p className="eyebrow">IMMUTABLE VERSION</p>
@@ -87,6 +123,7 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
           <div className="create-success" role="status">
             <h2>Artifact tombstoned</h2>
             <p>The Artifact is now unlisted and unavailable for normal use. Its published history has been retained.</p>
+            <p><Link href="/">Return to Artifact discovery</Link></p>
           </div>
         )}
         {published && (
@@ -111,6 +148,33 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
               ? <ul>{published.version.content.dependencies.map((dependency) => <li key={`${dependency.targetArtifactId}:${dependency.declaredRange}`}>{dependency.targetArtifactId} {dependency.declaredRange}</li>)}</ul>
               : <p>No dependencies.</p>}
             <button className="secondary-button" type="button" onClick={workCopy} disabled={loading || tombstoning}>Create work-copy from this version</button>
+            <div className="artifact-delete-actions">
+              <button className="secondary-button" type="button" onClick={() => setForkFormOpen((open) => !open)} disabled={loading || tombstoning || forking}>
+                {forkFormOpen ? "Cancel Fork" : "Fork this version"}
+              </button>
+              {forkFormOpen && (
+                <form className="create-form" onSubmit={fork}>
+                  <p>Fork source: <strong>{published.artifact.name} — version {published.version.version}</strong></p>
+                  <label className="field" htmlFor="fork-name">
+                    <span>New Artifact name</span>
+                    <input id="fork-name" required maxLength={200} value={forkName} disabled={forking} onChange={(event) => setForkName(event.target.value)} />
+                  </label>
+                  <label className="field" htmlFor="fork-slug">
+                    <span>New Artifact slug</span>
+                    <input id="fork-slug" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" value={forkSlug} disabled={forking} onChange={(event) => setForkSlug(event.target.value)} />
+                  </label>
+                  <label className="field" htmlFor="fork-visibility">
+                    <span>Visibility after publication</span>
+                    <select id="fork-visibility" value={forkVisibility} disabled={forking} onChange={(event) => setForkVisibility(event.target.value as ArtifactVisibility)}>
+                      <option value="private">Private</option>
+                      <option value="unlisted">Unlisted</option>
+                      <option value="public">Public</option>
+                    </select>
+                  </label>
+                  <button className="primary-button" type="submit" disabled={forking}>{forking ? "Creating Fork Draft…" : "Create Fork Draft"}</button>
+                </form>
+              )}
+            </div>
             <div className="artifact-delete-actions">
               <button className="danger-button" type="button" onClick={() => setConfirmingTombstone(true)} disabled={loading || tombstoning}>
                 Tombstone Artifact

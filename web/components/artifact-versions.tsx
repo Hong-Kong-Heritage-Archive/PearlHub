@@ -26,7 +26,7 @@ export default function ArtifactVersions({ artifactId }: { artifactId: string })
     <main className="page-shell">
       <header className="site-header">
         <Link className="wordmark" href="/">PearlHub</Link>
-        <nav className="site-nav" aria-label="Main navigation"><Link href="/">Discover</Link><Link href="/create">Create Draft</Link><Link href="/drafts">My Drafts</Link></nav>
+        <nav className="site-nav" aria-label="Main navigation"><Link href="/">Discover</Link><Link href="/create">Create Draft</Link><Link href="/import">Import</Link><Link href="/drafts">My Drafts</Link></nav>
       </header>
       <section className="intro">
         <p className="eyebrow">IMMUTABLE CONTENT</p>

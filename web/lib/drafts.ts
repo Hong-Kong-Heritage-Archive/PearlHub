@@ -19,6 +19,13 @@ export interface Draft extends DraftInput {
   ownerId: string;
   artifactId: string | null;
   baseVersionId: string | null;
+  forkOrigin?: { artifactId: string; versionId: string } | null;
+  provenance?: {
+    sourceType: string;
+    sourceUrl: string;
+    sourceRef: string;
+    importedAt: string;
+  } | null;
   state: "active" | "published" | "discarded";
   revision: number;
   createdAt: string;
@@ -73,6 +80,23 @@ export class DraftRequestError extends Error {
 export async function createDraft(input: DraftInput, token: string, signal?: AbortSignal): Promise<Draft> {
   const response = await request("/drafts", "POST", input, token, signal);
   return readDraft(response);
+}
+
+export async function createForkDraft(
+  artifactId: string,
+  input: { sourceVersion: string; name: string; slug: string; visibility: ArtifactVisibility },
+  token: string,
+): Promise<Draft> {
+  return readDraft(await request(`/artifacts/${encodeURIComponent(artifactId)}/fork`, "POST", input, token));
+}
+
+export async function createImportDraft(
+  input:
+    | { sourceType: "pasted"; name: string; slug: string; visibility: ArtifactVisibility; content: string }
+    | { sourceType: "github"; name: string; slug: string; visibility: ArtifactVisibility; sourceUrl: string },
+  token: string,
+): Promise<Draft> {
+  return readDraft(await request("/imports/github", "POST", input, token));
 }
 
 export async function getDraft(draftId: string, token: string, signal?: AbortSignal): Promise<Draft> {
@@ -215,11 +239,19 @@ async function readError(response: Response): Promise<DraftRequestError> {
 
 function isDraft(value: unknown): value is Draft {
   return isRecord(value)
-    && typeof value.id === "string" && typeof value.ownerId === "string"
+    && typeof value.id === "string" && value.id.length > 0 && typeof value.ownerId === "string"
     && (typeof value.artifactId === "string" || value.artifactId === null)
     && (typeof value.baseVersionId === "string" || value.baseVersionId === null)
     && typeof value.name === "string" && typeof value.slug === "string"
     && isVisibility(value.visibility) && isDraftContent(value.content)
+    && (value.forkOrigin === undefined || value.forkOrigin === null || (
+      isRecord(value.forkOrigin) && typeof value.forkOrigin.artifactId === "string" && typeof value.forkOrigin.versionId === "string"
+    ))
+    && (value.provenance === undefined || value.provenance === null || (
+      isRecord(value.provenance) && typeof value.provenance.sourceType === "string"
+      && typeof value.provenance.sourceUrl === "string" && typeof value.provenance.sourceRef === "string"
+      && typeof value.provenance.importedAt === "string"
+    ))
     && ["active", "published", "discarded"].includes(String(value.state))
     && Number.isInteger(value.revision) && typeof value.createdAt === "string" && typeof value.updatedAt === "string";
 }

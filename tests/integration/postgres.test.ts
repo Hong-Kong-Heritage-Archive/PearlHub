@@ -12,6 +12,8 @@ import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Draft } from "../../src/domain/draft.js";
 import { Dependency } from "../../src/domain/dependency.js";
 import { DevelopmentOnlyFakeAuthenticator } from "../../src/http/testing/development-fake-authenticator.js";
+import { createHttpApp } from "../../src/http/app.js";
+import { ListArtifactsService } from "../../src/application/discovery.js";
 import { createPostgresRuntime } from "../../src/runtime.js";
 import type { CompatibilityReport, Provenance } from "../../src/domain/records.js";
 
@@ -962,6 +964,213 @@ describe("PostgreSQL persistence hardening", () => {
       [imported.artifact.id],
     );
     expect(tombstone.rows[0]).toEqual({ version_count: 1, provenance_count: 1 });
+  });
+
+  it("verifies Fork, both Import modes, and owner-scoped tombstone responses through the HTTP API", async () => {
+    const ownerId = owners[0]!;
+    const otherOwnerId = owners[1]!;
+    const sourceId = await createArtifact(ownerId, randomUUID(), "public");
+    const sourceVersionId = await createVersion(sourceId, "2.3.1", `sha256:${"c".repeat(64)}`, {
+      instructions: "Selected source version content",
+      tags: ["source-tag"],
+      knowledgeFiles: [],
+      dependencies: [],
+    });
+
+    const transactions = new PostgresTransactionManager(pool!);
+    const artifacts = new PostgresArtifactRepository(transactions.database);
+    const versions = new PostgresArtifactVersionRepository(transactions.database);
+    const discovery = new PostgresArtifactDiscoveryRepository(transactions.database);
+    const lineage = new PostgresLineageRepository(transactions.database);
+    const provenances = new PostgresProvenanceRepository(transactions.database);
+    const access = {
+      canRead: async (actorId: string, artifact: Artifact) => actorId === artifact.ownerId || artifact.visibility === "public",
+      canWrite: async (actorId: string, artifact: Artifact) => actorId === artifact.ownerId,
+    };
+    const drafts = new DraftWorkflowService(
+      new PostgresDraftRepository(transactions.database),
+      artifacts,
+      versions,
+      new PostgresDependencyRepository(transactions.database),
+      access,
+      discovery,
+      transactions,
+      undefined,
+      undefined,
+      lineage,
+      provenances,
+    );
+    const importDraft = new ImportDraftService({
+      fetch: async () => ({ content: "# GitHub fixture\n\nFetched by the backend fixture.", ref: "fixture-ref" }),
+    }, drafts);
+    const deleteArtifact = new DeleteArtifactService(artifacts, access, undefined, transactions);
+    const common = {
+      listArtifacts: new ListArtifactsService(discovery),
+      drafts,
+      deleteArtifact,
+      importDraft,
+    };
+    const app = createHttpApp({
+      ...common,
+      authenticator: new DevelopmentOnlyFakeAuthenticator(ownerId, "owner-token", [
+        { userId: otherOwnerId, token: "other-owner-token" },
+      ]),
+    });
+    const ownerApp = app;
+    const otherOwnerApp = app;
+    const ownerHeaders = { authorization: "Bearer owner-token", "content-type": "application/json" };
+    const otherOwnerHeaders = { authorization: "Bearer other-owner-token", "content-type": "application/json" };
+
+    const anonymousReadResponse = await app.request(`/api/v1/artifacts/${sourceId}/versions/2.3.1`);
+    expect(anonymousReadResponse.status).toBe(200);
+    expect(await anonymousReadResponse.json()).toMatchObject({
+      artifact: { id: sourceId, visibility: "public" },
+      version: { id: sourceVersionId, version: "2.3.1" },
+    });
+
+    const forkDraftResponse = await ownerApp.request(`/api/v1/artifacts/${sourceId}/fork`, {
+      method: "POST",
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        sourceVersion: "2.3.1",
+        name: "Forked selected version",
+        slug: `fork-${randomUUID()}`,
+        visibility: "private",
+      }),
+    });
+    expect(forkDraftResponse.status).toBe(201);
+    const forkDraft = await forkDraftResponse.json() as {
+      id: string;
+      revision: number;
+      content: { instructions: string };
+      forkOrigin: { artifactId: string; versionId: string } | null;
+    };
+    expect(forkDraft).toMatchObject({
+      content: { instructions: "Selected source version content" },
+      forkOrigin: { artifactId: sourceId, versionId: sourceVersionId },
+    });
+    expect(await lineage.getChildren(sourceId)).toHaveLength(0);
+
+    const forkPublishResponse = await ownerApp.request(`/api/v1/drafts/${forkDraft.id}/publish`, {
+      method: "POST",
+      headers: ownerHeaders,
+      body: JSON.stringify({ revision: forkDraft.revision }),
+    });
+    expect(forkPublishResponse.status).toBe(201);
+    const publishedFork = await forkPublishResponse.json() as {
+      artifact: { id: string };
+      version: { version: string; content: { instructions: string } };
+    };
+    expect(publishedFork.version).toMatchObject({
+      version: "0.1.0",
+      content: { instructions: "Selected source version content" },
+    });
+    expect(await lineage.getParents(publishedFork.artifact.id)).toMatchObject([{
+      parentArtifactId: sourceId,
+      sourceVersionId,
+    }]);
+
+    const pastedContent = "# Pasted fixture\n\nPreserved content.";
+    const pastedResponse = await ownerApp.request("/api/v1/imports/github", {
+      method: "POST",
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        sourceType: "pasted",
+        name: "Pasted Import",
+        slug: `pasted-${randomUUID()}`,
+        visibility: "private",
+        content: pastedContent,
+      }),
+    });
+    expect(pastedResponse.status).toBe(201);
+    const pastedDraft = await pastedResponse.json() as {
+      id: string;
+      revision: number;
+      content: { instructions: string };
+      forkOrigin: unknown;
+      provenance: unknown;
+    };
+    expect(pastedDraft).toMatchObject({ content: { instructions: pastedContent }, forkOrigin: null, provenance: null });
+    const pastedPublishResponse = await ownerApp.request(`/api/v1/drafts/${pastedDraft.id}/publish`, {
+      method: "POST",
+      headers: ownerHeaders,
+      body: JSON.stringify({ revision: pastedDraft.revision }),
+    });
+    expect(pastedPublishResponse.status).toBe(201);
+    const pastedPublished = await pastedPublishResponse.json() as { artifact: { id: string }; version: { id: string } };
+    expect(await lineage.getParents(pastedPublished.artifact.id)).toEqual([]);
+    expect(await provenances.findForVersion(pastedPublished.version.id)).toEqual([]);
+
+    const githubUrl = "https://raw.githubusercontent.com/example/pearls/main/SKILL.md";
+    const githubResponse = await ownerApp.request("/api/v1/imports/github", {
+      method: "POST",
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        sourceType: "github",
+        name: "GitHub Import",
+        slug: `github-${randomUUID()}`,
+        visibility: "private",
+        sourceUrl: githubUrl,
+      }),
+    });
+    expect(githubResponse.status).toBe(201);
+    const githubDraft = await githubResponse.json() as {
+      id: string;
+      revision: number;
+      content: { instructions: string };
+      forkOrigin: unknown;
+      provenance: { sourceType: string; sourceUrl: string; sourceRef: string } | null;
+    };
+    expect(githubDraft).toMatchObject({
+      content: { instructions: "# GitHub fixture\n\nFetched by the backend fixture." },
+      forkOrigin: null,
+      provenance: { sourceType: "github", sourceUrl: githubUrl, sourceRef: "fixture-ref" },
+    });
+    const githubPublishResponse = await ownerApp.request(`/api/v1/drafts/${githubDraft.id}/publish`, {
+      method: "POST",
+      headers: ownerHeaders,
+      body: JSON.stringify({ revision: githubDraft.revision }),
+    });
+    expect(githubPublishResponse.status).toBe(201);
+    const githubPublished = await githubPublishResponse.json() as { artifact: { id: string }; version: { id: string } };
+    expect(await lineage.getParents(githubPublished.artifact.id)).toEqual([]);
+    expect(await provenances.findForVersion(githubPublished.version.id)).toMatchObject([{
+      sourceType: "github",
+      sourceUrl: githubUrl,
+      sourceRef: "fixture-ref",
+    }]);
+
+    const deniedDeleteResponse = await otherOwnerApp.request(`/api/v1/artifacts/${sourceId}`, {
+      method: "DELETE",
+      headers: otherOwnerHeaders,
+    });
+    expect(deniedDeleteResponse.status).toBe(403);
+    expect(await deniedDeleteResponse.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
+
+    const ownerDeleteResponse = await ownerApp.request(`/api/v1/artifacts/${sourceId}`, {
+      method: "DELETE",
+      headers: ownerHeaders,
+    });
+    expect(ownerDeleteResponse.status).toBe(204);
+    const repeatedDeleteResponse = await ownerApp.request(`/api/v1/artifacts/${sourceId}`, {
+      method: "DELETE",
+      headers: ownerHeaders,
+    });
+    expect(repeatedDeleteResponse.status).toBe(410);
+    expect(await repeatedDeleteResponse.json()).toMatchObject({ error: { code: "ARTIFACT_GONE" } });
+
+    expect((await artifacts.findById(sourceId))?.snapshot()).toMatchObject({
+      id: sourceId,
+      status: "tombstone",
+      visibility: "unlisted",
+    });
+    expect(await versions.findForArtifact(sourceId)).toHaveLength(1);
+    const tombstone = await pool!.query<{ version_count: number; lineage_count: number }>(
+      "SELECT jsonb_array_length(snapshot->'versions') AS version_count,jsonb_array_length(snapshot->'lineage') AS lineage_count FROM tombstone_snapshots WHERE artifact_id=$1",
+      [sourceId],
+    );
+    expect(tombstone.rows[0]).toEqual({ version_count: 1, lineage_count: 1 });
+    expect(await lineage.getChildren(sourceId)).toMatchObject([{ childArtifactId: publishedFork.artifact.id }]);
   });
 
   it("rolls back Artifact, Version, and Dependency writes in a real transaction", async () => {

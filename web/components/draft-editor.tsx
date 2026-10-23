@@ -133,6 +133,7 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
         <nav className="site-nav" aria-label="Main navigation">
           <Link href="/">Discover</Link>
           <Link className="nav-create-link" href="/create" aria-current="page">Create Draft</Link>
+          <Link href="/import">Import</Link>
           <Link href="/drafts">My Drafts</Link>
         </nav>
       </header>
@@ -271,6 +272,13 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
           </details>
         )}
         {draft?.baseVersionId && <p className="field-help">Work-copy source version ID: <code>{draft.baseVersionId}</code>. The published source remains unchanged.</p>}
+        {draft?.forkOrigin && <p className="field-help">Fork source: Artifact <code>{draft.forkOrigin.artifactId}</code>, Version <code>{draft.forkOrigin.versionId}</code>.</p>}
+        {draft?.provenance && (
+          <p className="field-help">
+            Import provenance ({draft.provenance.sourceType}): <code>{draft.provenance.sourceUrl}</code>
+            {draft.provenance.sourceRef && <> — ref <code>{draft.provenance.sourceRef}</code></>}
+          </p>
+        )}
       </section>
     </main>
   );

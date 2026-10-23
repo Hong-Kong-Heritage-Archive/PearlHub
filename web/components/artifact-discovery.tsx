@@ -166,6 +166,7 @@ export default function ArtifactDiscovery() {
         <nav className="site-nav" aria-label="Main navigation">
           <Link href="/" aria-current="page">Discover</Link>
           <Link className="nav-create-link" href="/create">Create Draft</Link>
+          <Link href="/import">Import</Link>
           <Link href="/drafts">My Drafts</Link>
         </nav>
       </header>

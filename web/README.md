@@ -43,7 +43,9 @@ The value is a public API origin/base path, not a credential. In development mod
 - Cursor-based “Load more” uses the opaque cursor returned by the API and deduplicates Artifact IDs.
 - Loading, empty, validation, network/API error, retry, and discovery-unavailable states.
 - Create Draft, find active private Drafts, edit/save with revision conflict handling, private preview, tag/knowledge-file/dependency editing, and one-request Publish are provided through `GET/POST /api/v1/drafts`, `PUT /api/v1/drafts/{draftId}`, and `POST /api/v1/drafts/{draftId}/publish`.
-- Published-version lists and immutable version views use `GET /api/v1/artifacts/{artifactId}/versions` and `GET /api/v1/artifacts/{artifactId}/versions/{version}`. The owner can create a work-copy from a selected version.
+- Published-version lists and immutable version views use `GET /api/v1/artifacts/{artifactId}/versions` and `GET /api/v1/artifacts/{artifactId}/versions/{version}`. A specific selected Version can be Forked into an editable Draft with `POST /api/v1/artifacts/{artifactId}/fork`.
+- Import supports pasted Markdown/Skill content and a GitHub raw URL through `POST /api/v1/imports/github`; both return an editable Draft and GitHub provenance is shown in the Draft editor.
+- The owner can create a work-copy from a selected version.
 - My Drafts supports deleting an unpublished Draft with confirmation. Published-version views support tombstoning an Artifact with confirmation; the backend enforces ownership, preserves history, and makes repeat deletion return `410 ARTIFACT_GONE`.
 - Authenticated operations require a bearer token entered into a temporary developer-only password field. The token stays in component memory, is sent only to the configured API URL, and is never persisted in browser storage. It is not a production login flow.
 - No production authentication or login flow is available. The developer token field is not a login system; the backend remains responsible for authentication and ownership.
@@ -51,7 +53,7 @@ The value is a public API origin/base path, not a credential. In development mod
 - All MVP Drafts and published snapshots are PostgreSQL-backed. Legacy versions created before migration 005 may have no recoverable complete content snapshot because the former content store was in-memory; those versions remain listed in persistence but cannot be read as full content or used for work-copy.
 - Visibility and access control remain server-side. Drafts are private to their owner and never appear in discovery.
 
-For local creation with the development-only fake authenticator, enter the `DEV_AUTH_TOKEN` value from your untracked root `.env` file. This token is for local development only and is not a production credential. Development CORS permits only the configured frontend origins and does not bypass the API's bearer-token requirement.
+For local creation with the development-only fake authenticator, enter the `DEV_AUTH_TOKEN` value from your untracked root `.env` file. An optional second development-only identity (`DEV_AUTH_USER_ID_2` and `DEV_AUTH_TOKEN_2`) supports owner/non-owner checks; configure both values and provision that user in the database as described in the backend environment guide. These values are only for local development and are not production credentials. Development CORS permits only the configured frontend origins and does not bypass the API's bearer-token requirement.
 
 ## Checks
 

@@ -13,6 +13,22 @@ afterEach(() => {
 });
 
 describe("published version view", () => {
+  it("loads a public published Version without sending a bearer token", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      artifact: { id: "public-artifact", ownerId: "owner-1", name: "Public Pearl", slug: "public-pearl", visibility: "public", status: "active", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
+      version: { id: "public-version", artifactId: "public-artifact", version: "1.0.0", contentHash: `sha256:${"a".repeat(64)}`, publishedAt: "2026-01-01T00:00:00.000Z", content: { instructions: "Public instructions", knowledgeFiles: [], dependencies: [] } },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+    vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
+    render(<PublishedVersionView artifactId="public-artifact" version="1.0.0" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Load published version" }));
+
+    expect(await screen.findByRole("heading", { name: "Public Pearl — 1.0.0" })).toBeInTheDocument();
+    const [, init = {}] = fetch.mock.calls[0]!;
+    expect(new Headers(init.headers).has("authorization")).toBe(false);
+  });
+
   it("renders immutable content and creates a work-copy from the selected version", async () => {
     const mock = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
