@@ -24,6 +24,7 @@ use revision checks for updates and publication.
 | GET | `/artifacts/{artifactId}/versions` | List published versions |
 | GET | `/artifacts/{artifactId}/versions/{version}` | Read a complete immutable version snapshot |
 | POST | `/artifacts/{artifactId}/versions/{version}/work-copy` | Create the owner's editable Draft from a version |
+| POST | `/artifacts/{artifactId}/clone` | Create an owner-bound Draft from an exact readable Version without lineage |
 
 The first publish stores the Artifact, complete content snapshot, dependency
 declarations, discovery projection, and consumed Draft in one PostgreSQL
@@ -36,8 +37,8 @@ content reads and work-copy creation.
 ## Not implemented
 
 Artifact metadata lookup/update and tombstoning; direct Version creation;
-Fork, Clone, Import, dependency resolution, and compatibility reports remain
-outside this slice. Published versions have no update or delete operation.
+Fork, Import, dependency resolution, and compatibility reports remain outside
+this slice. Published versions have no update or delete operation.
 
 ## API error shape
 

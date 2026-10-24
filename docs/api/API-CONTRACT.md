@@ -103,7 +103,7 @@ These operations have deliberately different semantics:
 | Operation | New Pearl | PearlHub lineage | Provenance |
 |---|---:|---:|---:|
 | Fork | Yes | Yes, permanent | Optional |
-| Clone | Yes | No | Optional |
+| Clone | Yes | No | No |
 | GitHub Import | Yes | No | Yes, source metadata |
 
 GitHub Import is provenance/source metadata. It is **not** a Fork.
@@ -150,6 +150,7 @@ version atomically; direct Artifact creation is retired.
 | DELETE | `/drafts/{draftId}?revision={revision}` | Discard an unpublished Draft | Implemented |
 | POST | `/drafts/{draftId}/publish` | Atomically publish a Draft | Implemented |
 | POST | `/artifacts/{artifactId}/versions/{version}/work-copy` | Create owner work-copy from selected version | Implemented |
+| POST | `/artifacts/{artifactId}/clone` | Create an owner-bound Draft from an exact readable Version, without PearlHub lineage | Implemented |
 | POST | `/artifacts` | Legacy direct creation; returns `410 ARTIFACT_CREATION_REQUIRES_DRAFT` | Retired |
 | GET | `/artifacts` | List/search Artifacts | Implemented |
 | GET | `/artifacts/{artifactId}` | Get visible Artifact metadata | Implemented |
@@ -179,7 +180,7 @@ There is no Version PATCH or DELETE endpoint in v0.1.
 | Method | Endpoint | Purpose | Status |
 |---|---|---|---|
 | POST | `/artifacts/{artifactId}/fork` | Create a Fork Draft; lineage is recorded at first publication | Implemented |
-| POST | `/artifacts/{artifactId}/clone` | Clone without PearlHub lineage | Planned |
+| POST | `/artifacts/{artifactId}/clone` | Create a Clone Draft without PearlHub lineage | Implemented |
 | GET | `/artifacts/{artifactId}/lineage` | Get visible Fork lineage | Implemented |
 
 ### Import
@@ -341,7 +342,14 @@ transaction on first publication.
 
 ### Clone
 
-Clone creates a new Pearl with no PearlHub lineage.
+`POST /api/v1/artifacts/{artifactId}/clone` requires authentication and a strict
+request containing the exact `sourceVersion` SemVer, new `name`, new `slug`,
+and initial `visibility`. The endpoint applies the same source read-access
+policy as Fork and returns an owner-private editable Draft. It copies the
+complete selected Version snapshot, but creates neither PearlHub lineage nor
+provenance. First publication creates the new Artifact and immutable `0.1.0`
+Version through the standard Draft Publish workflow; owner-scoped slug
+uniqueness is enforced during publication.
 
 ### Import
 
@@ -501,9 +509,9 @@ Protected write operations require Bearer authentication.
 Implemented protected operations include Draft creation, read, update,
 discard, and publish; creating a work-copy or Fork Draft; Import Draft
 creation; owner-authorized Artifact deletion; and Artifact detail and lineage
-reads. Direct `POST /artifacts` is retired and returns
-`410 ARTIFACT_CREATION_REQUIRES_DRAFT`. Metadata mutation and Clone remain
-planned.
+reads. Creating a Clone Draft is also implemented. Direct `POST /artifacts`
+is retired and returns `410 ARTIFACT_CREATION_REQUIRES_DRAFT`. Metadata
+mutation remains planned.
 
 OpenAPI security scheme:
 
@@ -671,12 +679,11 @@ Fork:
 - creates a Draft from the exact selected Version
 - establishes permanent PearlHub lineage only when first published
 
-Clone (planned):
-
+Clone:
 - requires authentication
-- creates a new Pearl
-- authenticated user becomes owner
-- establishes no PearlHub lineage
+- creates an owner-bound Draft from the exact selected readable Version
+- first publication creates a new Pearl owned by the authenticated user
+- creates no PearlHub lineage or source provenance
 
 Anonymous users cannot Fork or Clone.
 
@@ -684,10 +691,11 @@ Anonymous users cannot Fork or Clone.
 
 The following lifecycle rules supplement this API version:
 
-- Fork and Import never create a published Artifact directly; their responses
+- Fork, Clone, and Import never create a published Artifact directly; their responses
   are active, owner-bound Drafts that use the standard Publish endpoint.
 - First publication creates the Artifact and `0.1.0` Version atomically. Fork
-  lineage and GitHub provenance are persisted in that same transaction.
+  lineage and GitHub provenance are persisted in that same transaction. Clone
+  creates neither lineage nor provenance.
 - Deleting an active Artifact is a transactional tombstone transition to
   `status=tombstone` and `visibility=unlisted`. Historical Versions, lineage,
   provenance, dependencies, and immutable snapshots remain intact.

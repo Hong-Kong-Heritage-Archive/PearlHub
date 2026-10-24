@@ -65,7 +65,22 @@ Steps:
 
 ## CloneArtifact
 
-Create a new Artifact from source content and dependency declarations without creating PearlHub lineage. Dependency resolutions are not copied.
+Input:
+
+- actor ID
+- source Artifact ID
+- exact source Version SemVer
+- new name, slug, and initial visibility
+
+Steps:
+
+1. authorize source access using the existing read policy
+2. verify the source Artifact is active and the exact Version exists
+3. reject a missing or incomplete immutable content snapshot
+4. create a private owner-bound Draft with the selected Version's content and dependency declarations
+5. do not set Fork origin or provenance
+6. publish only through the existing Draft Publish workflow, creating the new Artifact and initial `0.1.0` Version atomically
+7. do not create PearlHub lineage or copy dependency resolutions
 
 ## DeleteArtifact
 

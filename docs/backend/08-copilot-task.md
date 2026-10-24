@@ -50,7 +50,7 @@ Generate:
 - CreateArtifactService
 - PublishVersionService
 - ForkArtifactService
-- CloneArtifactService
+- Clone Draft operation on `DraftWorkflowService`
 - DeleteArtifactService
 - ImportGitHubService
 - ResolveDependencyService
