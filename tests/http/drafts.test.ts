@@ -30,6 +30,7 @@ function makeApp(overrides: Partial<DraftWorkflow> = {}) {
     discard: vi.fn(async () => {}),
     createWorkCopy: vi.fn(async () => storedDraft),
     createFork: vi.fn(async () => storedDraft),
+    createClone: vi.fn(async () => storedDraft),
     publish: vi.fn(async () => ({ artifact, version })),
     getPublishedVersion: vi.fn(async () => ({ artifact, version })),
     listPublishedVersions: vi.fn(async () => ({ artifact, versions: [version] })),
@@ -101,6 +102,53 @@ describe("Draft and published-version HTTP routes", () => {
       });
     });
 
+    it("requires authentication and creates a Clone Draft without accepting caller ownership", async () => {
+      const createClone = vi.fn(async () => storedDraft);
+      const { app } = makeApp({ createClone });
+      const body = {
+        sourceVersion: "1.2.0",
+        name: "Cloned Pearl",
+        slug: "cloned-pearl",
+        visibility: "public",
+      };
+      const anonymous = await app.request("/api/v1/artifacts/source-id/clone", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(anonymous.status).toBe(401);
+      expect(createClone).not.toHaveBeenCalled();
+
+      const response = await app.request("/api/v1/artifacts/source-id/clone", {
+        method: "POST",
+        headers: { authorization: "******", "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(201);
+      expect(await response.json()).toMatchObject({
+        id: "draft-id",
+        ownerId: "owner-id",
+        artifactId: null,
+        baseVersionId: null,
+        forkOrigin: null,
+        provenance: null,
+        state: "active",
+      });
+      expect(createClone).toHaveBeenCalledWith({
+        actorId: "owner-id",
+        sourceArtifactId: "source-id",
+        ...body,
+      });
+
+      const invalid = await app.request("/api/v1/artifacts/source-id/clone", {
+        method: "POST",
+        headers: { authorization: "******", "content-type": "application/json" },
+        body: JSON.stringify({ ...body, ownerId: "attacker" }),
+      });
+      expect(invalid.status).toBe(400);
+      expect(createClone).toHaveBeenCalledTimes(1);
+    });
+
     it("creates pasted Import Drafts without accepting caller ownership or unknown fields", async () => {
       const importExecute = vi.fn(async () => storedDraft);
       const app = createHttpApp({
@@ -108,7 +156,7 @@ describe("Draft and published-version HTTP routes", () => {
         drafts: {
           create: async () => storedDraft, list: async () => [storedDraft], get: async () => storedDraft,
           update: async () => storedDraft, discard: async () => {}, createWorkCopy: async () => storedDraft,
-          createFork: async () => storedDraft, publish: async () => ({ artifact, version }),
+          createFork: async () => storedDraft, createClone: async () => storedDraft, publish: async () => ({ artifact, version }),
           getPublishedVersion: async () => ({ artifact, version }),
           listPublishedVersions: async () => ({ artifact, versions: [version] }),
         },

@@ -51,6 +51,7 @@ export interface DraftWorkflow {
   discard(input: { actorId: string; draftId: string; revision: number }): Promise<void>;
   createWorkCopy(input: { actorId: string; artifactId: string; version: string }): Promise<Draft>;
   createFork(input: { actorId: string; sourceArtifactId: string; sourceVersion: string; name: string; slug: string; visibility: ArtifactVisibility }): Promise<Draft>;
+  createClone(input: { actorId: string; sourceArtifactId: string; sourceVersion: string; name: string; slug: string; visibility: ArtifactVisibility }): Promise<Draft>;
   publish(input: { actorId: string; draftId: string; revision: number }): Promise<{ artifact: Artifact; version: ArtifactVersion }>;
   getPublishedVersion(input: { actorId: string | null; artifactId: string; version: string }): Promise<{ artifact: Artifact; version: ArtifactVersion }>;
   listPublishedVersions(input: { actorId: string | null; artifactId: string }): Promise<{ artifact: Artifact; versions: ArtifactVersion[] }>;
@@ -151,6 +152,31 @@ export class DraftWorkflowService implements DraftWorkflow, ArtifactReadService 
       visibility: input.visibility,
       content,
       forkOrigin: { artifactId: source.id, versionId: version.id },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await this.drafts.create(draft);
+    return draft;
+  }
+
+  async createClone(input: { actorId: string; sourceArtifactId: string; sourceVersion: string; name: string; slug: string; visibility: ArtifactVisibility }): Promise<Draft> {
+    const source = await this.artifacts.findById(input.sourceArtifactId);
+    if (!source) throw new DomainError("ARTIFACT_NOT_FOUND", "Source Artifact was not found.");
+    if (source.status !== "active") throw new DomainError("ARTIFACT_GONE", "Source Artifact has been tombstoned.");
+    await authorizeRead(this.access, input.actorId, source);
+    const version = await this.versions.findByArtifactAndVersion(source.id, input.sourceVersion);
+    if (!version) throw new DomainError("VERSION_NOT_FOUND", "Source Artifact Version was not found.");
+    const content = draftContentFromSnapshot(version.contentSnapshot);
+    const now = this.clock.now();
+    const draft = Draft.create({
+      id: this.ids.next(),
+      ownerId: input.actorId,
+      artifactId: null,
+      baseVersionId: null,
+      name: input.name,
+      slug: input.slug,
+      visibility: input.visibility,
+      content,
       createdAt: now,
       updatedAt: now,
     });
@@ -377,54 +403,6 @@ export class PublishVersionService {
       await projectLatestVersionTags(artifact.id, this.versions, this.contentStore, this.discovery);
       return version;
     });
-  }
-}
-
-abstract class CopyArtifactService {
-  constructor(
-    protected readonly artifacts: ArtifactRepository,
-    protected readonly versions: ArtifactVersionRepository,
-    protected readonly contentStore: ArtifactContentStore,
-    protected readonly dependencies: DependencyRepository,
-    protected readonly access: AccessPolicy,
-    protected readonly discovery: ArtifactDiscoveryRepository,
-    protected readonly transactions: TransactionManager,
-    protected readonly ids: IdGenerator = uuidGenerator,
-    protected readonly clock: Clock = systemClock,
-  ) {}
-
-  protected async copy(input: { actorId: string; sourceArtifactId: string; name: string; slug: string; sourceVersionId?: string }, afterCreate?: (artifact: Artifact, sourceVersion: ArtifactVersion) => Promise<void>): Promise<{ artifact: Artifact; sourceVersion: ArtifactVersion }> {
-    const source = await this.artifacts.findById(input.sourceArtifactId);
-    if (!source) throw new DomainError("ARTIFACT_NOT_FOUND", "Source Artifact was not found.");
-    await authorizeRead(this.access, input.actorId, source);
-    const sourceVersion = input.sourceVersionId
-      ? await this.versions.findById(input.sourceVersionId)
-      : await this.versions.findLatest(source.id);
-    if (!sourceVersion || sourceVersion.artifactId !== source.id) throw new DomainError("VERSION_NOT_FOUND", "Source version was not found.");
-    const content = await this.contentStore.get(sourceVersion.contentLocation);
-    if (content === null) throw new DomainError("INVALID_REQUEST", "Source content is unavailable.");
-    const tags = readPearlTags(content);
-    const artifact = Artifact.create({ id: this.ids.next(), ownerId: input.actorId, name: input.name, slug: input.slug, visibility: "private", createdAt: this.clock.now() });
-    const contentLocation = await this.contentStore.put(content, sourceVersion.contentHash);
-    const at = this.clock.now();
-    const copiedVersion = ArtifactVersion.create({ id: this.ids.next(), artifactId: artifact.id, version: sourceVersion.version, contentHash: sourceVersion.contentHash, contentLocation, createdAt: at, publishedAt: at });
-    const work = async () => {
-      await this.artifacts.create(artifact);
-      await this.versions.create(copiedVersion);
-      for (const dependency of await this.dependencies.findForVersion(sourceVersion.id)) {
-        await this.dependencies.create(Dependency.create({ id: this.ids.next(), artifactVersionId: copiedVersion.id, targetArtifactId: dependency.targetArtifactId, declaredRange: dependency.declaredRange, createdAt: at }));
-      }
-      await this.discovery.replaceTagProjection(artifact.id, copiedVersion.id, tags);
-      await afterCreate?.(artifact, sourceVersion);
-    };
-    await this.transactions.run(work);
-    return { artifact, sourceVersion };
-  }
-}
-
-export class CloneArtifactService extends CopyArtifactService {
-  async execute(input: { actorId: string; sourceArtifactId: string; name: string; slug: string; sourceVersionId?: string }): Promise<Artifact> {
-    return (await this.copy(input)).artifact;
   }
 }
 

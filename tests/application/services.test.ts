@@ -3,7 +3,7 @@ import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Dependency } from "../../src/domain/dependency.js";
 import type { DependencyResolution } from "../../src/domain/records.js";
-import { CloneArtifactService, DeleteArtifactService, PublishVersionService, ResolveDependencyService, RestoreArtifactService } from "../../src/application/services.js";
+import { DeleteArtifactService, PublishVersionService, ResolveDependencyService, RestoreArtifactService } from "../../src/application/services.js";
 import type { ArtifactDiscoveryRepository, ArtifactRepository, ArtifactVersionRepository, DependencyRepository, LineageRepository, TransactionManager } from "../../src/ports/repositories.js";
 
 const fixedTime = new Date("2026-01-01T00:00:00Z");
@@ -75,28 +75,6 @@ function copyServices() {
   const transactions: TransactionManager = { run: async (work) => work() };
   return { artifacts, versions, projections, lineages, dependencies, sourceDependencies, sourceResolutions, createdResolutions, storedContent, sourceVersionWithLocation, artifactRepo, versionRepo, dependencyRepo, store, access, lineageRepo, ids, discovery, transactions };
 }
-
-describe("copy services", () => {
-  it("clones content without creating lineage", async () => {
-    const deps = copyServices();
-    const originalVersion = deps.sourceVersionWithLocation.snapshot();
-    const service = new CloneArtifactService(deps.artifactRepo, deps.versionRepo, deps.store, deps.dependencyRepo, deps.access, deps.discovery, deps.transactions, deps.ids, { now: () => fixedTime });
-    await service.execute({ actorId: "owner", sourceArtifactId: "source", name: "Clone", slug: "clone" });
-    expect(deps.lineages).toHaveLength(0);
-    expect(deps.artifacts).toHaveLength(1);
-    const copiedDependencies = deps.dependencies.filter((dependency) => dependency.artifactVersionId === deps.versions[0]?.id);
-    expect(copiedDependencies.map(({ targetArtifactId, declaredRange }) => ({ targetArtifactId, declaredRange }))).toEqual([
-      { targetArtifactId: "pearl-a", declaredRange: "^2.1.0" },
-      { targetArtifactId: "pearl-b", declaredRange: "^1.4.0" },
-    ]);
-    expect(copiedDependencies[0]?.id).not.toBe(deps.sourceDependencies[0]?.id);
-    expect(deps.sourceResolutions).toHaveLength(1);
-    expect(deps.createdResolutions).toHaveLength(0);
-    expect((await Promise.all(copiedDependencies.map((dependency) => deps.dependencyRepo.findResolutions(dependency.id)))).flat()).toHaveLength(0);
-    expect(deps.sourceVersionWithLocation.snapshot()).toEqual(originalVersion);
-  });
-
-});
 
 describe("dependency resolution", () => {
   it("selects the highest compatible version and records its version identity", async () => {
@@ -178,7 +156,7 @@ describe("application transaction boundaries", () => {
     return { transactions, inTransaction: () => active, runCount: () => runs };
   }
 
-  it("wraps PublishVersion, CloneArtifact, and dependency resolutions", async () => {
+  it("wraps PublishVersion and dependency resolutions", async () => {
     const publishDeps = copyServices();
     const publishTracker = transactionTracker();
     const publishWrites: boolean[] = [];
@@ -192,12 +170,6 @@ describe("application transaction boundaries", () => {
       .execute({ actorId: "owner", artifactId: "source", version: "1.3.0", content: {}, dependencies: [{ targetArtifactId: "pearl-a", declaredRange: "^2.0.0" }] });
     expect(publishTracker.runCount()).toBe(1);
     expect(publishWrites).toEqual([true, true, true]);
-
-    const copyDeps = copyServices();
-    const tracker = transactionTracker();
-    await new CloneArtifactService(copyDeps.artifactRepo, copyDeps.versionRepo, copyDeps.store, copyDeps.dependencyRepo, copyDeps.access, copyDeps.discovery, tracker.transactions, copyDeps.ids, { now: () => fixedTime })
-      .execute({ actorId: "owner", sourceArtifactId: "source", name: "Clone", slug: "clone" });
-    expect(tracker.runCount()).toBe(1);
 
     const resolutionTracker = transactionTracker();
     const resolutionWrites: boolean[] = [];

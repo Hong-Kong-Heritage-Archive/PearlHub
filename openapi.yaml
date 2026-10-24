@@ -346,6 +346,7 @@ paths:
               properties:
                 sourceVersion:
                   type: string
+                  minLength: 1
                   maxLength: 128
                   description: Exact source SemVer; the latest Version is never substituted.
                 name:
@@ -391,6 +392,96 @@ paths:
                 $ref: "#/components/schemas/ApiError"
         "410":
           description: Source Artifact has been tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /api/v1/artifacts/{artifactId}/clone:
+    post:
+      tags: [Clones]
+      summary: Create a Clone Draft
+      description: >-
+        Copies the explicitly selected immutable Version into a private Draft.
+        First publication creates a new Artifact and 0.1.0 Version. Clone
+        creates no PearlHub lineage relationship or provenance record.
+      operationId: createCloneDraft
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sourceVersion, name, slug, visibility]
+              properties:
+                sourceVersion:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  description: Exact source SemVer; the latest Version is never substituted.
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                slug:
+                  type: string
+                  pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+                visibility:
+                  type: string
+                  enum: [private, unlisted, public]
+      responses:
+        "201":
+          description: Editable Clone Draft copied from the selected Version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Draft"
+        "400":
+          description: Invalid Clone request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller cannot read the source Artifact.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Source Artifact or Version was not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: The source Version has no usable complete content snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "410":
+          description: Source Artifact has been tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Unexpected internal error.
           content:
             application/json:
               schema:

@@ -235,6 +235,37 @@ const forkRoute = createRoute({
     410: { description: "Source Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
   },
 });
+const cloneRoute = createRoute({
+  method: "post", path: "/api/v1/artifacts/{artifactId}/clone", tags: ["Clones"], summary: "Create a Clone Draft",
+  description: "Copies the explicitly selected immutable Version into a private Draft. First publication creates a new Artifact and 0.1.0 Version; Clone creates no PearlHub lineage or provenance.",
+  security: [{ BearerAuth: [] }],
+  request: {
+    params: artifactIdParams,
+    body: {
+      required: true,
+      content: {
+        "application/json": {
+          schema: z.object({
+            sourceVersion: z.string().min(1).max(128),
+            name: z.string().trim().min(1).max(200),
+            slug: z.string().regex(artifactSlugPattern),
+            visibility: z.enum(["private", "unlisted", "public"]),
+          }).strict(),
+        },
+      },
+    },
+  },
+  responses: {
+    201: { description: "Editable Clone Draft created from the selected Version.", content: { "application/json": { schema: draftResponseSchema } } },
+    400: { description: "Invalid Clone request.", content: { "application/json": { schema: errorResponseSchema } } },
+    401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } },
+    403: { description: "The caller cannot read the source Artifact.", content: { "application/json": { schema: errorResponseSchema } } },
+    404: { description: "Source Artifact or Version was not found.", content: { "application/json": { schema: errorResponseSchema } } },
+    409: { description: "The source Version has no usable complete content snapshot.", content: { "application/json": { schema: errorResponseSchema } } },
+    410: { description: "Source Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
+    500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
 const deleteArtifactRoute = createRoute({
   method: "delete", path: "/api/v1/artifacts/{artifactId}", tags: ["Artifacts"], summary: "Tombstone an Artifact",
   security: [{ BearerAuth: [] }],
@@ -469,6 +500,13 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
     if (!dependencies.drafts) throw new Error("Draft workflow is not configured.");
     const { artifactId } = context.req.valid("param");
     const draft = await dependencies.drafts.createFork({ actorId: actor.userId, sourceArtifactId: artifactId, ...context.req.valid("json") });
+    return context.json(toDraftResponse(draft), 201);
+  });
+  app.openapi(cloneRoute, async (context) => {
+    const actor = await requirePrincipal(dependencies.authenticator, context.req.raw.headers);
+    if (!dependencies.drafts) throw new Error("Draft workflow is not configured.");
+    const { artifactId } = context.req.valid("param");
+    const draft = await dependencies.drafts.createClone({ actorId: actor.userId, sourceArtifactId: artifactId, ...context.req.valid("json") });
     return context.json(toDraftResponse(draft), 201);
   });
   app.openapi(deleteArtifactRoute, async (context) => {

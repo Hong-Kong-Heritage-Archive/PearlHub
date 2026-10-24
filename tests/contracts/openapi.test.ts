@@ -23,6 +23,7 @@ interface OpenApiSchema {
 }
 
 interface OpenApiOperation {
+  operationId?: string;
   security?: Array<Record<string, string[]>>;
   parameters?: Array<{
     name: string;
@@ -163,17 +164,29 @@ describe("canonical OpenAPI contract", () => {
     expect(errorObject?.properties?.details?.type).toBe("object");
   });
 
-  it("documents Fork, Import, and tombstone routes with strict inputs and lifecycle responses", async () => {
+  it("documents Fork, Clone, Import, and tombstone routes with strict inputs and lifecycle responses", async () => {
     const fork = canonicalDocument.paths["/api/v1/artifacts/{artifactId}/fork"]?.post;
+    const clone = canonicalDocument.paths["/api/v1/artifacts/{artifactId}/clone"]?.post;
     const imported = canonicalDocument.paths["/api/v1/imports/github"]?.post;
     const deleted = canonicalDocument.paths["/api/v1/artifacts/{artifactId}"]?.delete;
     const forkRequest = fork?.requestBody?.content?.["application/json"]?.schema;
+    const cloneRequest = clone?.requestBody?.content?.["application/json"]?.schema;
     const importRequest = canonicalDocument.components.schemas.ImportRequest;
 
     expect(fork?.security).toEqual([{ BearerAuth: [] }]);
     expect(fork?.responses).toHaveProperty("201");
     expect(fork?.responses).toHaveProperty("410");
     expect(forkRequest).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["sourceVersion", "name", "slug", "visibility"],
+    });
+    expect(clone?.security).toEqual([{ BearerAuth: [] }]);
+    expect(clone?.operationId).toBe("createCloneDraft");
+    expect(clone?.responses).toHaveProperty("201");
+    expect(clone?.responses).toHaveProperty("409");
+    expect(clone?.responses).toHaveProperty("410");
+    expect(cloneRequest).toMatchObject({
       type: "object",
       additionalProperties: false,
       required: ["sourceVersion", "name", "slug", "visibility"],
@@ -193,6 +206,7 @@ describe("canonical OpenAPI contract", () => {
       ["/api/v1/artifacts/{artifactId}", "get"],
       ["/api/v1/artifacts/{artifactId}/lineage", "get"],
       ["/api/v1/artifacts/{artifactId}/fork", "post"],
+      ["/api/v1/artifacts/{artifactId}/clone", "post"],
       ["/api/v1/imports/github", "post"],
       ["/api/v1/artifacts/{artifactId}", "delete"],
     ] as const) {

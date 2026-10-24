@@ -116,6 +116,14 @@ export async function createForkDraft(
   return readDraft(await request(`/artifacts/${encodeURIComponent(artifactId)}/fork`, "POST", input, token));
 }
 
+export async function createCloneDraft(
+  artifactId: string,
+  input: { sourceVersion: string; name: string; slug: string; visibility: ArtifactVisibility },
+  token: string,
+): Promise<Draft> {
+  return readDraft(await request(`/artifacts/${encodeURIComponent(artifactId)}/clone`, "POST", input, token));
+}
+
 export async function createImportDraft(
   input:
     | { sourceType: "pasted"; name: string; slug: string; visibility: ArtifactVisibility; content: string }

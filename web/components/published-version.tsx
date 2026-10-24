@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useRef, useState, type FormEvent } from "react";
-import { createForkDraft, createWorkCopy, DraftRequestError, getPublishedVersion, tombstoneArtifact, type ArtifactVisibility, type PublishedVersion } from "../lib/drafts";
+import { createCloneDraft, createForkDraft, createWorkCopy, DraftRequestError, getPublishedVersion, tombstoneArtifact, type ArtifactVisibility, type PublishedVersion } from "../lib/drafts";
 
 export default function PublishedVersionView({ artifactId, version }: { artifactId: string; version: string }) {
   const router = useRouter();
   const workCopyPending = useRef(false);
   const forkPending = useRef(false);
+  const clonePending = useRef(false);
   const tombstonePending = useRef(false);
   const [token, setToken] = useState("");
   const [published, setPublished] = useState<PublishedVersion | null>(null);
@@ -22,6 +23,11 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
   const [forkSlug, setForkSlug] = useState("");
   const [forkVisibility, setForkVisibility] = useState<ArtifactVisibility>("private");
   const [forking, setForking] = useState(false);
+  const [cloneFormOpen, setCloneFormOpen] = useState(false);
+  const [cloneName, setCloneName] = useState("");
+  const [cloneSlug, setCloneSlug] = useState("");
+  const [cloneVisibility, setCloneVisibility] = useState<ArtifactVisibility>("private");
+  const [cloning, setCloning] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -81,6 +87,32 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
     } finally {
       forkPending.current = false;
       setForking(false);
+    }
+  }
+
+  async function clone(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (clonePending.current) return;
+    if (!token.trim()) {
+      setError("Enter a developer bearer token to create a Clone Draft.");
+      return;
+    }
+    clonePending.current = true;
+    setCloning(true);
+    setError(null);
+    try {
+      const draft = await createCloneDraft(artifactId, {
+        sourceVersion: version,
+        name: cloneName.trim(),
+        slug: cloneSlug,
+        visibility: cloneVisibility,
+      }, token);
+      router.push(`/draft/${encodeURIComponent(draft.id)}`);
+    } catch (caught: unknown) {
+      setError(caught instanceof DraftRequestError ? caught.message : "Could not create a Clone Draft.");
+    } finally {
+      clonePending.current = false;
+      setCloning(false);
     }
   }
 
@@ -147,9 +179,36 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
             {published.version.content.dependencies.length
               ? <ul>{published.version.content.dependencies.map((dependency) => <li key={`${dependency.targetArtifactId}:${dependency.declaredRange}`}>{dependency.targetArtifactId} {dependency.declaredRange}</li>)}</ul>
               : <p>No dependencies.</p>}
-            <button className="secondary-button" type="button" onClick={workCopy} disabled={loading || tombstoning}>Create work-copy from this version</button>
+            <button className="secondary-button" type="button" onClick={workCopy} disabled={loading || tombstoning || forking || cloning}>Create work-copy from this version</button>
             <div className="artifact-delete-actions">
-              <button className="secondary-button" type="button" onClick={() => setForkFormOpen((open) => !open)} disabled={loading || tombstoning || forking}>
+              <button className="secondary-button" type="button" onClick={() => { setCloneFormOpen((open) => !open); setForkFormOpen(false); }} disabled={loading || tombstoning || cloning || forking}>
+                {cloneFormOpen ? "Cancel Clone" : "Clone this version"}
+              </button>
+              {cloneFormOpen && (
+                <form className="create-form" onSubmit={clone}>
+                  <p>Clone source: <strong>{published.artifact.name} — version {published.version.version}</strong>. Clone creates no PearlHub lineage.</p>
+                  <label className="field" htmlFor="clone-name">
+                    <span>New Artifact name</span>
+                    <input id="clone-name" required maxLength={200} value={cloneName} disabled={cloning} onChange={(event) => setCloneName(event.target.value)} />
+                  </label>
+                  <label className="field" htmlFor="clone-slug">
+                    <span>New Artifact slug</span>
+                    <input id="clone-slug" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" value={cloneSlug} disabled={cloning} onChange={(event) => setCloneSlug(event.target.value)} />
+                  </label>
+                  <label className="field" htmlFor="clone-visibility">
+                    <span>Visibility after publication</span>
+                    <select id="clone-visibility" value={cloneVisibility} disabled={cloning} onChange={(event) => setCloneVisibility(event.target.value as ArtifactVisibility)}>
+                      <option value="private">Private</option>
+                      <option value="unlisted">Unlisted</option>
+                      <option value="public">Public</option>
+                    </select>
+                  </label>
+                  <button className="primary-button" type="submit" disabled={cloning}>{cloning ? "Creating Clone Draft…" : "Create Clone Draft"}</button>
+                </form>
+              )}
+            </div>
+            <div className="artifact-delete-actions">
+              <button className="secondary-button" type="button" onClick={() => { setForkFormOpen((open) => !open); setCloneFormOpen(false); }} disabled={loading || tombstoning || forking || cloning}>
                 {forkFormOpen ? "Cancel Fork" : "Fork this version"}
               </button>
               {forkFormOpen && (

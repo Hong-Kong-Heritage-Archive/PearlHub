@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CloneArtifactService, DeleteArtifactService, DraftWorkflowService, ImportDraftService, PublishVersionService, RestoreArtifactService } from "../../src/application/services.js";
+import { DeleteArtifactService, DraftWorkflowService, ImportDraftService, PublishVersionService, RestoreArtifactService } from "../../src/application/services.js";
 import { baselinePostgresMigrations, runPostgresMigrations } from "../../src/adapters/postgres-migrations.js";
 import { PostgresArtifactDiscoveryRepository, PostgresArtifactRepository, PostgresArtifactVersionRepository, PostgresCompatibilityReportRepository, PostgresDependencyRepository, PostgresDraftRepository, PostgresLineageRepository, PostgresProvenanceRepository, PostgresTransactionManager, PostgresUserIdentityRepository } from "../../src/adapters/postgres.js";
 import { MemoryArtifactContentStore } from "../../src/adapters/content-store.js";
@@ -917,8 +917,12 @@ describe("PostgreSQL persistence hardening", () => {
       instructions: "Source instructions",
       tags: ["rag"],
       knowledgeFiles: [{ path: "guide.md", content: "Source knowledge", contentHash: "sha256:abc" }],
-      dependencies: [],
+      dependencies: [{ targetArtifactId: sourceId, declaredRange: "^1.0.0" }],
     });
+    await new PostgresDependencyRepository(pool!).create(Dependency.create({
+      id: randomUUID(), artifactVersionId: sourceVersionId, targetArtifactId: sourceId,
+      declaredRange: "^1.0.0", createdAt: new Date(),
+    }));
     const transactions = new PostgresTransactionManager(pool!);
     const artifacts = new PostgresArtifactRepository(transactions.database);
     const versions = new PostgresArtifactVersionRepository(transactions.database);
@@ -927,10 +931,43 @@ describe("PostgreSQL persistence hardening", () => {
     const lineage = new PostgresLineageRepository(transactions.database);
     const provenance = new PostgresProvenanceRepository(transactions.database);
     const access = { canRead: async () => true, canWrite: async () => true };
-    const contentStore = { put: async () => "loc", get: async () => "{}", exists: async () => true };
-    const clone = await new CloneArtifactService(artifacts, versions, contentStore, dependencies, access, discovery, transactions).execute({ actorId: owners[0]!, sourceArtifactId: sourceId, name: "Clone", slug: randomUUID() });
-    expect(await lineage.getParents(clone.id)).toEqual([]);
     const workflow = new DraftWorkflowService(new PostgresDraftRepository(transactions.database), artifacts, versions, dependencies, access, discovery, transactions, undefined, undefined, lineage, provenance);
+    const cloneDraft = await workflow.createClone({
+      actorId: owners[0]!, sourceArtifactId: sourceId, sourceVersion: "1.0.0",
+      name: "Clone", slug: randomUUID(), visibility: "private",
+    });
+    expect(cloneDraft.forkOrigin).toBeNull();
+    expect(cloneDraft.provenance).toBeNull();
+    expect(cloneDraft.content).toMatchObject({
+      instructions: "Source instructions",
+      dependencies: [{ targetArtifactId: sourceId, declaredRange: "^1.0.0" }],
+    });
+    expect(await artifacts.findByOwnerAndSlug(owners[0]!, cloneDraft.slug)).toBeNull();
+    expect(await lineage.getParents(sourceId)).toEqual([]);
+    const clone = await workflow.publish({ actorId: owners[0]!, draftId: cloneDraft.id, revision: 1 });
+    expect(clone.version.version).toBe("0.1.0");
+    expect(await lineage.getParents(clone.artifact.id)).toEqual([]);
+    expect(await provenance.findForVersion(clone.version.id)).toEqual([]);
+    const cloneDependencies = await dependencies.findForVersion(clone.version.id);
+    expect(cloneDependencies.map(({ targetArtifactId, declaredRange }) => ({ targetArtifactId, declaredRange })))
+      .toEqual([{ targetArtifactId: sourceId, declaredRange: "^1.0.0" }]);
+    expect((await Promise.all(cloneDependencies.map((dependency) => dependencies.findResolutions(dependency.id)))).flat()).toEqual([]);
+    const countsBeforeConflict = await pool!.query<{ artifacts: number; versions: number }>(
+      "SELECT (SELECT count(*)::int FROM artifacts) AS artifacts, (SELECT count(*)::int FROM artifact_versions) AS versions",
+    );
+    const conflictingClone = await workflow.createClone({
+      actorId: owners[0]!, sourceArtifactId: sourceId, sourceVersion: "1.0.0",
+      name: "Conflicting Clone", slug: (await artifacts.findById(sourceId))!.slug, visibility: "private",
+    });
+    await expect(workflow.publish({ actorId: owners[0]!, draftId: conflictingClone.id, revision: 1 }))
+      .rejects.toMatchObject({ code: "ARTIFACT_SLUG_CONFLICT" });
+    expect((await workflow.get({ actorId: owners[0]!, draftId: conflictingClone.id })).state).toBe("active");
+    expect(await artifacts.findByOwnerAndSlug(owners[0]!, conflictingClone.slug)).toMatchObject({ id: sourceId });
+    const countsAfterConflict = await pool!.query<{ artifacts: number; versions: number }>(
+      "SELECT (SELECT count(*)::int FROM artifacts) AS artifacts, (SELECT count(*)::int FROM artifact_versions) AS versions",
+    );
+    expect(countsAfterConflict.rows).toEqual(countsBeforeConflict.rows);
+
     const forkDraft = await workflow.createFork({
       actorId: owners[0]!, sourceArtifactId: sourceId, sourceVersion: "1.0.0",
       name: "Fork", slug: randomUUID(), visibility: "private",

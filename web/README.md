@@ -43,7 +43,7 @@ The value is a public API origin/base path, not a credential. In development mod
 - Cursor-based “Load more” uses the opaque cursor returned by the API and deduplicates Artifact IDs.
 - Loading, empty, validation, network/API error, retry, and discovery-unavailable states.
 - Create Draft, find active private Drafts, edit/save with revision conflict handling, private preview, tag/knowledge-file/dependency editing, and one-request Publish are provided through `GET/POST /api/v1/drafts`, `PUT /api/v1/drafts/{draftId}`, and `POST /api/v1/drafts/{draftId}/publish`.
-- Published-version lists and immutable version views use `GET /api/v1/artifacts/{artifactId}/versions` and `GET /api/v1/artifacts/{artifactId}/versions/{version}`. A specific selected Version can be Forked into an editable Draft with `POST /api/v1/artifacts/{artifactId}/fork`.
+- Published-version lists and immutable version views use `GET /api/v1/artifacts/{artifactId}/versions` and `GET /api/v1/artifacts/{artifactId}/versions/{version}`. A specific selected Version can be Forked into a Draft with permanent lineage on publication, or Cloned into an independent Draft without lineage, using `POST /api/v1/artifacts/{artifactId}/fork` and `POST /api/v1/artifacts/{artifactId}/clone`.
 - Import supports pasted Markdown/Skill content and a GitHub raw URL through `POST /api/v1/imports/github`; both return an editable Draft and GitHub provenance is shown in the Draft editor.
 - The owner can create a work-copy from a selected version.
 - My Drafts supports deleting an unpublished Draft with confirmation. Published-version views support tombstoning an Artifact with confirmation; the backend enforces ownership, preserves history, and makes repeat deletion return `410 ARTIFACT_GONE`.

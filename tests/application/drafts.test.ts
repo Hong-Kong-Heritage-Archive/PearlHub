@@ -184,6 +184,101 @@ describe("Draft workflow application service", () => {
     expect(publishedFork.version.contentSnapshot).toMatchObject({ instructions: content.instructions });
   });
 
+  it("creates a Clone Draft from the exact complete Version without lineage or provenance", async () => {
+    const state = fixture();
+    const sourceDraft = await state.service.create({
+      actorId: "owner", name: "Source", slug: "source", visibility: "public",
+      content: { ...content, tags: [" RAG ", "Language-Model"] },
+    });
+    const source = await state.service.publish({ actorId: "owner", draftId: sourceDraft.id, revision: 1 });
+    const laterVersion = ArtifactVersion.create({
+      id: "later-version-id", artifactId: source.artifact.id, version: "9.0.0", contentHash: "sha256:later",
+      contentLocation: "postgres:source:9.0.0",
+      contentSnapshot: { instructions: "Later content", knowledgeFiles: [], dependencies: [] },
+      createdAt: at, publishedAt: at,
+    });
+    state.versions.push(laterVersion);
+    const sourceArtifactSnapshot = source.artifact.snapshot();
+    const sourceVersionSnapshots = state.versions.map((version) => version.snapshot());
+
+    const cloneDraft = await state.service.createClone({
+      actorId: "cloner", sourceArtifactId: source.artifact.id, sourceVersion: "0.1.0",
+      name: "Clone", slug: "clone", visibility: "public",
+    });
+
+    expect(state.artifacts).toHaveLength(1);
+    expect(cloneDraft).toMatchObject({
+      ownerId: "cloner",
+      artifactId: null,
+      baseVersionId: null,
+      name: "Clone",
+      slug: "clone",
+      visibility: "public",
+      forkOrigin: null,
+      provenance: null,
+    });
+    expect(cloneDraft.content).toMatchObject({
+      instructions: content.instructions,
+      tags: ["rag", "language-model"],
+      knowledgeFiles: content.knowledgeFiles,
+      dependencies: content.dependencies,
+    });
+    expect(state.lineages).toHaveLength(0);
+    expect(state.provenances).toHaveLength(0);
+    expect(state.artifacts[0]?.snapshot()).toEqual(sourceArtifactSnapshot);
+    expect(state.versions.map((version) => version.snapshot())).toEqual(sourceVersionSnapshots);
+
+    const publishedClone = await state.service.publish({ actorId: "cloner", draftId: cloneDraft.id, revision: 1 });
+    expect(publishedClone.version.version).toBe("0.1.0");
+    expect(publishedClone.version.contentSnapshot).toMatchObject({ instructions: content.instructions });
+    expect(state.lineages).toHaveLength(0);
+    expect(state.provenances).toHaveLength(0);
+  });
+
+  it("rejects Clone from a tombstoned source or an incomplete selected snapshot", async () => {
+    const state = fixture();
+    const sourceDraft = await state.service.create({
+      actorId: "owner", name: "Source", slug: "source", visibility: "public", content,
+    });
+    const source = await state.service.publish({ actorId: "owner", draftId: sourceDraft.id, revision: 1 });
+    const unavailable = ArtifactVersion.create({
+      id: "unavailable-version-id", artifactId: source.artifact.id, version: "2.0.0", contentHash: "sha256:unavailable",
+      contentLocation: "postgres:source:2.0.0", createdAt: at, publishedAt: at,
+    });
+    state.versions.push(unavailable);
+    await state.artifactRepo.save(source.artifact.tombstone(at));
+
+    await expect(state.service.createClone({
+      actorId: "cloner", sourceArtifactId: source.artifact.id, sourceVersion: "0.1.0",
+      name: "Gone", slug: "gone", visibility: "private",
+    })).rejects.toMatchObject({ code: "ARTIFACT_GONE" });
+
+    await state.artifactRepo.save(source.artifact);
+    await expect(state.service.createClone({
+      actorId: "cloner", sourceArtifactId: source.artifact.id, sourceVersion: "2.0.0",
+      name: "Incomplete", slug: "incomplete", visibility: "private",
+    })).rejects.toMatchObject({ code: "VERSION_CONTENT_UNAVAILABLE" });
+    expect(state.drafts.size).toBe(1);
+  });
+
+  it("rejects Clone when the source is missing or unreadable", async () => {
+    const state = fixture(async () => false);
+    await expect(state.service.createClone({
+      actorId: "cloner", sourceArtifactId: "missing", sourceVersion: "1.0.0",
+      name: "Missing", slug: "missing", visibility: "private",
+    })).rejects.toMatchObject({ code: "ARTIFACT_NOT_FOUND" });
+
+    const sourceDraft = await state.service.create({
+      actorId: "owner", name: "Private Source", slug: "private-source", visibility: "public", content,
+    });
+    const source = await state.service.publish({ actorId: "owner", draftId: sourceDraft.id, revision: 1 });
+    await expect(state.service.createClone({
+      actorId: "cloner", sourceArtifactId: source.artifact.id, sourceVersion: "0.1.0",
+      name: "Unauthorized", slug: "unauthorized", visibility: "private",
+    })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(state.drafts.size).toBe(1);
+  });
+
   it("does not create a Fork Draft from a private source the caller cannot read", async () => {
     const state = fixture(async (_actorId, artifact) => artifact.visibility === "public");
     const sourceDraft = await state.service.create({
