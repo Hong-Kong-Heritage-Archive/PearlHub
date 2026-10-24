@@ -7,7 +7,7 @@ import { Dependency } from "../domain/dependency.js";
 import { DomainError } from "../domain/errors.js";
 import { MAX_IMPORT_CONTENT_BYTES } from "../domain/import.js";
 import { normalizePearlContent, normalizePearlTags, readPearlTags } from "../domain/discovery.js";
-import type { CompatibilityReport, DependencyResolution, Provenance } from "../domain/records.js";
+import type { CompatibilityReport, DependencyResolution, Lineage, Provenance } from "../domain/records.js";
 import type {
   ArtifactContentStore,
   ArtifactDiscoveryRepository,
@@ -35,6 +35,14 @@ export interface RestoreAccessPolicy {
   canRestore(actorId: string, artifact: Artifact): Promise<boolean>;
 }
 
+export interface ArtifactReadService {
+  getArtifact(input: { actorId: string | null; artifactId: string }): Promise<Artifact>;
+  getArtifactLineage(input: { actorId: string | null; artifactId: string }): Promise<{
+    parents: Array<{ lineage: Lineage; artifact: Artifact }>;
+    children: Array<{ lineage: Lineage; artifact: Artifact }>;
+  }>;
+}
+
 export interface DraftWorkflow {
   create(input: { actorId: string; name: string; slug: string; visibility: ArtifactVisibility; content: DraftContent; provenance?: DraftProvenance | null }): Promise<Draft>;
   list(input: { actorId: string }): Promise<Draft[]>;
@@ -48,7 +56,7 @@ export interface DraftWorkflow {
   listPublishedVersions(input: { actorId: string | null; artifactId: string }): Promise<{ artifact: Artifact; versions: ArtifactVersion[] }>;
 }
 
-export class DraftWorkflowService implements DraftWorkflow {
+export class DraftWorkflowService implements DraftWorkflow, ArtifactReadService {
   constructor(
     private readonly drafts: DraftRepository,
     private readonly artifacts: ArtifactRepository,
@@ -236,6 +244,40 @@ export class DraftWorkflowService implements DraftWorkflow {
     return { artifact, version };
   }
 
+  async getArtifact(input: { actorId: string | null; artifactId: string }): Promise<Artifact> {
+    return this.readableArtifactForDetail(input.actorId, input.artifactId);
+  }
+
+  async getArtifactLineage(input: { actorId: string | null; artifactId: string }): Promise<{
+    parents: Array<{ lineage: Lineage; artifact: Artifact }>;
+    children: Array<{ lineage: Lineage; artifact: Artifact }>;
+  }> {
+    const artifact = await this.readableArtifactForDetail(input.actorId, input.artifactId);
+    if (!this.lineage) throw new Error("Fork lineage persistence is not configured.");
+
+    const [parents, children] = await Promise.all([
+      this.lineage.getParents(artifact.id),
+      this.lineage.getChildren(artifact.id),
+    ]);
+    const relatedIds = [...new Set([
+      ...parents.map((lineage) => lineage.parentArtifactId),
+      ...children.map((lineage) => lineage.childArtifactId),
+    ])];
+    const relatedArtifacts = new Map((await this.artifacts.findByIds(relatedIds)).map((related) => [related.id, related]));
+
+    const visibleRelations = async (relations: Lineage[], getRelatedId: (lineage: Lineage) => string) =>
+      (await Promise.all(relations.map(async (lineage) => {
+        const related = relatedArtifacts.get(getRelatedId(lineage));
+        if (!related || !await this.isReadableLineageArtifact(input.actorId, related)) return null;
+        return { lineage, artifact: related };
+      }))).filter((relation): relation is { lineage: Lineage; artifact: Artifact } => relation !== null);
+
+    return {
+      parents: await visibleRelations(parents, (lineage) => lineage.parentArtifactId),
+      children: await visibleRelations(children, (lineage) => lineage.childArtifactId),
+    };
+  }
+
   async listPublishedVersions(input: { actorId: string | null; artifactId: string }): Promise<{ artifact: Artifact; versions: ArtifactVersion[] }> {
     const artifact = await this.readableArtifact(input.actorId, input.artifactId);
     return { artifact, versions: await this.versions.findForArtifact(artifact.id) };
@@ -250,6 +292,21 @@ export class DraftWorkflowService implements DraftWorkflow {
       throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
     }
     return artifact;
+  }
+
+  private async readableArtifactForDetail(actorId: string | null, artifactId: string): Promise<Artifact> {
+    const artifact = await this.artifacts.findById(artifactId);
+    if (!artifact) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+    if (artifact.status !== "active") throw new DomainError("ARTIFACT_GONE", "Artifact has been tombstoned.");
+    if (artifact.visibility === "public" || artifact.ownerId === actorId) return artifact;
+    if (actorId === null) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+    throw new DomainError("FORBIDDEN", "Actor cannot read this Artifact.");
+  }
+
+  private async isReadableLineageArtifact(actorId: string | null, artifact: Artifact): Promise<boolean> {
+    if (artifact.status !== "active") return false;
+    if (artifact.visibility === "public" || artifact.ownerId === actorId) return true;
+    return actorId !== null && this.access.canRead(actorId, artifact);
   }
 
   private async requireDraft(id: string): Promise<Draft> {

@@ -576,6 +576,8 @@ describe("PostgreSQL persistence hardening", () => {
     await artifacts.create(artifact);
 
     expect((await artifacts.findById(artifact.id))?.snapshot()).toEqual(artifact.snapshot());
+    expect((await artifacts.findByIds([artifact.id, randomUUID()])).map((item) => item.id)).toEqual([artifact.id]);
+    expect(await artifacts.findByIds([])).toEqual([]);
     expect((await artifacts.findByOwnerAndSlug(artifact.ownerId, artifact.slug))?.id).toBe(artifact.id);
     expect(await artifacts.findById(randomUUID())).toBeNull();
     expect(await artifacts.findByOwnerAndSlug(artifact.ownerId, randomUUID())).toBeNull();
@@ -1006,6 +1008,7 @@ describe("PostgreSQL persistence hardening", () => {
     const deleteArtifact = new DeleteArtifactService(artifacts, access, undefined, transactions);
     const common = {
       listArtifacts: new ListArtifactsService(discovery),
+      artifactReads: drafts,
       drafts,
       deleteArtifact,
       importDraft,
@@ -1027,6 +1030,24 @@ describe("PostgreSQL persistence hardening", () => {
       artifact: { id: sourceId, visibility: "public" },
       version: { id: sourceVersionId, version: "2.3.1" },
     });
+    const sourceDetailResponse = await app.request(`/api/v1/artifacts/${sourceId}`);
+    expect(sourceDetailResponse.status).toBe(200);
+    expect(await sourceDetailResponse.json()).toMatchObject({
+      id: sourceId,
+      ownerId,
+      visibility: "public",
+      status: "active",
+    });
+    const unlistedId = await createArtifact(ownerId, randomUUID(), "unlisted");
+    const ownerUnlistedDetail = await ownerApp.request(`/api/v1/artifacts/${unlistedId}`, { headers: ownerHeaders });
+    expect(ownerUnlistedDetail.status).toBe(200);
+    const anonymousUnlistedDetail = await ownerApp.request(`/api/v1/artifacts/${unlistedId}`);
+    expect(anonymousUnlistedDetail.status).toBe(404);
+    const otherOwnerUnlistedDetail = await otherOwnerApp.request(`/api/v1/artifacts/${unlistedId}`, { headers: otherOwnerHeaders });
+    expect(otherOwnerUnlistedDetail.status).toBe(403);
+    const sourceLineageBeforePublish = await app.request(`/api/v1/artifacts/${sourceId}/lineage`);
+    expect(sourceLineageBeforePublish.status).toBe(200);
+    expect(await sourceLineageBeforePublish.json()).toEqual({ parents: [], children: [] });
 
     const forkDraftResponse = await ownerApp.request(`/api/v1/artifacts/${sourceId}/fork`, {
       method: "POST",
@@ -1069,6 +1090,45 @@ describe("PostgreSQL persistence hardening", () => {
       parentArtifactId: sourceId,
       sourceVersionId,
     }]);
+    const ownerChildDetail = await ownerApp.request(`/api/v1/artifacts/${publishedFork.artifact.id}`, { headers: ownerHeaders });
+    expect(ownerChildDetail.status).toBe(200);
+    expect(await ownerChildDetail.json()).toMatchObject({
+      id: publishedFork.artifact.id,
+      ownerId,
+      visibility: "private",
+      status: "active",
+    });
+    const anonymousChildDetail = await ownerApp.request(`/api/v1/artifacts/${publishedFork.artifact.id}`);
+    expect(anonymousChildDetail.status).toBe(404);
+    const deniedChildDetail = await otherOwnerApp.request(`/api/v1/artifacts/${publishedFork.artifact.id}`, { headers: otherOwnerHeaders });
+    expect(deniedChildDetail.status).toBe(403);
+    expect(await deniedChildDetail.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
+
+    const childLineageResponse = await ownerApp.request(`/api/v1/artifacts/${publishedFork.artifact.id}/lineage`, { headers: ownerHeaders });
+    expect(childLineageResponse.status).toBe(200);
+    expect(await childLineageResponse.json()).toMatchObject({
+      parents: [{
+        parentArtifactId: sourceId,
+        childArtifactId: publishedFork.artifact.id,
+        sourceVersionId,
+        artifact: { id: sourceId, name: `Artifact ${sourceId}` },
+      }],
+      children: [],
+    });
+    const ownerSourceLineage = await ownerApp.request(`/api/v1/artifacts/${sourceId}/lineage`, { headers: ownerHeaders });
+    expect(ownerSourceLineage.status).toBe(200);
+    expect(await ownerSourceLineage.json()).toMatchObject({
+      parents: [],
+      children: [{
+        parentArtifactId: sourceId,
+        childArtifactId: publishedFork.artifact.id,
+        sourceVersionId,
+        artifact: { id: publishedFork.artifact.id },
+      }],
+    });
+    const anonymousSourceLineage = await ownerApp.request(`/api/v1/artifacts/${sourceId}/lineage`);
+    expect(anonymousSourceLineage.status).toBe(200);
+    expect(await anonymousSourceLineage.json()).toEqual({ parents: [], children: [] });
 
     const pastedContent = "# Pasted fixture\n\nPreserved content.";
     const pastedResponse = await ownerApp.request("/api/v1/imports/github", {
@@ -1100,6 +1160,9 @@ describe("PostgreSQL persistence hardening", () => {
     const pastedPublished = await pastedPublishResponse.json() as { artifact: { id: string }; version: { id: string } };
     expect(await lineage.getParents(pastedPublished.artifact.id)).toEqual([]);
     expect(await provenances.findForVersion(pastedPublished.version.id)).toEqual([]);
+    const pastedLineageResponse = await ownerApp.request(`/api/v1/artifacts/${pastedPublished.artifact.id}/lineage`, { headers: ownerHeaders });
+    expect(pastedLineageResponse.status).toBe(200);
+    expect(await pastedLineageResponse.json()).toEqual({ parents: [], children: [] });
 
     const githubUrl = "https://raw.githubusercontent.com/example/pearls/main/SKILL.md";
     const githubResponse = await ownerApp.request("/api/v1/imports/github", {
@@ -1139,6 +1202,9 @@ describe("PostgreSQL persistence hardening", () => {
       sourceUrl: githubUrl,
       sourceRef: "fixture-ref",
     }]);
+    const githubLineageResponse = await ownerApp.request(`/api/v1/artifacts/${githubPublished.artifact.id}/lineage`, { headers: ownerHeaders });
+    expect(githubLineageResponse.status).toBe(200);
+    expect(await githubLineageResponse.json()).toEqual({ parents: [], children: [] });
 
     const deniedDeleteResponse = await otherOwnerApp.request(`/api/v1/artifacts/${sourceId}`, {
       method: "DELETE",
@@ -1171,6 +1237,12 @@ describe("PostgreSQL persistence hardening", () => {
     );
     expect(tombstone.rows[0]).toEqual({ version_count: 1, lineage_count: 1 });
     expect(await lineage.getChildren(sourceId)).toMatchObject([{ childArtifactId: publishedFork.artifact.id }]);
+    const tombstonedSourceDetail = await ownerApp.request(`/api/v1/artifacts/${sourceId}`, { headers: ownerHeaders });
+    expect(tombstonedSourceDetail.status).toBe(410);
+    expect(await tombstonedSourceDetail.json()).toMatchObject({ error: { code: "ARTIFACT_GONE" } });
+    const childLineageAfterParentDeletion = await ownerApp.request(`/api/v1/artifacts/${publishedFork.artifact.id}/lineage`, { headers: ownerHeaders });
+    expect(childLineageAfterParentDeletion.status).toBe(200);
+    expect(await childLineageAfterParentDeletion.json()).toEqual({ parents: [], children: [] });
   });
 
   it("rolls back Artifact, Version, and Dependency writes in a real transaction", async () => {

@@ -1,6 +1,6 @@
 # PearlHub API Contract
 
-**Status:** FROZEN through Section 2.3.6  
+**Status:** FROZEN through Section 2.3.7
 **API version:** v1  
 **Base path:** `/api/v1`
 
@@ -152,7 +152,7 @@ version atomically; direct Artifact creation is retired.
 | POST | `/artifacts/{artifactId}/versions/{version}/work-copy` | Create owner work-copy from selected version | Implemented |
 | POST | `/artifacts` | Legacy direct creation; returns `410 ARTIFACT_CREATION_REQUIRES_DRAFT` | Retired |
 | GET | `/artifacts` | List/search Artifacts | Implemented |
-| GET | `/artifacts/{artifactId}` | Get Artifact | Planned |
+| GET | `/artifacts/{artifactId}` | Get visible Artifact metadata | Implemented |
 | PATCH | `/artifacts/{artifactId}` | Update mutable metadata only | Planned |
 | DELETE | `/artifacts/{artifactId}` | Create tombstone | Implemented |
 
@@ -180,7 +180,7 @@ There is no Version PATCH or DELETE endpoint in v0.1.
 |---|---|---|---|
 | POST | `/artifacts/{artifactId}/fork` | Create a Fork Draft; lineage is recorded at first publication | Implemented |
 | POST | `/artifacts/{artifactId}/clone` | Clone without PearlHub lineage | Planned |
-| GET | `/artifacts/{artifactId}/lineage` | Get lineage | Planned |
+| GET | `/artifacts/{artifactId}/lineage` | Get visible Fork lineage | Implemented |
 
 ### Import
 
@@ -500,9 +500,10 @@ Protected write operations require Bearer authentication.
 
 Implemented protected operations include Draft creation, read, update,
 discard, and publish; creating a work-copy or Fork Draft; Import Draft
-creation; and owner-authorized Artifact deletion. Direct `POST /artifacts` is
-retired and returns `410 ARTIFACT_CREATION_REQUIRES_DRAFT`. Metadata mutation,
-Clone, and lineage reads remain planned.
+creation; owner-authorized Artifact deletion; and Artifact detail and lineage
+reads. Direct `POST /artifacts` is retired and returns
+`410 ARTIFACT_CREATION_REQUIRES_DRAFT`. Metadata mutation and Clone remain
+planned.
 
 OpenAPI security scheme:
 
@@ -766,3 +767,28 @@ At minimum, tests must verify:
 | 2.3.7 Phase 2 Fork, Import, and Tombstone Operations | FROZEN |
 
 **PearlHub API Contract v0.1 — Frozen through 2.3.7**
+
+## Phase 4 — Artifact Detail and Lineage Reads
+
+**Implementation status:** Implemented.
+
+`GET /api/v1/artifacts/{artifactId}` returns the canonical `Artifact`
+representation. Public Artifacts can be read anonymously. Private and unlisted
+Artifacts require an authenticated owner; authenticated non-owners receive
+`403 FORBIDDEN`, anonymous callers receive `404 ARTIFACT_NOT_FOUND`, and
+tombstoned Artifacts return `410 ARTIFACT_GONE`.
+
+`GET /api/v1/artifacts/{artifactId}/lineage` returns `parents` and `children`
+arrays in deterministic persisted order. Each entry identifies the persisted
+relationship, both Artifact IDs, the exact `sourceVersionId`, relationship
+type, creation time, and the related Artifact. Edges to private, unlisted, or
+tombstoned Artifacts that the caller cannot read are omitted without exposing
+their IDs or counts. An empty visible graph is returned as
+`{"parents":[],"children":[]}`. Import provenance does not create Fork lineage.
+
+The frozen visibility section describes non-owner access to an unlisted
+Artifact through an authenticated secret URL. The current runtime has no
+secret-URL credential mechanism, so these endpoints retain the existing
+owner-only read behavior for unlisted Artifacts. Non-owner secret-link access
+remains a known contract gap and is not implemented by treating an Artifact ID
+or query parameter as a credential.

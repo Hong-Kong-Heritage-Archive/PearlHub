@@ -68,6 +68,7 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
     const listArtifacts = new ListArtifactsService(discovery);
     return {
       app: createHttpApp({
+        artifactReads: drafts,
         drafts,
         deleteArtifact,
         importDraft,

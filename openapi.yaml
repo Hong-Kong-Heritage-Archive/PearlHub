@@ -159,6 +159,61 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
   /api/v1/artifacts/{artifactId}:
+    get:
+      tags: [Artifacts]
+      summary: Read a visible Artifact
+      description: >-
+        Returns canonical metadata for an active Artifact. Public Artifacts are
+        readable anonymously. Private and unlisted Artifacts require owner
+        authorization. Tombstoned Artifacts return 410.
+      operationId: getArtifact
+      security:
+        - {}
+        - BearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Canonical metadata for an active Artifact.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Artifact"
+        "400":
+          description: Invalid Artifact identifier.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The authenticated caller cannot read this Artifact.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Artifact was not found or is not visible to an anonymous caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "410":
+          description: Artifact has been tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Unexpected internal error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
     delete:
       tags: [Artifacts]
       summary: Tombstone an Artifact
@@ -197,6 +252,62 @@ paths:
                 $ref: "#/components/schemas/ApiError"
         "410":
           description: Artifact has already been tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Unexpected internal error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /api/v1/artifacts/{artifactId}/lineage:
+    get:
+      tags: [Lineage]
+      summary: Read visible Fork lineage
+      description: >-
+        Returns persisted parent and child Fork relationships. Related Artifacts
+        are included only when readable by the caller; hidden edges and hidden
+        edge counts are omitted.
+      operationId: getArtifactLineage
+      security:
+        - {}
+        - BearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Visible persisted Fork relationships, or empty collections.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactLineage"
+        "400":
+          description: Invalid Artifact identifier.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The authenticated caller cannot read this Artifact.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Artifact was not found or is not visible to an anonymous caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "410":
+          description: Artifact has been tombstoned.
           content:
             application/json:
               schema:
@@ -1022,6 +1133,44 @@ components:
         updatedAt:
           type: string
           format: date-time
+    ArtifactLineage:
+      type: object
+      additionalProperties: false
+      required: [parents, children]
+      properties:
+        parents:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactLineageEntry"
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactLineageEntry"
+    ArtifactLineageEntry:
+      type: object
+      additionalProperties: false
+      required: [id, parentArtifactId, childArtifactId, sourceVersionId, relationshipType, createdAt, artifact]
+      properties:
+        id:
+          type: string
+          description: Persisted PearlHub lineage relationship ID.
+        parentArtifactId:
+          type: string
+        childArtifactId:
+          type: string
+        sourceVersionId:
+          type: [string, "null"]
+          description: Exact source Artifact Version ID selected when the Fork Draft was created.
+        relationshipType:
+          type: string
+          const: fork
+        createdAt:
+          type: string
+          format: date-time
+        artifact:
+          allOf:
+            - $ref: "#/components/schemas/Artifact"
+          description: Parent Artifact in `parents`; child Artifact in `children`.
     ArtifactSummary:
       type: object
       additionalProperties: false

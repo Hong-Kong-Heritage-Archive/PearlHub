@@ -111,6 +111,12 @@ export class PostgresArtifactRepository implements ArtifactRepository {
     return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
   }
 
+  async findByIds(ids: string[]): Promise<Artifact[]> {
+    if (ids.length === 0) return [];
+    const result = await this.db.query<ArtifactRow>("SELECT id,owner_id,name,slug,visibility,status,created_at,updated_at FROM artifacts WHERE id = ANY($1)", [ids]);
+    return result.rows.map(artifactFromRow);
+  }
+
   async findTombstoneSnapshotArtifact(id: string): Promise<Artifact | null> {
     const result = await this.db.query<{ artifact: ArtifactRow }>(
       "SELECT snapshot->'artifact' AS artifact FROM tombstone_snapshots WHERE artifact_id=$1 ORDER BY snapshot_number DESC LIMIT 1",

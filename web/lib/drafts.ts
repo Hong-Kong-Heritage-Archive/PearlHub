@@ -70,6 +70,32 @@ export interface PublishedVersion {
   };
 }
 
+export interface ArtifactMetadata {
+  id: string;
+  ownerId: string;
+  name: string;
+  slug: string;
+  visibility: ArtifactVisibility;
+  status: "active" | "tombstone";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ArtifactLineageEntry {
+  id: string;
+  parentArtifactId: string;
+  childArtifactId: string;
+  sourceVersionId: string | null;
+  relationshipType: "fork";
+  createdAt: string;
+  artifact: ArtifactMetadata;
+}
+
+export interface ArtifactLineage {
+  parents: ArtifactLineageEntry[];
+  children: ArtifactLineageEntry[];
+}
+
 export class DraftRequestError extends Error {
   constructor(message: string, readonly status: number, readonly code: string) {
     super(message);
@@ -153,6 +179,34 @@ export async function listVersions(artifactId: string, token?: string): Promise<
 
 export async function getPublishedVersion(artifactId: string, version: string, token?: string): Promise<PublishedVersion> {
   return readPublishedVersion(await request(`/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}`, "GET", undefined, token));
+}
+
+export async function getArtifact(artifactId: string, token?: string, signal?: AbortSignal): Promise<ArtifactMetadata> {
+  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}`, "GET", undefined, token, signal);
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new DraftRequestError("The API returned an invalid Artifact response.", response.status, "INVALID_RESPONSE");
+  }
+  if (!isArtifactMetadata(payload)) {
+    throw new DraftRequestError("The API returned an unexpected Artifact response.", response.status, "INVALID_RESPONSE");
+  }
+  return payload;
+}
+
+export async function getArtifactLineage(artifactId: string, token?: string, signal?: AbortSignal): Promise<ArtifactLineage> {
+  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}/lineage`, "GET", undefined, token, signal);
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new DraftRequestError("The API returned an invalid lineage response.", response.status, "INVALID_RESPONSE");
+  }
+  if (!isArtifactLineage(payload)) {
+    throw new DraftRequestError("The API returned an unexpected lineage response.", response.status, "INVALID_RESPONSE");
+  }
+  return payload;
 }
 
 export async function createWorkCopy(artifactId: string, version: string, token: string): Promise<Draft> {
@@ -274,6 +328,37 @@ function isPublishedVersion(value: unknown): value is PublishedVersion {
     && typeof value.version.id === "string" && typeof value.version.artifactId === "string"
     && typeof value.version.version === "string" && typeof value.version.contentHash === "string"
     && typeof value.version.publishedAt === "string" && isPublishedContent(value.version.content);
+}
+
+function isArtifactMetadata(value: unknown): value is ArtifactMetadata {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.ownerId === "string"
+    && typeof value.name === "string"
+    && typeof value.slug === "string"
+    && isVisibility(value.visibility)
+    && (value.status === "active" || value.status === "tombstone")
+    && typeof value.createdAt === "string"
+    && typeof value.updatedAt === "string";
+}
+
+function isArtifactLineageEntry(value: unknown): value is ArtifactLineageEntry {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.parentArtifactId === "string"
+    && typeof value.childArtifactId === "string"
+    && (typeof value.sourceVersionId === "string" || value.sourceVersionId === null)
+    && value.relationshipType === "fork"
+    && typeof value.createdAt === "string"
+    && isArtifactMetadata(value.artifact);
+}
+
+function isArtifactLineage(value: unknown): value is ArtifactLineage {
+  return isRecord(value)
+    && Array.isArray(value.parents)
+    && value.parents.every(isArtifactLineageEntry)
+    && Array.isArray(value.children)
+    && value.children.every(isArtifactLineageEntry);
 }
 
 function isDraftContent(value: unknown): value is DraftContent {

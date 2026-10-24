@@ -18,6 +18,21 @@ export interface ArtifactResponse {
   updatedAt: string;
 }
 
+export interface ArtifactLineageEntryResponse {
+  id: string;
+  parentArtifactId: string;
+  childArtifactId: string;
+  sourceVersionId: string | null;
+  relationshipType: "fork";
+  createdAt: string;
+  artifact: ArtifactResponse;
+}
+
+export interface ArtifactLineageResponse {
+  parents: ArtifactLineageEntryResponse[];
+  children: ArtifactLineageEntryResponse[];
+}
+
 export interface ArtifactSummaryResponse {
   id: string;
   name: string;
@@ -147,6 +162,25 @@ export function toArtifactResponse(artifact: {
     status: artifact.status,
     createdAt: artifact.createdAt.toISOString(),
     updatedAt: artifact.updatedAt.toISOString(),
+  };
+}
+
+export function toArtifactLineageResponse(lineage: {
+  parents: Array<{ lineage: import("../domain/records.js").Lineage; artifact: import("../domain/artifact.js").Artifact }>;
+  children: Array<{ lineage: import("../domain/records.js").Lineage; artifact: import("../domain/artifact.js").Artifact }>;
+}): ArtifactLineageResponse {
+  const toEntry = (entry: typeof lineage.parents[number]): ArtifactLineageEntryResponse => ({
+    id: entry.lineage.id,
+    parentArtifactId: entry.lineage.parentArtifactId,
+    childArtifactId: entry.lineage.childArtifactId,
+    sourceVersionId: entry.lineage.sourceVersionId,
+    relationshipType: entry.lineage.relationshipType,
+    createdAt: entry.lineage.createdAt.toISOString(),
+    artifact: toArtifactResponse(entry.artifact),
+  });
+  return {
+    parents: lineage.parents.map(toEntry),
+    children: lineage.children.map(toEntry),
   };
 }
 

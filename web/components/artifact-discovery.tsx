@@ -390,7 +390,7 @@ function ArtifactCard({ artifact }: { artifact: ArtifactSummary }) {
           {artifact.visibility}
         </span>
       </div>
-      <h3><Link href={`/artifacts/${encodeURIComponent(artifact.id)}/versions`}>{artifact.name}</Link></h3>
+      <h3><Link href={`/artifacts/${encodeURIComponent(artifact.id)}`}>{artifact.name}</Link></h3>
       {artifact.tags.length > 0
         ? <ul className="card-tags" aria-label={`${artifact.name} tags`}>{artifact.tags.map((tag) => <li key={tag}>{tag}</li>)}</ul>
         : <p className="no-tags">No tags</p>}

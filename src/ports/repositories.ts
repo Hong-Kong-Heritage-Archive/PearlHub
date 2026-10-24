@@ -12,6 +12,7 @@ import type {
 
 export interface ArtifactRepository {
   findById(id: string): Promise<Artifact | null>;
+  findByIds(ids: string[]): Promise<Artifact[]>;
   findTombstoneSnapshotArtifact(id: string): Promise<Artifact | null>;
   findByOwnerAndSlug(ownerId: string, slug: string): Promise<Artifact | null>;
   create(artifact: Artifact): Promise<void>;

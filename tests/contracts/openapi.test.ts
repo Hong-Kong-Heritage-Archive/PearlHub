@@ -81,6 +81,8 @@ describe("canonical OpenAPI contract", () => {
     expect(Object.keys(canonicalDocument.paths)).toContain("/api/v1/artifacts");
     expect(canonicalDocument.paths["/api/v1/artifacts"]?.get).toBeDefined();
     expect(canonicalDocument.paths["/api/v1/artifacts"]?.post).toBeDefined();
+    expect(canonicalDocument.paths["/api/v1/artifacts/{artifactId}"]?.get).toBeDefined();
+    expect(canonicalDocument.paths["/api/v1/artifacts/{artifactId}/lineage"]?.get).toBeDefined();
   });
 
   it("documents the optional-auth discovery query and owner-free summary", () => {
@@ -188,6 +190,8 @@ describe("canonical OpenAPI contract", () => {
     const runtimeResponse = await createRuntimeApp().request("/openapi.json");
     const runtime = parse(await runtimeResponse.text()) as OpenApiDocument;
     for (const [path, method] of [
+      ["/api/v1/artifacts/{artifactId}", "get"],
+      ["/api/v1/artifacts/{artifactId}/lineage", "get"],
       ["/api/v1/artifacts/{artifactId}/fork", "post"],
       ["/api/v1/imports/github", "post"],
       ["/api/v1/artifacts/{artifactId}", "delete"],
@@ -199,6 +203,11 @@ describe("canonical OpenAPI contract", () => {
         Object.keys(canonical?.responses ?? {}).sort(),
       );
     }
+
+    const lineageSchema = canonicalDocument.components.schemas.ArtifactLineage;
+    expect(lineageSchema?.required?.slice().sort()).toEqual(["children", "parents"]);
+    expect(lineageSchema?.properties?.parents?.type).toBe("array");
+    expect(lineageSchema?.properties?.children?.type).toBe("array");
   });
 
   it("matches the canonical create contract to the runtime-generated /openapi.json", async () => {

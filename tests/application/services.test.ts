@@ -19,6 +19,7 @@ function copyServices() {
   const storedContent: string[] = [];
   const artifactRepo: ArtifactRepository = {
     findById: async (id) => id === sourceArtifact.id ? sourceArtifact : null,
+    findByIds: async (ids) => ids.includes(sourceArtifact.id) ? [sourceArtifact] : [],
     findTombstoneSnapshotArtifact: async () => null,
     findByOwnerAndSlug: async () => null,
     create: async (artifact) => { artifacts.push(artifact); },
@@ -216,6 +217,7 @@ describe("Artifact lifecycle services", () => {
     let snapshotCount = 0;
     const artifacts: ArtifactRepository = {
       findById: async () => current,
+      findByIds: async (ids) => ids.includes(current.id) ? [current] : [],
       findTombstoneSnapshotArtifact: async () => null,
       findByOwnerAndSlug: async () => null,
       create: async () => {},
@@ -250,6 +252,7 @@ describe("Artifact lifecycle services", () => {
     let current = deleted;
     const artifacts: ArtifactRepository = {
       findById: async () => current,
+      findByIds: async (ids) => ids.includes(current.id) ? [current] : [],
       findTombstoneSnapshotArtifact: async () => sourceArtifact,
       findByOwnerAndSlug: async () => null,
       create: async () => {},

@@ -22,6 +22,7 @@ function fixture(canRead: (actorId: string, artifact: Artifact) => Promise<boole
   let id = 0;
   const artifactRepo: ArtifactRepository = {
     findById: async (value) => artifacts.find((artifact) => artifact.id === value) ?? null,
+    findByIds: async (ids) => artifacts.filter((artifact) => ids.includes(artifact.id)),
     findByOwnerAndSlug: async (owner, slug) => artifacts.find((artifact) => artifact.ownerId === owner && artifact.slug === slug) ?? null,
     findTombstoneSnapshotArtifact: async () => null,
     create: async (artifact) => { artifacts.push(artifact); },

@@ -1,9 +1,9 @@
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { cors } from "hono/cors";
 import type { ListArtifactsService } from "../application/discovery.js";
-import type { DeleteArtifactService, DraftWorkflow, ImportDraftService } from "../application/services.js";
+import type { ArtifactReadService, DeleteArtifactService, DraftWorkflow, ImportDraftService } from "../application/services.js";
 import { parseArtifactDiscoveryQuery } from "../contracts/discovery.js";
-import { toArtifactDiscoveryResponse, toArtifactResponse } from "../contracts/dto.js";
+import { toArtifactDiscoveryResponse, toArtifactLineageResponse, toArtifactResponse } from "../contracts/dto.js";
 import { DomainError } from "../domain/errors.js";
 import type { AuthenticatedPrincipal, Authenticator } from "./authentication.js";
 import { mapHttpError } from "./error-mapping.js";
@@ -74,6 +74,20 @@ const artifactResponseSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 }).openapi("Artifact");
+
+const artifactLineageEntrySchema = z.object({
+  id: z.string(),
+  parentArtifactId: z.string(),
+  childArtifactId: z.string(),
+  sourceVersionId: z.string().nullable(),
+  relationshipType: z.literal("fork"),
+  createdAt: z.string().datetime(),
+  artifact: artifactResponseSchema,
+}).openapi("ArtifactLineageEntry");
+const artifactLineageResponseSchema = z.object({
+  parents: z.array(artifactLineageEntrySchema),
+  children: z.array(artifactLineageEntrySchema),
+}).openapi("ArtifactLineage");
 
 const publishedVersionResponseSchema = z.object({
   artifact: artifactResponseSchema,
@@ -154,6 +168,42 @@ const listArtifactsRoute = createRoute({
       description: "Discovery is unavailable until its index has been built.",
       content: { "application/json": { schema: errorResponseSchema } },
     },
+  },
+});
+const getArtifactRoute = createRoute({
+  method: "get",
+  path: "/api/v1/artifacts/{artifactId}",
+  tags: ["Artifacts"],
+  summary: "Read a visible Artifact",
+  description: "Returns canonical Artifact metadata. Public Artifacts are readable anonymously; private and unlisted Artifacts require owner authorization. Tombstoned Artifacts return 410.",
+  operationId: "getArtifact",
+  security: [{}, { BearerAuth: [] }],
+  request: { params: artifactIdParams },
+  responses: {
+    200: { description: "Canonical metadata for an active Artifact.", content: { "application/json": { schema: artifactResponseSchema } } },
+    400: { description: "Invalid Artifact identifier.", content: { "application/json": { schema: errorResponseSchema } } },
+    403: { description: "The authenticated caller cannot read this Artifact.", content: { "application/json": { schema: errorResponseSchema } } },
+    404: { description: "Artifact was not found or is not visible to an anonymous caller.", content: { "application/json": { schema: errorResponseSchema } } },
+    410: { description: "Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
+    500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
+const getArtifactLineageRoute = createRoute({
+  method: "get",
+  path: "/api/v1/artifacts/{artifactId}/lineage",
+  tags: ["Lineage"],
+  summary: "Read visible Fork lineage",
+  description: "Returns persisted parent and child Fork relationships. Related Artifacts are included only when readable by the caller; hidden edges are omitted.",
+  operationId: "getArtifactLineage",
+  security: [{}, { BearerAuth: [] }],
+  request: { params: artifactIdParams },
+  responses: {
+    200: { description: "Visible persisted Fork relationships, or empty collections when none are visible.", content: { "application/json": { schema: artifactLineageResponseSchema } } },
+    400: { description: "Invalid Artifact identifier.", content: { "application/json": { schema: errorResponseSchema } } },
+    403: { description: "The authenticated caller cannot read this Artifact.", content: { "application/json": { schema: errorResponseSchema } } },
+    404: { description: "Artifact was not found or is not visible to an anonymous caller.", content: { "application/json": { schema: errorResponseSchema } } },
+    410: { description: "Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
+    500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
   },
 });
 const forkRoute = createRoute({
@@ -331,6 +381,7 @@ type HttpEnvironment = {
 
 export interface HttpAppDependencies {
   listArtifacts: Pick<ListArtifactsService, "execute">;
+  artifactReads?: ArtifactReadService;
   drafts?: DraftWorkflow;
   deleteArtifact?: Pick<DeleteArtifactService, "execute">;
   importDraft?: Pick<ImportDraftService, "execute">;
@@ -379,6 +430,26 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
     const query = parseArtifactDiscoveryQuery(new URL(context.req.url).searchParams, principal?.userId ?? null);
     const page = await dependencies.listArtifacts.execute(query);
     return context.json(toArtifactDiscoveryResponse(page), 200);
+  });
+
+  app.openapi(getArtifactRoute, async (context) => {
+    if (!dependencies.artifactReads) throw new Error("Artifact read workflow is not configured.");
+    const principal = await dependencies.authenticator.authenticate(context.req.raw.headers);
+    const artifact = await dependencies.artifactReads.getArtifact({
+      actorId: principal?.userId ?? null,
+      artifactId: context.req.valid("param").artifactId,
+    });
+    return context.json(toArtifactResponse(artifact), 200);
+  });
+
+  app.openapi(getArtifactLineageRoute, async (context) => {
+    if (!dependencies.artifactReads) throw new Error("Artifact read workflow is not configured.");
+    const principal = await dependencies.authenticator.authenticate(context.req.raw.headers);
+    const lineage = await dependencies.artifactReads.getArtifactLineage({
+      actorId: principal?.userId ?? null,
+      artifactId: context.req.valid("param").artifactId,
+    });
+    return context.json(toArtifactLineageResponse(lineage), 200);
   });
 
   app.openapi(createArtifactRoute, async (context) => {
