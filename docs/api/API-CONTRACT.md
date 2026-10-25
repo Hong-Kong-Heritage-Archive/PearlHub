@@ -1,6 +1,6 @@
 # PearlHub API Contract
 
-**Status:** FROZEN through Section 2.3.7
+**Status:** FROZEN through Section 2.3.7; Phase 6 API implementation documented below
 **API version:** v1  
 **Base path:** `/api/v1`
 
@@ -154,16 +154,16 @@ version atomically; direct Artifact creation is retired.
 | POST | `/artifacts` | Legacy direct creation; returns `410 ARTIFACT_CREATION_REQUIRES_DRAFT` | Retired |
 | GET | `/artifacts` | List/search Artifacts | Implemented |
 | GET | `/artifacts/{artifactId}` | Get visible Artifact metadata | Implemented |
-| PATCH | `/artifacts/{artifactId}` | Update mutable metadata only | Planned |
+| PATCH | `/artifacts/{artifactId}` | Update mutable metadata only | Implemented |
 | DELETE | `/artifacts/{artifactId}` | Create tombstone | Implemented |
 
-Until the Artifact PATCH endpoint is implemented, an owner can change an
-existing Artifact's visibility through the published-version workflow: create
-a work-copy, update its Draft with the desired `visibility` and current
-`revision`, then publish the updated revision. For example, setting
-`visibility` to `public` and publishing makes a private or unlisted Artifact
-public atomically with its next immutable Version. This requires owner
-authorization; updating a Draft alone does not change the Artifact.
+Artifact metadata PATCH currently supports only `visibility` (`private`,
+`unlisted`, or `public`). `id`, `name`, `slug`, `ownerId`, `status`, published
+content, hashes, dependencies, lineage, and provenance are not mutable through
+this endpoint. The owner must authenticate; empty patches and unknown or
+immutable fields are rejected. Successful updates return canonical Artifact
+metadata and do not create a Draft or Version. Discovery and access checks use
+the updated visibility.
 
 ### Version endpoints
 
@@ -171,9 +171,20 @@ authorization; updating a Draft alone does not change the Artifact.
 |---|---|---|---|
 | GET | `/artifacts/{artifactId}/versions` | List published versions | Implemented |
 | GET | `/artifacts/{artifactId}/versions/{version}` | Get complete immutable Artifact Version | Implemented |
+| GET | `/artifacts/{artifactId}/versions/{version}/dependencies` | Get declarations and stored resolution history for the exact Version | Implemented |
 | POST | `/artifacts/{artifactId}/versions` | Create new immutable version | Planned |
 
 There is no Version PATCH or DELETE endpoint in v0.1.
+
+The dependency query returns declarations associated with exactly the requested
+published Version. It returns each target identifier and declared SemVer
+range, plus a `resolutions` array containing persisted resolved SemVer values
+and timestamps. The array is empty when no resolution is stored. The
+`dependency_resolutions` records are associated with their dependency rows,
+which in turn reference their exact source Artifact Version; resolution history
+is returned rather than selecting one arbitrarily. GET never resolves ranges,
+recomputes compatibility, or writes data, and it does not expose target
+Artifact metadata.
 
 ### Lineage / lifecycle endpoints
 

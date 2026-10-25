@@ -23,6 +23,8 @@ use revision checks for updates and publication.
 | POST | `/drafts/{draftId}/publish` | Atomically create first Artifact and immutable `0.1.0` version |
 | GET | `/artifacts/{artifactId}/versions` | List published versions |
 | GET | `/artifacts/{artifactId}/versions/{version}` | Read a complete immutable version snapshot |
+| GET | `/artifacts/{artifactId}/versions/{version}/dependencies` | Read declarations and persisted resolution history for the exact version |
+| PATCH | `/artifacts/{artifactId}` | Owner-only partial metadata update; currently visibility only |
 | POST | `/artifacts/{artifactId}/versions/{version}/work-copy` | Create the owner's editable Draft from a version |
 | POST | `/artifacts/{artifactId}/clone` | Create an owner-bound Draft from an exact readable Version without lineage |
 
@@ -34,11 +36,29 @@ Existing versions whose content was not persisted before migration 005 remain
 readable as metadata but return `409 VERSION_CONTENT_UNAVAILABLE` for full
 content reads and work-copy creation.
 
+## Implemented Phase 6 behavior
+
+`PATCH /artifacts/{artifactId}` requires bearer authentication and Artifact
+ownership. Its strict partial request currently accepts only `visibility` with
+the values `private`, `unlisted`, and `public`; empty requests and unknown or
+immutable properties are rejected. It returns the updated canonical Artifact
+without creating a Draft or Version. Visibility changes are reflected by
+discovery and subsequent access checks. Tombstoned Artifacts remain immutable.
+
+`GET /artifacts/{artifactId}/versions/{version}/dependencies` returns the
+declarations persisted for the exact path Version, with target Artifact ID and
+declared SemVer range. It also returns `resolutions: []` when no resolution is
+stored, or the persisted resolution history (`version` SemVer and `resolvedAt`)
+when present. Resolution history is associated through the dependency row and
+its source Version. The GET does not resolve ranges, select a newer Version,
+recompute compatibility, or write data; it does not expose target Artifact
+metadata. Existing Artifact/Version visibility rules apply.
+
 ## Not implemented
 
-Artifact metadata lookup/update and tombstoning; direct Version creation;
-Fork, Import, dependency resolution, and compatibility reports remain outside
-this slice. Published versions have no update or delete operation.
+Direct Version creation; Fork, Import, dependency resolution, and compatibility
+reports remain outside this slice. Published versions have no update or delete
+operation.
 
 ## API error shape
 

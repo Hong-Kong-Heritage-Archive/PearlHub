@@ -15,6 +15,7 @@ interface OpenApiSchema {
   minLength?: number;
   maxLength?: number;
   maxItems?: number;
+  minProperties?: number;
   minimum?: number;
   maximum?: number;
   default?: unknown;
@@ -44,7 +45,7 @@ interface OpenApiOperation {
 interface OpenApiDocument {
   openapi: string;
   info: { title: string; version: string };
-  paths: Record<string, { get?: OpenApiOperation; post?: OpenApiOperation; put?: OpenApiOperation; delete?: OpenApiOperation }>;
+  paths: Record<string, { get?: OpenApiOperation; post?: OpenApiOperation; put?: OpenApiOperation; patch?: OpenApiOperation; delete?: OpenApiOperation }>;
   components: {
     schemas: Record<string, OpenApiSchema>;
     securitySchemes: Record<string, Record<string, unknown>>;
@@ -83,7 +84,9 @@ describe("canonical OpenAPI contract", () => {
     expect(canonicalDocument.paths["/api/v1/artifacts"]?.get).toBeDefined();
     expect(canonicalDocument.paths["/api/v1/artifacts"]?.post).toBeDefined();
     expect(canonicalDocument.paths["/api/v1/artifacts/{artifactId}"]?.get).toBeDefined();
+    expect(canonicalDocument.paths["/api/v1/artifacts/{artifactId}"]?.patch).toBeDefined();
     expect(canonicalDocument.paths["/api/v1/artifacts/{artifactId}/lineage"]?.get).toBeDefined();
+    expect(canonicalDocument.paths["/api/v1/artifacts/{artifactId}/versions/{version}/dependencies"]?.get).toBeDefined();
   });
 
   it("documents the optional-auth discovery query and owner-free summary", () => {
@@ -144,6 +147,44 @@ describe("canonical OpenAPI contract", () => {
     }
     expect(artifactSchema?.properties?.visibility?.enum).toEqual(["private", "unlisted", "public"]);
     expect(artifactSchema?.properties?.status?.enum).toEqual(["active", "tombstone"]);
+  });
+
+  it("strictly documents Phase 6 metadata PATCH and exact-Version dependency reads", async () => {
+    const patch = canonicalDocument.paths["/api/v1/artifacts/{artifactId}"]?.patch;
+    const patchSchema = canonicalDocument.components.schemas.ArtifactMetadataPatch;
+    const dependencies = canonicalDocument.paths["/api/v1/artifacts/{artifactId}/versions/{version}/dependencies"]?.get;
+    const dependencySchema = canonicalDocument.components.schemas.ArtifactVersionDependencies;
+
+    expect(patch?.security).toEqual([{ BearerAuth: [] }]);
+    expect(patch?.responses).toHaveProperty("401");
+    expect(patch?.responses).toHaveProperty("403");
+    expect(patch?.responses).toHaveProperty("410");
+    expect(patchSchema).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      minProperties: 1,
+      required: ["visibility"],
+    });
+    expect(Object.keys(patchSchema?.properties ?? {})).toEqual(["visibility"]);
+
+    expect(dependencies?.security).toEqual([{}, { BearerAuth: [] }]);
+    expect(dependencies?.responses).toHaveProperty("200");
+    expect(dependencies?.responses).toHaveProperty("404");
+    expect(dependencies?.responses).toHaveProperty("410");
+    expect(dependencySchema?.required?.slice().sort()).toEqual(["artifactId", "dependencies", "version"]);
+    expect(dependencySchema?.properties?.dependencies?.type).toBe("array");
+
+    const runtimeResponse = await createRuntimeApp().request("/openapi.json");
+    const runtime = parse(await runtimeResponse.text()) as OpenApiDocument;
+    for (const [path, method] of [
+      ["/api/v1/artifacts/{artifactId}", "patch"],
+      ["/api/v1/artifacts/{artifactId}/versions/{version}/dependencies", "get"],
+    ] as const) {
+      const canonical = canonicalDocument.paths[path]?.[method];
+      const actual = runtime.paths[path]?.[method];
+      expect(actual?.security).toEqual(canonical?.security);
+      expect(Object.keys(actual?.responses ?? {}).sort()).toEqual(Object.keys(canonical?.responses ?? {}).sort());
+    }
   });
 
   it("documents bearer authentication, runtime response statuses, and the stable error envelope", () => {

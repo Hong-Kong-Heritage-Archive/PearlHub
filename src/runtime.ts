@@ -1,6 +1,6 @@
 import { Pool } from "pg";
 import { RebuildArtifactDiscoveryIndexService, ListArtifactsService } from "./application/discovery.js";
-import { DeleteArtifactService, DraftWorkflowService, ImportDraftService } from "./application/services.js";
+import { DeleteArtifactService, DraftWorkflowService, ImportDraftService, UpdateArtifactMetadataService } from "./application/services.js";
 import { assertPostgresMigrationsCurrent } from "./adapters/postgres-migrations.js";
 import {
   PostgresArtifactDiscoveryRepository,
@@ -50,11 +50,12 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
       canRead: async (actorId: string, artifact: import("./domain/artifact.js").Artifact) => artifact.ownerId === actorId || artifact.visibility === "public",
       canWrite: async (actorId: string, artifact: import("./domain/artifact.js").Artifact) => artifact.ownerId === actorId,
     };
+    const dependencyRepository = new PostgresDependencyRepository(transactions.database);
     const drafts = new DraftWorkflowService(
       new PostgresDraftRepository(transactions.database),
       artifacts,
       versions,
-      new PostgresDependencyRepository(transactions.database),
+      dependencyRepository,
       access,
       discovery,
       transactions,
@@ -64,13 +65,16 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
       provenances,
     );
     const deleteArtifact = new DeleteArtifactService(artifacts, access, undefined, transactions);
+    const updateArtifactMetadata = new UpdateArtifactMetadataService(artifacts, access, undefined, transactions);
     const importDraft = new ImportDraftService(new SafeGitHubRawSource(), drafts);
     const listArtifacts = new ListArtifactsService(discovery);
     return {
       app: createHttpApp({
         artifactReads: drafts,
+        artifactVersionDependencies: drafts,
         drafts,
         deleteArtifact,
+        updateArtifactMetadata,
         importDraft,
         listArtifacts,
         authenticator: options.authenticator,

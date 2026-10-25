@@ -43,6 +43,18 @@ export interface ArtifactReadService {
   }>;
 }
 
+export interface ArtifactVersionDependency {
+  targetArtifactId: string;
+  declaredRange: string;
+  resolutions: Array<{ version: string; resolvedAt: Date }>;
+}
+
+export interface ArtifactVersionDependencies {
+  artifactId: string;
+  version: string;
+  dependencies: ArtifactVersionDependency[];
+}
+
 export interface DraftWorkflow {
   create(input: { actorId: string; name: string; slug: string; visibility: ArtifactVisibility; content: DraftContent; provenance?: DraftProvenance | null }): Promise<Draft>;
   list(input: { actorId: string }): Promise<Draft[]>;
@@ -270,6 +282,37 @@ export class DraftWorkflowService implements DraftWorkflow, ArtifactReadService 
     return { artifact, version };
   }
 
+  async getVersionDependencies(input: { actorId: string | null; artifactId: string; version: string }): Promise<ArtifactVersionDependencies> {
+    const artifact = await this.readableArtifactForDetail(input.actorId, input.artifactId);
+    const version = await this.versions.findByArtifactAndVersion(artifact.id, input.version);
+    if (!version) throw new DomainError("VERSION_NOT_FOUND", "Artifact Version was not found.");
+
+    const dependencies = await this.dependencies.findForVersion(version.id);
+    const recordedDependencies = await Promise.all(dependencies.map(async (dependency) => {
+      if (dependency.artifactVersionId !== version.id) {
+        throw new Error("Dependency repository returned a declaration for a different Artifact Version.");
+      }
+      const resolutions = await this.dependencies.findResolutions(dependency.id);
+      const recordedResolutions = await Promise.all(resolutions.map(async (resolution) => {
+        if (resolution.dependencyId !== dependency.id) {
+          throw new Error("Dependency repository returned a resolution for a different dependency.");
+        }
+        const resolvedVersion = await this.versions.findById(resolution.resolvedArtifactVersionId);
+        if (!resolvedVersion || resolvedVersion.artifactId !== dependency.targetArtifactId) {
+          throw new Error("Persisted dependency resolution does not identify a version of its declared target Artifact.");
+        }
+        return { version: resolvedVersion.version, resolvedAt: resolution.resolvedAt };
+      }));
+      return {
+        targetArtifactId: dependency.targetArtifactId,
+        declaredRange: dependency.declaredRange,
+        resolutions: recordedResolutions,
+      };
+    }));
+
+    return { artifactId: artifact.id, version: version.version, dependencies: recordedDependencies };
+  }
+
   async getArtifact(input: { actorId: string | null; artifactId: string }): Promise<Artifact> {
     return this.readableArtifactForDetail(input.actorId, input.artifactId);
   }
@@ -417,6 +460,28 @@ export class DeleteArtifactService {
     const tombstone = () => this.artifacts.tombstone(deleted);
     if (this.transactions) await this.transactions.run(tombstone); else await tombstone();
     return deleted;
+  }
+}
+
+export class UpdateArtifactMetadataService {
+  constructor(
+    private readonly artifacts: ArtifactRepository,
+    private readonly access: AccessPolicy,
+    private readonly clock = systemClock,
+    private readonly transactions?: TransactionManager,
+  ) {}
+
+  async execute(input: { actorId: string; artifactId: string; visibility: ArtifactVisibility }): Promise<Artifact> {
+    const update = async () => {
+      const artifact = await this.artifacts.findById(input.artifactId);
+      if (!artifact) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+      if (artifact.status !== "active") throw new DomainError("ARTIFACT_GONE", "Artifact has been tombstoned.");
+      await authorizeWrite(this.access, input.actorId, artifact);
+      const updated = artifact.changeVisibility(input.visibility, this.clock.now());
+      await this.artifacts.save(updated);
+      return updated;
+    };
+    return this.transactions ? this.transactions.run(update) : update();
   }
 }
 

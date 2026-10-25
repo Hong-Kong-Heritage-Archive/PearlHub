@@ -214,6 +214,72 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+    patch:
+      tags: [Artifacts]
+      summary: Update mutable Artifact metadata
+      description: >-
+        Owner-only partial update. Visibility is the only currently supported
+        mutable field. Identity, lifecycle state, content, dependencies,
+        lineage, provenance, and published Versions cannot be changed here.
+      operationId: updateArtifactMetadata
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArtifactMetadataPatch"
+      responses:
+        "200":
+          description: Updated canonical Artifact metadata; no Draft or Version is created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Artifact"
+        "400":
+          description: Empty, malformed, unknown, immutable, or invalid metadata patch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller is not the Artifact owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Artifact was not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "410":
+          description: Artifact has been tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Unexpected internal error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
     delete:
       tags: [Artifacts]
       summary: Tombstone an Artifact
@@ -864,6 +930,68 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /api/v1/artifacts/{artifactId}/versions/{version}/dependencies:
+    get:
+      tags: [Dependencies]
+      summary: Read dependencies for an exact published version
+      description: >-
+        Returns only declarations stored for the exact requested Version and
+        any persisted resolution history associated with those declarations.
+        Resolutions are not calculated and this endpoint performs no writes.
+      operationId: getArtifactVersionDependencies
+      security:
+        - {}
+        - BearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Recorded declarations and persisted resolution history, or an empty dependency list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactVersionDependencies"
+        "400":
+          description: Invalid Artifact identifier or Version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller cannot read this Artifact.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Artifact or Version is not visible or was not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "410":
+          description: Artifact has been tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Unexpected internal error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /api/v1/artifacts/{artifactId}/versions/{version}/work-copy:
     post:
       tags: [Drafts]
@@ -1182,6 +1310,16 @@ components:
             - private
             - unlisted
             - public
+    ArtifactMetadataPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      required: [visibility]
+      description: Visibility is the only currently supported mutable Artifact metadata field.
+      properties:
+        visibility:
+          type: string
+          enum: [private, unlisted, public]
     Artifact:
       type: object
       required:
@@ -1237,6 +1375,45 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ArtifactLineageEntry"
+    ArtifactVersionDependencies:
+      type: object
+      additionalProperties: false
+      required: [artifactId, version, dependencies]
+      properties:
+        artifactId:
+          type: string
+        version:
+          type: string
+          description: Exact SemVer selected by the request path.
+        dependencies:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [targetArtifactId, declaredRange, resolutions]
+            properties:
+              targetArtifactId:
+                type: string
+                description: Target identifier as declared; no target Artifact metadata is returned.
+              declaredRange:
+                type: string
+              resolutions:
+                type: array
+                description: >-
+                  Persisted resolution history for this declaration. Empty if
+                  no resolution has been stored; no resolution is computed by
+                  this read operation.
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [version, resolvedAt]
+                  properties:
+                    version:
+                      type: string
+                      description: Resolved Artifact Version SemVer, not its internal database ID.
+                    resolvedAt:
+                      type: string
+                      format: date-time
     ArtifactLineageEntry:
       type: object
       additionalProperties: false

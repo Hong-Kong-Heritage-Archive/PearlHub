@@ -1,7 +1,7 @@
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { cors } from "hono/cors";
 import type { ListArtifactsService } from "../application/discovery.js";
-import type { ArtifactReadService, DeleteArtifactService, DraftWorkflow, ImportDraftService } from "../application/services.js";
+import type { ArtifactReadService, DeleteArtifactService, DraftWorkflow, DraftWorkflowService, ImportDraftService, UpdateArtifactMetadataService } from "../application/services.js";
 import { parseArtifactDiscoveryQuery } from "../contracts/discovery.js";
 import { toArtifactDiscoveryResponse, toArtifactLineageResponse, toArtifactResponse } from "../contracts/dto.js";
 import { DomainError } from "../domain/errors.js";
@@ -14,6 +14,10 @@ const createArtifactBodySchema = z.object({
   slug: z.string().regex(artifactSlugPattern),
   visibility: z.enum(["private", "unlisted", "public"]),
 }).strict().openapi("CreateArtifactRequest");
+const artifactMetadataPatchSchema = z.object({
+  visibility: z.enum(["private", "unlisted", "public"]),
+}).strict().refine((value) => Object.keys(value).length > 0, "At least one mutable metadata field is required.")
+  .openapi("ArtifactMetadataPatch");
 
 const draftContentSchema = z.object({
   instructions: z.string(),
@@ -74,6 +78,18 @@ const artifactResponseSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 }).openapi("Artifact");
+const artifactVersionDependenciesResponseSchema = z.object({
+  artifactId: z.string(),
+  version: z.string(),
+  dependencies: z.array(z.object({
+    targetArtifactId: z.string(),
+    declaredRange: z.string(),
+    resolutions: z.array(z.object({
+      version: z.string(),
+      resolvedAt: z.string().datetime(),
+    }).strict()),
+  }).strict()),
+}).openapi("ArtifactVersionDependencies");
 
 const artifactLineageEntrySchema = z.object({
   id: z.string(),
@@ -184,6 +200,28 @@ const getArtifactRoute = createRoute({
     400: { description: "Invalid Artifact identifier.", content: { "application/json": { schema: errorResponseSchema } } },
     403: { description: "The authenticated caller cannot read this Artifact.", content: { "application/json": { schema: errorResponseSchema } } },
     404: { description: "Artifact was not found or is not visible to an anonymous caller.", content: { "application/json": { schema: errorResponseSchema } } },
+    410: { description: "Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
+    500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
+const updateArtifactMetadataRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/artifacts/{artifactId}",
+  tags: ["Artifacts"],
+  summary: "Update Artifact metadata",
+  description: "Updates only mutable Artifact metadata. Visibility is currently the only supported field; Artifact identity and Version history are unchanged.",
+  operationId: "updateArtifactMetadata",
+  security: [{ BearerAuth: [] }],
+  request: {
+    params: artifactIdParams,
+    body: { required: true, content: { "application/json": { schema: artifactMetadataPatchSchema } } },
+  },
+  responses: {
+    200: { description: "Updated canonical Artifact metadata.", content: { "application/json": { schema: artifactResponseSchema } } },
+    400: { description: "Malformed, empty, unknown, immutable, or invalid metadata patch.", content: { "application/json": { schema: errorResponseSchema } } },
+    401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } },
+    403: { description: "The caller is not the Artifact owner.", content: { "application/json": { schema: errorResponseSchema } } },
+    404: { description: "Artifact was not found.", content: { "application/json": { schema: errorResponseSchema } } },
     410: { description: "Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
     500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
   },
@@ -398,6 +436,24 @@ const getVersionRoute = createRoute({
   security: [{}, { BearerAuth: [] }], request: { params: artifactVersionParams },
   responses: { 200: { description: "Complete immutable version snapshot.", content: { "application/json": { schema: publishedVersionResponseSchema } } }, 404: { description: "Artifact or version not found.", content: { "application/json": { schema: errorResponseSchema } } }, 410: { description: "Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } } },
 });
+const getVersionDependenciesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/artifacts/{artifactId}/versions/{version}/dependencies",
+  tags: ["Dependencies"],
+  summary: "Read dependencies for a published version",
+  description: "Returns declarations and persisted resolution history for exactly the requested Artifact Version. This read does not resolve dependencies or mutate data.",
+  operationId: "getArtifactVersionDependencies",
+  security: [{}, { BearerAuth: [] }],
+  request: { params: artifactVersionParams },
+  responses: {
+    200: { description: "Recorded declarations and any stored resolution history.", content: { "application/json": { schema: artifactVersionDependenciesResponseSchema } } },
+    400: { description: "Invalid Artifact identifier or Version.", content: { "application/json": { schema: errorResponseSchema } } },
+    403: { description: "The caller cannot read this Artifact.", content: { "application/json": { schema: errorResponseSchema } } },
+    404: { description: "Artifact or Version was not found or is not visible to the caller.", content: { "application/json": { schema: errorResponseSchema } } },
+    410: { description: "Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
+    500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
 const workCopyRoute = createRoute({
   method: "post", path: "/api/v1/artifacts/{artifactId}/versions/{version}/work-copy", tags: ["Drafts"], summary: "Create a Draft work-copy",
   security: [{ BearerAuth: [] }], request: { params: artifactVersionParams },
@@ -413,6 +469,8 @@ type HttpEnvironment = {
 export interface HttpAppDependencies {
   listArtifacts: Pick<ListArtifactsService, "execute">;
   artifactReads?: ArtifactReadService;
+  artifactVersionDependencies?: Pick<DraftWorkflowService, "getVersionDependencies">;
+  updateArtifactMetadata?: Pick<UpdateArtifactMetadataService, "execute">;
   drafts?: DraftWorkflow;
   deleteArtifact?: Pick<DeleteArtifactService, "execute">;
   importDraft?: Pick<ImportDraftService, "execute">;
@@ -432,7 +490,7 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
   if (dependencies.corsOrigins !== undefined) {
     app.use("/api/*", cors({
       origin: dependencies.corsOrigins,
-      allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowHeaders: ["Authorization", "Content-Type"],
       maxAge: 600,
     }));
@@ -469,6 +527,18 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
     const artifact = await dependencies.artifactReads.getArtifact({
       actorId: principal?.userId ?? null,
       artifactId: context.req.valid("param").artifactId,
+    });
+    return context.json(toArtifactResponse(artifact), 200);
+  });
+
+  app.openapi(updateArtifactMetadataRoute, async (context) => {
+    const actor = await requirePrincipal(dependencies.authenticator, context.req.raw.headers);
+    if (!dependencies.updateArtifactMetadata) throw new Error("Artifact metadata update is not configured.");
+    const { visibility } = context.req.valid("json");
+    const artifact = await dependencies.updateArtifactMetadata.execute({
+      actorId: actor.userId,
+      artifactId: context.req.valid("param").artifactId,
+      visibility,
     });
     return context.json(toArtifactResponse(artifact), 200);
   });
@@ -573,6 +643,28 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
     const { artifactId, version } = await context.req.valid("param");
     const result = await dependencies.drafts.getPublishedVersion({ actorId: principal?.userId ?? null, artifactId, version });
     return context.json(toVersionResponse(result.artifact, result.version, requireCompleteSnapshot(result.version.contentSnapshot)), 200);
+  });
+  app.openapi(getVersionDependenciesRoute, async (context) => {
+    if (!dependencies.artifactVersionDependencies) throw new Error("Artifact Version dependency reads are not configured.");
+    const principal = await dependencies.authenticator.authenticate(context.req.raw.headers);
+    const { artifactId, version } = await context.req.valid("param");
+    const result = await dependencies.artifactVersionDependencies.getVersionDependencies({
+      actorId: principal?.userId ?? null,
+      artifactId,
+      version,
+    });
+    return context.json({
+      artifactId: result.artifactId,
+      version: result.version,
+      dependencies: result.dependencies.map((dependency) => ({
+        targetArtifactId: dependency.targetArtifactId,
+        declaredRange: dependency.declaredRange,
+        resolutions: dependency.resolutions.map((resolution) => ({
+          version: resolution.version,
+          resolvedAt: resolution.resolvedAt.toISOString(),
+        })),
+      })),
+    }, 200);
   });
 
   app.onError((error, context) => {

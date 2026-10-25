@@ -1282,6 +1282,124 @@ describe("PostgreSQL persistence hardening", () => {
     expect(await childLineageAfterParentDeletion.json()).toEqual({ parents: [], children: [] });
   });
 
+  it("updates owner visibility and reads exact-Version dependency resolution history without creating Versions", async () => {
+    const sourceId = await createArtifact(owners[0], randomUUID(), "private");
+    const targetId = await createArtifact(owners[1], randomUUID(), "private");
+    const targetVersionId = await createVersion(targetId, "3.2.1");
+    const sourceVersionId = await createVersion(sourceId, "1.0.0", randomUUID(), {
+      instructions: "source content",
+      tags: [],
+      knowledgeFiles: [],
+      dependencies: [{ targetArtifactId: targetId, declaredRange: "^3.0.0" }],
+    });
+    const secondSourceVersionId = await createVersion(sourceId, "2.0.0", randomUUID(), {
+      instructions: "new source content",
+      tags: [],
+      knowledgeFiles: [],
+      dependencies: [],
+    });
+    const dependencyId = randomUUID();
+    const dependencies = new PostgresDependencyRepository(pool!);
+    await dependencies.create(Dependency.create({
+      id: dependencyId,
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetId,
+      declaredRange: "^3.0.0",
+      createdAt: new Date(),
+    }));
+    await dependencies.createResolution({
+      id: randomUUID(),
+      dependencyId,
+      resolvedArtifactVersionId: targetVersionId,
+      resolvedAt: new Date("2026-06-01T00:00:00.000Z"),
+    });
+
+    const runtime = await createPostgresRuntime({
+      databaseUrl,
+      pool: pool!,
+      authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "phase-six-owner-token", [
+        { userId: owners[2]!, token: "phase-six-other-token" },
+      ]),
+      contentStore: new MemoryArtifactContentStore(),
+    });
+    const ownerHeaders = { authorization: "Bearer phase-six-owner-token", "content-type": "application/json" };
+    const otherOwnerHeaders = { authorization: "Bearer phase-six-other-token", "content-type": "application/json" };
+
+    try {
+      const versionCountBefore = await pool!.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM artifact_versions WHERE artifact_id=$1",
+        [sourceId],
+      );
+      const snapshotsBefore = await pool!.query<{ id: string; content_hash: string; content_snapshot: Record<string, unknown> }>(
+        "SELECT id,content_hash,content_snapshot FROM artifact_versions WHERE artifact_id=$1 ORDER BY version",
+        [sourceId],
+      );
+      const draftCountBefore = await pool!.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM drafts WHERE artifact_id=$1",
+        [sourceId],
+      );
+      const denied = await runtime.app.request(`/api/v1/artifacts/${sourceId}`, {
+        method: "PATCH",
+        headers: otherOwnerHeaders,
+        body: JSON.stringify({ visibility: "public" }),
+      });
+      expect(denied.status).toBe(403);
+      const hiddenFromAnonymous = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/dependencies`);
+      expect(hiddenFromAnonymous.status).toBe(404);
+      const forbiddenRead = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/dependencies`, {
+        headers: otherOwnerHeaders,
+      });
+      expect(forbiddenRead.status).toBe(403);
+
+      const updated = await runtime.app.request(`/api/v1/artifacts/${sourceId}`, {
+        method: "PATCH",
+        headers: ownerHeaders,
+        body: JSON.stringify({ visibility: "public" }),
+      });
+      expect(updated.status).toBe(200);
+      expect(await updated.json()).toMatchObject({ id: sourceId, visibility: "public", status: "active" });
+
+      const discovery = await runtime.app.request(`/api/v1/artifacts?q=${encodeURIComponent(`Artifact ${sourceId}`)}`);
+      expect(discovery.status).toBe(200);
+      expect(await discovery.json()).toMatchObject({ items: [expect.objectContaining({ id: sourceId, visibility: "public" })] });
+      const anonymousRead = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/dependencies`);
+      expect(anonymousRead.status).toBe(200);
+      expect(await anonymousRead.json()).toEqual({
+        artifactId: sourceId,
+        version: "1.0.0",
+        dependencies: [{
+          targetArtifactId: targetId,
+          declaredRange: "^3.0.0",
+          resolutions: [{ version: "3.2.1", resolvedAt: "2026-06-01T00:00:00.000Z" }],
+        }],
+      });
+      const exactSecondVersion = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/2.0.0/dependencies`);
+      expect(await exactSecondVersion.json()).toEqual({ artifactId: sourceId, version: "2.0.0", dependencies: [] });
+      expect(await pool!.query("SELECT id FROM dependency_resolutions WHERE dependency_id=$1", [dependencyId])).toMatchObject({
+        rows: [{ id: expect.any(String) }],
+      });
+      expect((await pool!.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM artifact_versions WHERE artifact_id=$1",
+        [sourceId],
+      )).rows[0]?.count).toBe(versionCountBefore.rows[0]?.count);
+      expect((await pool!.query<{ id: string; content_hash: string; content_snapshot: Record<string, unknown> }>(
+        "SELECT id,content_hash,content_snapshot FROM artifact_versions WHERE artifact_id=$1 ORDER BY version",
+        [sourceId],
+      )).rows).toEqual(snapshotsBefore.rows);
+      expect((await pool!.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM drafts WHERE artifact_id=$1",
+        [sourceId],
+      )).rows[0]?.count).toBe(draftCountBefore.rows[0]?.count);
+      expect((await pool!.query<{ visibility: string; status: string }>(
+        "SELECT visibility,status FROM artifacts WHERE id=$1",
+        [sourceId],
+      )).rows[0]).toEqual({ visibility: "public", status: "active" });
+      expect(secondSourceVersionId).not.toBe(sourceVersionId);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("rolls back Artifact, Version, and Dependency writes in a real transaction", async () => {
     const transactions = new PostgresTransactionManager(pool!);
     const artifacts = new PostgresArtifactRepository(transactions.database);

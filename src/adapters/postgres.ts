@@ -140,7 +140,15 @@ export class PostgresArtifactRepository implements ArtifactRepository {
 
   async save(artifact: Artifact): Promise<void> {
     const value = artifact.snapshot();
-    await this.db.query("UPDATE artifacts SET visibility=$2, status=$3, updated_at=$4 WHERE id=$1", [value.id, value.visibility, value.status, value.updatedAt]);
+    const result = await this.db.query(
+      "UPDATE artifacts SET visibility=$2,updated_at=$3 WHERE id=$1 AND status='active'",
+      [value.id, value.visibility, value.updatedAt],
+    );
+    if (result.rowCount === 0) {
+      const current = await this.findById(value.id);
+      if (!current) throw new DomainError("ARTIFACT_NOT_FOUND", "Artifact was not found.");
+      throw new DomainError("ARTIFACT_GONE", "Artifact has been tombstoned.");
+    }
   }
 
   async tombstone(artifact: Artifact): Promise<void> {

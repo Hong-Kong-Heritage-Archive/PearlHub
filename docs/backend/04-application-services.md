@@ -45,6 +45,39 @@ Steps:
 
 A published version cannot be modified.
 
+## UpdateArtifactMetadata
+
+Input:
+
+- authenticated actor ID
+- Artifact ID
+- partial metadata containing `visibility`
+
+Rules:
+
+- only the Artifact owner may update metadata
+- visibility must be `private`, `unlisted`, or `public`
+- `visibility` is currently the only mutable Artifact metadata field
+- identity, lifecycle state, Versions, content, dependencies, lineage, and provenance remain unchanged
+- do not create a Draft or Artifact Version
+
+## GetArtifactVersionDependencies
+
+Input:
+
+- caller ID, if authenticated
+- Artifact ID
+- exact published Version SemVer
+
+Rules:
+
+- use the existing Artifact and Version read-authorization policy
+- return only declarations recorded for the exact Version
+- include persisted resolution history only through the declaration's stored resolution records
+- return resolved SemVer values, not internal database identifiers
+- an absent resolution is an empty history; do not calculate or persist a resolution during GET
+- do not return target Artifact metadata
+
 ## ForkArtifact
 
 Input:
