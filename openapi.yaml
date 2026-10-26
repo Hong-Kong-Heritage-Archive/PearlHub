@@ -8,6 +8,27 @@ info:
     version atomically from an owner-authorized Draft. Drafts and published
     snapshots are stored in PostgreSQL.
 paths:
+  /api/v1/me:
+    get:
+      tags: [Users]
+      summary: Read the authenticated caller identity
+      description: Returns only the stable user ID associated with the authenticated bearer token.
+      operationId: getCurrentUser
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Authenticated caller identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CurrentUser"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /api/v1/artifacts:
     get:
       tags:
@@ -1047,6 +1068,14 @@ components:
       type: http
       scheme: bearer
   schemas:
+    CurrentUser:
+      type: object
+      additionalProperties: false
+      required: [userId]
+      properties:
+        userId:
+          type: string
+          minLength: 1
     DraftContent:
       type: object
       additionalProperties: false

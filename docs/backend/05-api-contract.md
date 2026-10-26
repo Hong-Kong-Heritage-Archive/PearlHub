@@ -11,9 +11,16 @@ An Artifact is created only by publishing its first Draft. Draft writes require
 bearer authentication, derive ownership from the authenticated principal, and
 use revision checks for updates and publication.
 
+`GET /me` also requires bearer authentication and returns only
+`{ "userId": "<authenticated principal ID>" }`. It does not expose tokens,
+profile data, or user lookup capabilities. The development-only fake
+authenticator remains a local testing convenience, not a production login
+system.
+
 | Method | Path | Behavior |
 |---|---|---|
 | GET | `/artifacts` | Discover visible Artifacts |
+| GET | `/me` | Read the authenticated caller's stable user ID |
 | POST | `/artifacts` | Retired; returns `410 ARTIFACT_CREATION_REQUIRES_DRAFT` |
 | POST | `/drafts` | Create a private Draft with initial content |
 | GET | `/drafts` | List active Draft summaries owned by the caller |

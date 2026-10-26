@@ -146,6 +146,7 @@ version atomically; direct Artifact creation is retired.
 | POST | `/drafts` | Create a private unpublished Draft | Implemented |
 | GET | `/drafts` | List the caller's active Draft summaries | Implemented |
 | GET | `/drafts/{draftId}` | Read an owner-authorized Draft | Implemented |
+| GET | `/me` | Read the authenticated caller's stable user ID | Implemented |
 | PUT | `/drafts/{draftId}` | Update with revision-based concurrency | Implemented |
 | DELETE | `/drafts/{draftId}?revision={revision}` | Discard an unpublished Draft | Implemented |
 | POST | `/drafts/{draftId}/publish` | Atomically publish a Draft | Implemented |
@@ -204,7 +205,7 @@ Artifact metadata.
 
 | Method | Endpoint | Purpose | Status |
 |---|---|---|---|
-| GET | `/artifacts/{artifactId}/versions/{version}/dependencies` | Get dependencies | Planned |
+| GET | `/artifacts/{artifactId}/versions/{version}/dependencies` | Get exact-Version declarations and stored resolution history | Implemented |
 | GET | `/artifacts/{artifactId}/versions/{version}/compatibility` | Get compatibility reports | Planned |
 
 ### Search

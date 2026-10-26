@@ -87,6 +87,25 @@ describe("canonical OpenAPI contract", () => {
     expect(canonicalDocument.paths["/api/v1/artifacts/{artifactId}"]?.patch).toBeDefined();
     expect(canonicalDocument.paths["/api/v1/artifacts/{artifactId}/lineage"]?.get).toBeDefined();
     expect(canonicalDocument.paths["/api/v1/artifacts/{artifactId}/versions/{version}/dependencies"]?.get).toBeDefined();
+    expect(canonicalDocument.paths["/api/v1/me"]?.get).toBeDefined();
+  });
+
+  it("documents the authenticated caller identity endpoint without extra fields", async () => {
+    const operation = canonicalDocument.paths["/api/v1/me"]?.get;
+    const schema = canonicalDocument.components.schemas.CurrentUser;
+    expect(operation?.operationId).toBe("getCurrentUser");
+    expect(operation?.security).toEqual([{ BearerAuth: [] }]);
+    expect(operation?.responses).toHaveProperty("200");
+    expect(operation?.responses).toHaveProperty("401");
+    expect(schema?.additionalProperties).toBe(false);
+    expect(schema?.required).toEqual(["userId"]);
+    expect(Object.keys(schema?.properties ?? {})).toEqual(["userId"]);
+
+    const runtimeResponse = await createRuntimeApp().request("/openapi.json");
+    const runtime = parse(await runtimeResponse.text()) as OpenApiDocument;
+    expect(runtime.paths["/api/v1/me"]?.get?.security).toEqual(operation?.security);
+    expect(Object.keys(runtime.paths["/api/v1/me"]?.get?.responses ?? {}).sort())
+      .toEqual(Object.keys(operation?.responses ?? {}).sort());
   });
 
   it("documents the optional-auth discovery query and owner-free summary", () => {

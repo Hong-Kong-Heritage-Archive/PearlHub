@@ -78,6 +78,9 @@ const artifactResponseSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 }).openapi("Artifact");
+const currentUserResponseSchema = z.object({
+  userId: z.string().min(1),
+}).strict().openapi("CurrentUser");
 const artifactVersionDependenciesResponseSchema = z.object({
   artifactId: z.string(),
   version: z.string(),
@@ -202,6 +205,19 @@ const getArtifactRoute = createRoute({
     404: { description: "Artifact was not found or is not visible to an anonymous caller.", content: { "application/json": { schema: errorResponseSchema } } },
     410: { description: "Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
     500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
+const getCurrentUserRoute = createRoute({
+  method: "get",
+  path: "/api/v1/me",
+  tags: ["Users"],
+  summary: "Read the authenticated caller identity",
+  description: "Returns only the stable user ID associated with the authenticated bearer token.",
+  operationId: "getCurrentUser",
+  security: [{ BearerAuth: [] }],
+  responses: {
+    200: { description: "Authenticated caller identity.", content: { "application/json": { schema: currentUserResponseSchema } } },
+    401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } },
   },
 });
 const updateArtifactMetadataRoute = createRoute({
@@ -529,6 +545,11 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
       artifactId: context.req.valid("param").artifactId,
     });
     return context.json(toArtifactResponse(artifact), 200);
+  });
+
+  app.openapi(getCurrentUserRoute, async (context) => {
+    const principal = await requirePrincipal(dependencies.authenticator, context.req.raw.headers);
+    return context.json({ userId: principal.userId }, 200);
   });
 
   app.openapi(updateArtifactMetadataRoute, async (context) => {

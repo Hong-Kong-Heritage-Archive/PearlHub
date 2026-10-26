@@ -1,5 +1,9 @@
 export type ArtifactVisibility = "private" | "unlisted" | "public";
 
+export interface CurrentUser {
+  userId: string;
+}
+
 export interface DraftContent {
   instructions: string;
   knowledgeFiles: Array<{ path: string; content: string }>;
@@ -191,16 +195,36 @@ export async function getPublishedVersion(artifactId: string, version: string, t
 
 export async function getArtifact(artifactId: string, token?: string, signal?: AbortSignal): Promise<ArtifactMetadata> {
   const response = await request(`/artifacts/${encodeURIComponent(artifactId)}`, "GET", undefined, token, signal);
+  return readArtifactMetadata(response);
+}
+
+export async function getCurrentUser(token: string, signal?: AbortSignal): Promise<CurrentUser> {
+  const response = await request("/me", "GET", undefined, token, signal);
   let payload: unknown;
   try {
     payload = await response.json();
   } catch {
-    throw new DraftRequestError("The API returned an invalid Artifact response.", response.status, "INVALID_RESPONSE");
+    throw new DraftRequestError("The API returned an invalid identity response.", response.status, "INVALID_RESPONSE");
   }
-  if (!isArtifactMetadata(payload)) {
-    throw new DraftRequestError("The API returned an unexpected Artifact response.", response.status, "INVALID_RESPONSE");
+  if (!isCurrentUser(payload)) {
+    throw new DraftRequestError("The API returned an unexpected identity response.", response.status, "INVALID_RESPONSE");
   }
   return payload;
+}
+
+export async function updateArtifactVisibility(
+  artifactId: string,
+  visibility: ArtifactVisibility,
+  token: string,
+  signal?: AbortSignal,
+): Promise<ArtifactMetadata> {
+  return readArtifactMetadata(await request(
+    `/artifacts/${encodeURIComponent(artifactId)}`,
+    "PATCH",
+    { visibility },
+    token,
+    signal,
+  ));
 }
 
 export async function getArtifactLineage(artifactId: string, token?: string, signal?: AbortSignal): Promise<ArtifactLineage> {
@@ -283,6 +307,19 @@ async function readPublishedVersion(response: Response): Promise<PublishedVersio
   return payload;
 }
 
+async function readArtifactMetadata(response: Response): Promise<ArtifactMetadata> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new DraftRequestError("The API returned an invalid Artifact response.", response.status, "INVALID_RESPONSE");
+  }
+  if (!isArtifactMetadata(payload)) {
+    throw new DraftRequestError("The API returned an unexpected Artifact response.", response.status, "INVALID_RESPONSE");
+  }
+  return payload;
+}
+
 async function readError(response: Response): Promise<DraftRequestError> {
   let message: string | undefined;
   let code = "API_ERROR";
@@ -348,6 +385,13 @@ function isArtifactMetadata(value: unknown): value is ArtifactMetadata {
     && (value.status === "active" || value.status === "tombstone")
     && typeof value.createdAt === "string"
     && typeof value.updatedAt === "string";
+}
+
+function isCurrentUser(value: unknown): value is CurrentUser {
+  return isRecord(value)
+    && Object.keys(value).length === 1
+    && typeof value.userId === "string"
+    && value.userId.length > 0;
 }
 
 function isArtifactLineageEntry(value: unknown): value is ArtifactLineageEntry {
