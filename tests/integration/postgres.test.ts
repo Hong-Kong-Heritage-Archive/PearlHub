@@ -702,7 +702,7 @@ describe("PostgreSQL persistence hardening", () => {
     expectDateOrder(resolutionRows.map(({ id, resolvedAt }) => ({ id, date: resolvedAt })));
     await expect(dependencies.createResolution({ id: randomUUID(), dependencyId: dependency.id, resolvedArtifactVersionId: sourceVersionId, resolvedAt: resolutionAt })).rejects.toMatchObject({ code: "INVALID_REQUEST", details: {} });
 
-    const report: CompatibilityReport = { id: randomUUID(), artifactVersionId: sourceVersionId, targetArtifactVersionId: null, status: "compatible", report: { summary: "ok", score: 0.875, enabled: true, checks: [{ name: "schema", passed: true, metadata: { threshold: 2, labels: ["required", "stable"], nested: { active: false } } }] }, createdAt: new Date("2026-04-04T00:00:00.000Z") };
+    const report: CompatibilityReport = { id: randomUUID(), artifactVersionId: sourceVersionId, targetArtifactVersionId: null, status: "compatible", report: { summary: "ok", score: 0.875, enabled: true, nullable: null, checks: [{ name: "schema", passed: true, metadata: { threshold: 2, labels: ["required", "stable"], nested: { active: false } } }] }, createdAt: new Date("2026-04-04T00:00:00.000Z") };
     const secondReport: CompatibilityReport = { ...report, id: randomUUID(), targetArtifactVersionId: targetVersionId, status: "incompatible", report: { summary: "breaking", breakingChanges: ["field removed"] }, createdAt: new Date("2026-04-04T00:00:01.000Z") };
     const emptyReport: CompatibilityReport = { ...report, id: randomUUID(), report: {}, createdAt: new Date("2026-04-04T00:00:02.000Z") };
     await reports.create(report);
@@ -1313,6 +1313,7 @@ describe("PostgreSQL persistence hardening", () => {
       resolvedArtifactVersionId: targetVersionId,
       resolvedAt: new Date("2026-06-01T00:00:00.000Z"),
     });
+    await createVersion(targetId, "3.3.0");
 
     const runtime = await createPostgresRuntime({
       databaseUrl,
@@ -1375,8 +1376,8 @@ describe("PostgreSQL persistence hardening", () => {
       });
       const exactSecondVersion = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/2.0.0/dependencies`);
       expect(await exactSecondVersion.json()).toEqual({ artifactId: sourceId, version: "2.0.0", dependencies: [] });
-      expect(await pool!.query("SELECT id FROM dependency_resolutions WHERE dependency_id=$1", [dependencyId])).toMatchObject({
-        rows: [{ id: expect.any(String) }],
+      expect(await pool!.query("SELECT id,resolved_artifact_version_id FROM dependency_resolutions WHERE dependency_id=$1", [dependencyId])).toMatchObject({
+        rows: [{ id: expect.any(String), resolved_artifact_version_id: targetVersionId }],
       });
       expect((await pool!.query<{ count: number }>(
         "SELECT count(*)::int AS count FROM artifact_versions WHERE artifact_id=$1",

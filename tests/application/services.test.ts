@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Dependency } from "../../src/domain/dependency.js";
-import type { DependencyResolution } from "../../src/domain/records.js";
-import { DeleteArtifactService, PublishVersionService, ResolveDependencyService, RestoreArtifactService } from "../../src/application/services.js";
-import type { ArtifactDiscoveryRepository, ArtifactRepository, ArtifactVersionRepository, DependencyRepository, LineageRepository, TransactionManager } from "../../src/ports/repositories.js";
+import type { CompatibilityReport, DependencyResolution } from "../../src/domain/records.js";
+import { CreateCompatibilityReportService, DeleteArtifactService, PublishVersionService, ResolveDependencyService, RestoreArtifactService } from "../../src/application/services.js";
+import type { ArtifactDiscoveryRepository, ArtifactRepository, ArtifactVersionRepository, CompatibilityReportRepository, DependencyRepository, LineageRepository, TransactionManager } from "../../src/ports/repositories.js";
 
 const fixedTime = new Date("2026-01-01T00:00:00Z");
 const sourceArtifact = Artifact.create({ id: "source", ownerId: "owner", name: "Source", slug: "source", visibility: "public", createdAt: fixedTime });
-const sourceVersion = (id: string, version: string) => ArtifactVersion.create({ id, artifactId: "source", version, contentHash: `sha256:${id}`, contentLocation: id, createdAt: fixedTime, publishedAt: fixedTime });
+const sourceVersion = (id: string, version: string, artifactId = "source") => ArtifactVersion.create({ id, artifactId, version, contentHash: `sha256:${id}`, contentLocation: id, createdAt: fixedTime, publishedAt: fixedTime });
 
 function copyServices() {
   const artifacts: Artifact[] = [];
@@ -91,6 +91,72 @@ describe("dependency resolution", () => {
     expect(sourceArtifact.name).toBe("Source");
   });
 
+  it("uses SemVer ordering and only resolves versions of the declared target Artifact", async () => {
+    const candidates = [
+      sourceVersion("target-v190", "1.9.0", "target"),
+      sourceVersion("target-v1100", "1.10.0", "target"),
+      sourceVersion("target-v1100-rc", "1.10.0-rc.1", "target"),
+      sourceVersion("target-v200", "2.0.0", "target"),
+    ];
+    const foreignVersion = sourceVersion("foreign-v1990", "1.99.0", "other-target");
+    const queriedArtifacts: string[] = [];
+    const versionRepo = {
+      findForArtifact: async (artifactId: string) => {
+        queriedArtifacts.push(artifactId);
+        return artifactId === "target" ? candidates : [foreignVersion];
+      },
+    } as unknown as ArtifactVersionRepository;
+    const saved: DependencyResolution[] = [];
+    const dependencyRepo = { createResolution: async (record: DependencyResolution) => { saved.push(record); } } as unknown as DependencyRepository;
+    const dependency = Dependency.create({
+      id: "dependency",
+      artifactVersionId: "source-version",
+      targetArtifactId: "target",
+      declaredRange: ">=1.9.0 <2.0.0",
+      createdAt: fixedTime,
+    });
+    const versionSnapshots = candidates.map((version) => version.snapshot());
+    const service = new ResolveDependencyService(dependencyRepo, versionRepo, { next: () => "resolution" }, { now: () => fixedTime });
+
+    const result = await service.execute({ dependencies: [dependency] });
+
+    expect(queriedArtifacts).toEqual(["target"]);
+    expect(result[0]?.resolvedArtifactVersionId).toBe("target-v1100");
+    expect(result[0]?.resolvedArtifactVersionId).not.toBe(foreignVersion.id);
+    expect(dependency.declaredRange).toBe(">=1.9.0 <2.0.0");
+    expect(candidates.map((version) => version.snapshot())).toEqual(versionSnapshots);
+    expect(saved).toEqual(result);
+  });
+
+  it("does not persist partial resolution history when any dependency has no eligible version", async () => {
+    const eligibleVersion = sourceVersion("target-v1", "1.0.0", "target");
+    const versionRepo = {
+      findForArtifact: async (artifactId: string) => artifactId === "target" ? [eligibleVersion] : [],
+    } as unknown as ArtifactVersionRepository;
+    const saved: DependencyResolution[] = [];
+    const dependencyRepo = { createResolution: async (record: DependencyResolution) => { saved.push(record); } } as unknown as DependencyRepository;
+    const resolvable = Dependency.create({
+      id: "resolvable",
+      artifactVersionId: "source-version",
+      targetArtifactId: "target",
+      declaredRange: "^1.0.0",
+      createdAt: fixedTime,
+    });
+    const unresolved = Dependency.create({
+      id: "unresolved",
+      artifactVersionId: "source-version",
+      targetArtifactId: "missing-target",
+      declaredRange: "^4.0.0",
+      createdAt: fixedTime,
+    });
+    const service = new ResolveDependencyService(dependencyRepo, versionRepo, { next: () => "resolution" }, { now: () => fixedTime });
+
+    await expect(service.execute({ dependencies: [resolvable, unresolved] }))
+      .rejects.toMatchObject({ code: "DEPENDENCY_RESOLUTION_FAILED" });
+
+    expect(saved).toEqual([]);
+  });
+
   describe("version tag projection", () => {
     it("normalizes tags into immutable published content and projects the latest version", async () => {
       const deps = copyServices();
@@ -139,6 +205,80 @@ describe("dependency resolution", () => {
       expect(deps.storedContent).toHaveLength(0);
       expect(deps.versions).toHaveLength(0);
     });
+  });
+});
+
+describe("compatibility report creation", () => {
+  it("preserves report JSON and optional target Artifact Version references", async () => {
+    const source = sourceVersion("report-source-version", "1.0.0");
+    const target = sourceVersion("report-target-version", "2.0.0", "target");
+    const versions = new Map([[source.id, source], [target.id, target]]);
+    const versionRepo = {
+      findById: async (id: string) => versions.get(id) ?? null,
+    } as unknown as ArtifactVersionRepository;
+    const saved: CompatibilityReport[] = [];
+    const reportRepo: CompatibilityReportRepository = {
+      create: async (report) => { saved.push(report); },
+      findForArtifactVersion: async () => [],
+    };
+    const ids = { next: (() => { let index = 0; return () => `report-${++index}`; })() };
+    const service = new CreateCompatibilityReportService(versionRepo, reportRepo, ids, { now: () => fixedTime });
+    const report = {
+      summary: "compatible",
+      score: 0.875,
+      enabled: false,
+      checks: [{ name: "schema", passed: true, details: { labels: ["stable"], nullable: null } }],
+    };
+
+    const withoutTarget = await service.execute({ artifactVersionId: source.id, status: "compatible", report });
+    const withTarget = await service.execute({
+      artifactVersionId: source.id,
+      targetArtifactVersionId: target.id,
+      status: "incompatible",
+      report,
+    });
+
+    expect(withoutTarget).toMatchObject({
+      id: "report-1",
+      artifactVersionId: source.id,
+      targetArtifactVersionId: null,
+      status: "compatible",
+      report,
+      createdAt: fixedTime,
+    });
+    expect(withTarget).toMatchObject({
+      id: "report-2",
+      artifactVersionId: source.id,
+      targetArtifactVersionId: target.id,
+      status: "incompatible",
+      report,
+      createdAt: fixedTime,
+    });
+    expect(saved).toEqual([withoutTarget, withTarget]);
+  });
+
+  it("rejects missing source or target versions without creating a report", async () => {
+    const source = sourceVersion("report-source-version", "1.0.0");
+    const versionRepo = {
+      findById: async (id: string) => id === source.id ? source : null,
+    } as unknown as ArtifactVersionRepository;
+    const saved: CompatibilityReport[] = [];
+    const reportRepo: CompatibilityReportRepository = {
+      create: async (report) => { saved.push(report); },
+      findForArtifactVersion: async () => [],
+    };
+    const service = new CreateCompatibilityReportService(versionRepo, reportRepo, { next: () => "report" }, { now: () => fixedTime });
+    const validReport = { summary: "compatible" };
+
+    await expect(service.execute({ artifactVersionId: "missing-source", status: "compatible", report: validReport }))
+      .rejects.toMatchObject({ code: "VERSION_NOT_FOUND" });
+    await expect(service.execute({
+      artifactVersionId: source.id,
+      targetArtifactVersionId: "missing-target",
+      status: "compatible",
+      report: validReport,
+    })).rejects.toMatchObject({ code: "VERSION_NOT_FOUND" });
+    expect(saved).toEqual([]);
   });
 });
 

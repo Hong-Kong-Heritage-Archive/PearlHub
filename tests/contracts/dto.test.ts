@@ -19,4 +19,15 @@ describe("contract DTOs", () => {
     expect(parseCompatibilityReportRequest({ artifactVersionId: "version-id", status: "compatible", report: {} })).toEqual({ artifactVersionId: "version-id", status: "compatible", report: {} });
     expect(() => parsePublishVersionRequest({ version: "1.0.0", content: [], dependencies: [{}] })).toThrowError(DomainError);
   });
+
+  it("rejects malformed compatibility report requests", () => {
+    for (const value of [
+      { status: "compatible", report: {} },
+      { artifactVersionId: "version-id", report: {} },
+      { artifactVersionId: "version-id", status: "compatible", report: [] },
+      { artifactVersionId: "version-id", targetArtifactVersionId: 42, status: "compatible", report: {} },
+    ]) {
+      expect(() => parseCompatibilityReportRequest(value)).toThrowError(DomainError);
+    }
+  });
 });

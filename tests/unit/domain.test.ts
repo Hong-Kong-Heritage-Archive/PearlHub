@@ -106,6 +106,37 @@ describe("SemVer domain values", () => {
       createdAt: new Date(),
     })).toThrowError(DomainError);
   });
+
+  it.each([
+    ["2.4.3", "2.4.3", true],
+    ["2.4.3", "2.4.4", false],
+    ["~2.1.0", "2.1.9", true],
+    ["~2.1.0", "2.2.0", false],
+    ["^2.1.0", "2.4.3", true],
+    ["^2.1.0", "3.0.0", false],
+    [">=1.9.0 <2.0.0", "1.10.0", true],
+    ["^2.0.0", "2.1.0-rc.1", false],
+  ] as const)("applies SemVer range %s to version %s", (range, version, expected) => {
+    const dependency = Dependency.create({
+      id: "dependency-range-case",
+      artifactVersionId: "source-version",
+      targetArtifactId: "target-artifact",
+      declaredRange: range,
+      createdAt: new Date(),
+    });
+
+    expect(dependency.accepts(version)).toBe(expected);
+  });
+
+  it.each(["", " ", "\t"])("rejects an empty or whitespace-only dependency range", (declaredRange) => {
+    expect(() => Dependency.create({
+      id: "dependency-invalid-range",
+      artifactVersionId: "source-version",
+      targetArtifactId: "target-artifact",
+      declaredRange,
+      createdAt: new Date(),
+    })).toThrowError(DomainError);
+  });
 });
 
 describe("Pearl content", () => {
