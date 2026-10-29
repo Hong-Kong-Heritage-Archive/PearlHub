@@ -16,6 +16,7 @@ interface OpenApiSchema {
   maxLength?: number;
   maxItems?: number;
   minProperties?: number;
+  items?: OpenApiSchema;
   minimum?: number;
   maximum?: number;
   default?: unknown;
@@ -168,11 +169,14 @@ describe("canonical OpenAPI contract", () => {
     expect(artifactSchema?.properties?.status?.enum).toEqual(["active", "tombstone"]);
   });
 
-  it("strictly documents Phase 6 metadata PATCH and exact-Version dependency reads", async () => {
+  it("documents metadata PATCH, exact-Version dependencies, and compatibility reads", async () => {
     const patch = canonicalDocument.paths["/api/v1/artifacts/{artifactId}"]?.patch;
     const patchSchema = canonicalDocument.components.schemas.ArtifactMetadataPatch;
     const dependencies = canonicalDocument.paths["/api/v1/artifacts/{artifactId}/versions/{version}/dependencies"]?.get;
     const dependencySchema = canonicalDocument.components.schemas.ArtifactVersionDependencies;
+    const compatibility = canonicalDocument.paths["/api/v1/artifacts/{artifactId}/versions/{version}/compatibility"]?.get;
+    const compatibilityResponse = compatibility?.responses?.["200"]?.content?.["application/json"]?.schema;
+    const compatibilityReportSchema = resolveSchema(canonicalDocument, compatibilityResponse?.items);
 
     expect(patch?.security).toEqual([{ BearerAuth: [] }]);
     expect(patch?.responses).toHaveProperty("401");
@@ -193,11 +197,30 @@ describe("canonical OpenAPI contract", () => {
     expect(dependencySchema?.required?.slice().sort()).toEqual(["artifactId", "dependencies", "version"]);
     expect(dependencySchema?.properties?.dependencies?.type).toBe("array");
 
+    expect(compatibility?.operationId).toBe("getArtifactVersionCompatibilityReports");
+    expect(compatibility?.security).toEqual([{}, { BearerAuth: [] }]);
+    expect(compatibility?.responses).toHaveProperty("200");
+    expect(compatibility?.responses).toHaveProperty("403");
+    expect(compatibility?.responses).toHaveProperty("404");
+    expect(compatibility?.responses).toHaveProperty("410");
+    expect(compatibilityResponse?.type).toBe("array");
+    expect(compatibilityReportSchema?.required?.slice().sort()).toEqual([
+      "artifactVersionId",
+      "createdAt",
+      "id",
+      "report",
+      "status",
+      "targetArtifactVersionId",
+    ]);
+    expect(compatibilityReportSchema?.properties?.status?.enum).toBeUndefined();
+    expect(compatibilityReportSchema?.properties?.targetArtifactVersionId?.type).toEqual(["string", "null"]);
+
     const runtimeResponse = await createRuntimeApp().request("/openapi.json");
     const runtime = parse(await runtimeResponse.text()) as OpenApiDocument;
     for (const [path, method] of [
       ["/api/v1/artifacts/{artifactId}", "patch"],
       ["/api/v1/artifacts/{artifactId}/versions/{version}/dependencies", "get"],
+      ["/api/v1/artifacts/{artifactId}/versions/{version}/compatibility", "get"],
     ] as const) {
       const canonical = canonicalDocument.paths[path]?.[method];
       const actual = runtime.paths[path]?.[method];

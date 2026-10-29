@@ -3,11 +3,12 @@ import { DraftWorkflowService, UpdateArtifactMetadataService } from "../../src/a
 import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
 import { Dependency } from "../../src/domain/dependency.js";
-import type { DependencyResolution } from "../../src/domain/records.js";
+import type { CompatibilityReport, DependencyResolution } from "../../src/domain/records.js";
 import type {
   ArtifactDiscoveryRepository,
   ArtifactRepository,
   ArtifactVersionRepository,
+  CompatibilityReportRepository,
   DependencyRepository,
   DraftRepository,
   TransactionManager,
@@ -91,7 +92,7 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       .rejects.toMatchObject({ code: "ARTIFACT_NOT_FOUND" });
   });
 
-  it("returns declarations and only persisted resolution history for the exact readable Version", async () => {
+  it("returns declarations, resolutions, and reports only for the exact readable Version", async () => {
     const artifact = artifactFixture("public");
     const sourceV1 = ArtifactVersion.create({
       id: "source-v1", artifactId: artifact.id, version: "1.0.0", contentHash: "hash-1",
@@ -135,6 +136,19 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       createResolution,
       findResolutions,
     };
+    const report: CompatibilityReport = {
+      id: "report-1",
+      artifactVersionId: sourceV1.id,
+      targetArtifactVersionId: null,
+      status: "compatible",
+      report: { details: { warning: null } },
+      createdAt: now,
+    };
+    const findReports = vi.fn(async (versionId: string) => versionId === sourceV1.id ? [report] : []);
+    const compatibilityReports: CompatibilityReportRepository = {
+      create: async () => {},
+      findForArtifactVersion: findReports,
+    };
     const artifacts: ArtifactRepository = {
       findById: async () => artifact,
       findByIds: async () => [],
@@ -168,6 +182,11 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       { canRead: async () => true, canWrite: async () => true },
       discovery,
       { run: async (work) => work() },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      compatibilityReports,
     );
 
     await expect(service.getVersionDependencies({ actorId: null, artifactId: artifact.id, version: "1.0.0" }))
@@ -190,6 +209,18 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
     expect(findForVersion).toHaveBeenNthCalledWith(2, sourceV2.id);
     expect(findResolutions).toHaveBeenCalledTimes(2);
     expect(createResolution).not.toHaveBeenCalled();
+    await expect(service.getVersionCompatibilityReports({
+      actorId: null,
+      artifactId: artifact.id,
+      version: "1.0.0",
+    })).resolves.toEqual([report]);
+    await expect(service.getVersionCompatibilityReports({
+      actorId: null,
+      artifactId: artifact.id,
+      version: "2.0.0",
+    })).resolves.toEqual([]);
+    expect(findReports).toHaveBeenNthCalledWith(1, sourceV1.id);
+    expect(findReports).toHaveBeenNthCalledWith(2, sourceV2.id);
   });
 
   it("does not expose private dependencies to anonymous callers or substitute a missing Version", async () => {

@@ -206,7 +206,14 @@ Artifact metadata.
 | Method | Endpoint | Purpose | Status |
 |---|---|---|---|
 | GET | `/artifacts/{artifactId}/versions/{version}/dependencies` | Get exact-Version declarations and stored resolution history | Implemented |
-| GET | `/artifacts/{artifactId}/versions/{version}/compatibility` | Get compatibility reports | Planned |
+| GET | `/artifacts/{artifactId}/versions/{version}/compatibility` | Get persisted compatibility reports for the exact Version | Implemented |
+
+The compatibility endpoint returns an array of persisted reports for the
+requested source Artifact Version, ordered by creation time and report ID.
+Each item includes its source Version ID, optional target Version ID, free-form
+status, structured report JSON, and creation time. An empty array means no
+reports are stored. The read follows the Version's Artifact visibility rules
+and does not create reports or recompute compatibility.
 
 ### Search
 

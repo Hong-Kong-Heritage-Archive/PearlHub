@@ -84,6 +84,7 @@ export interface DependencyRepository {
 
 export interface CompatibilityReportRepository {
   create(report: CompatibilityReport): Promise<void>;
+  // Return reports ordered by createdAt, then id, for stable API results.
   findForArtifactVersion(versionId: string): Promise<CompatibilityReport[]>;
 }
 

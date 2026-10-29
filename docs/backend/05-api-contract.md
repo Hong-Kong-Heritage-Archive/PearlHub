@@ -31,6 +31,7 @@ system.
 | GET | `/artifacts/{artifactId}/versions` | List published versions |
 | GET | `/artifacts/{artifactId}/versions/{version}` | Read a complete immutable version snapshot |
 | GET | `/artifacts/{artifactId}/versions/{version}/dependencies` | Read declarations and persisted resolution history for the exact version |
+| GET | `/artifacts/{artifactId}/versions/{version}/compatibility` | Read persisted compatibility reports for the exact version |
 | PATCH | `/artifacts/{artifactId}` | Owner-only partial metadata update; currently visibility only |
 | POST | `/artifacts/{artifactId}/versions/{version}/work-copy` | Create the owner's editable Draft from a version |
 | POST | `/artifacts/{artifactId}/clone` | Create an owner-bound Draft from an exact readable Version without lineage |
@@ -64,8 +65,9 @@ metadata. Existing Artifact/Version visibility rules apply.
 ## Not implemented
 
 Direct Version creation; Fork, Import, dependency resolution, and compatibility
-reports remain outside this slice. Published versions have no update or delete
-operation.
+report creation remain outside this slice. Compatibility-report reads return
+stored reports only; they do not recalculate compatibility or write data.
+Published versions have no update or delete operation.
 
 ## API error shape
 

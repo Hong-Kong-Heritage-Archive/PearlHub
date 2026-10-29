@@ -82,6 +82,7 @@ export class DraftWorkflowService implements DraftWorkflow, ArtifactReadService 
     private readonly clock = systemClock,
     private readonly lineage?: LineageRepository,
     private readonly provenances?: ProvenanceRepository,
+    private readonly compatibilityReports?: CompatibilityReportRepository,
   ) {}
 
   async create(input: { actorId: string; name: string; slug: string; visibility: ArtifactVisibility; content: DraftContent; provenance?: DraftProvenance | null }): Promise<Draft> {
@@ -311,6 +312,19 @@ export class DraftWorkflowService implements DraftWorkflow, ArtifactReadService 
     }));
 
     return { artifactId: artifact.id, version: version.version, dependencies: recordedDependencies };
+  }
+
+  async getVersionCompatibilityReports(input: { actorId: string | null; artifactId: string; version: string }): Promise<CompatibilityReport[]> {
+    const artifact = await this.readableArtifactForDetail(input.actorId, input.artifactId);
+    const version = await this.versions.findByArtifactAndVersion(artifact.id, input.version);
+    if (!version) throw new DomainError("VERSION_NOT_FOUND", "Artifact Version was not found.");
+    if (!this.compatibilityReports) throw new Error("Compatibility report reads are not configured.");
+
+    const reports = await this.compatibilityReports.findForArtifactVersion(version.id);
+    if (reports.some((report) => report.artifactVersionId !== version.id)) {
+      throw new Error("Compatibility report repository returned a report for a different Artifact Version.");
+    }
+    return reports;
   }
 
   async getArtifact(input: { actorId: string | null; artifactId: string }): Promise<Artifact> {

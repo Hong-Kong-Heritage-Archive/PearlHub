@@ -1,5 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import type { ArtifactSummary } from "../domain/discovery.js";
+import type { CompatibilityReport } from "../domain/records.js";
 
 export interface CreateArtifactRequest {
   name: string;
@@ -162,6 +163,17 @@ export function toArtifactResponse(artifact: {
     status: artifact.status,
     createdAt: artifact.createdAt.toISOString(),
     updatedAt: artifact.updatedAt.toISOString(),
+  };
+}
+
+export function toCompatibilityReportResponse(report: CompatibilityReport): CompatibilityReportResponse {
+  return {
+    id: report.id,
+    artifactVersionId: report.artifactVersionId,
+    targetArtifactVersionId: report.targetArtifactVersionId,
+    status: report.status,
+    report: report.report,
+    createdAt: report.createdAt.toISOString(),
   };
 }
 

@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import type { ListArtifactsService } from "../application/discovery.js";
 import type { ArtifactReadService, DeleteArtifactService, DraftWorkflow, DraftWorkflowService, ImportDraftService, UpdateArtifactMetadataService } from "../application/services.js";
 import { parseArtifactDiscoveryQuery } from "../contracts/discovery.js";
-import { toArtifactDiscoveryResponse, toArtifactLineageResponse, toArtifactResponse } from "../contracts/dto.js";
+import { toArtifactDiscoveryResponse, toArtifactLineageResponse, toArtifactResponse, toCompatibilityReportResponse } from "../contracts/dto.js";
 import { DomainError } from "../domain/errors.js";
 import type { AuthenticatedPrincipal, Authenticator } from "./authentication.js";
 import { mapHttpError } from "./error-mapping.js";
@@ -93,6 +93,14 @@ const artifactVersionDependenciesResponseSchema = z.object({
     }).strict()),
   }).strict()),
 }).openapi("ArtifactVersionDependencies");
+const compatibilityReportResponseSchema = z.object({
+  id: z.string(),
+  artifactVersionId: z.string(),
+  targetArtifactVersionId: z.string().nullable(),
+  status: z.string(),
+  report: z.record(z.string(), z.unknown()),
+  createdAt: z.string().datetime(),
+}).strict().openapi("CompatibilityReport");
 
 const artifactLineageEntrySchema = z.object({
   id: z.string(),
@@ -470,6 +478,24 @@ const getVersionDependenciesRoute = createRoute({
     500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
   },
 });
+const getVersionCompatibilityReportsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/artifacts/{artifactId}/versions/{version}/compatibility",
+  tags: ["Compatibility"],
+  summary: "Read compatibility reports for a published version",
+  description: "Returns persisted compatibility reports for exactly the requested source Artifact Version. This read does not recompute compatibility or mutate data.",
+  operationId: "getArtifactVersionCompatibilityReports",
+  security: [{}, { BearerAuth: [] }],
+  request: { params: artifactVersionParams },
+  responses: {
+    200: { description: "Persisted compatibility reports, ordered by creation time and report ID; an empty array means no reports are stored.", content: { "application/json": { schema: z.array(compatibilityReportResponseSchema) } } },
+    400: { description: "Invalid Artifact identifier or Version.", content: { "application/json": { schema: errorResponseSchema } } },
+    403: { description: "The caller cannot read this Artifact.", content: { "application/json": { schema: errorResponseSchema } } },
+    404: { description: "Artifact or Version was not found or is not visible to the caller.", content: { "application/json": { schema: errorResponseSchema } } },
+    410: { description: "Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
+    500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
 const workCopyRoute = createRoute({
   method: "post", path: "/api/v1/artifacts/{artifactId}/versions/{version}/work-copy", tags: ["Drafts"], summary: "Create a Draft work-copy",
   security: [{ BearerAuth: [] }], request: { params: artifactVersionParams },
@@ -486,6 +512,7 @@ export interface HttpAppDependencies {
   listArtifacts: Pick<ListArtifactsService, "execute">;
   artifactReads?: ArtifactReadService;
   artifactVersionDependencies?: Pick<DraftWorkflowService, "getVersionDependencies">;
+  artifactVersionCompatibilityReports?: Pick<DraftWorkflowService, "getVersionCompatibilityReports">;
   updateArtifactMetadata?: Pick<UpdateArtifactMetadataService, "execute">;
   drafts?: DraftWorkflow;
   deleteArtifact?: Pick<DeleteArtifactService, "execute">;
@@ -686,6 +713,17 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
         })),
       })),
     }, 200);
+  });
+  app.openapi(getVersionCompatibilityReportsRoute, async (context) => {
+    if (!dependencies.artifactVersionCompatibilityReports) throw new Error("Artifact Version compatibility reads are not configured.");
+    const principal = await dependencies.authenticator.authenticate(context.req.raw.headers);
+    const { artifactId, version } = await context.req.valid("param");
+    const reports = await dependencies.artifactVersionCompatibilityReports.getVersionCompatibilityReports({
+      actorId: principal?.userId ?? null,
+      artifactId,
+      version,
+    });
+    return context.json(reports.map(toCompatibilityReportResponse), 200);
   });
 
   app.onError((error, context) => {

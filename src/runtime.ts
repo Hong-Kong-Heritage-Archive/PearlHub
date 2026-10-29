@@ -6,6 +6,7 @@ import {
   PostgresArtifactDiscoveryRepository,
   PostgresDraftRepository,
   PostgresDependencyRepository,
+  PostgresCompatibilityReportRepository,
   PostgresArtifactRepository,
   PostgresArtifactVersionRepository,
   PostgresDiscoveryReindexLock,
@@ -51,6 +52,7 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
       canWrite: async (actorId: string, artifact: import("./domain/artifact.js").Artifact) => artifact.ownerId === actorId,
     };
     const dependencyRepository = new PostgresDependencyRepository(transactions.database);
+    const compatibilityReports = new PostgresCompatibilityReportRepository(transactions.database);
     const drafts = new DraftWorkflowService(
       new PostgresDraftRepository(transactions.database),
       artifacts,
@@ -63,6 +65,7 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
       undefined,
       lineage,
       provenances,
+      compatibilityReports,
     );
     const deleteArtifact = new DeleteArtifactService(artifacts, access, undefined, transactions);
     const updateArtifactMetadata = new UpdateArtifactMetadataService(artifacts, access, undefined, transactions);
@@ -72,6 +75,7 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
       app: createHttpApp({
         artifactReads: drafts,
         artifactVersionDependencies: drafts,
+        artifactVersionCompatibilityReports: drafts,
         drafts,
         deleteArtifact,
         updateArtifactMetadata,
