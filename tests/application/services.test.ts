@@ -7,6 +7,7 @@ import { CreateCompatibilityReportService, DeleteArtifactService, PublishVersion
 import type { ArtifactDiscoveryRepository, ArtifactRepository, ArtifactVersionRepository, CompatibilityReportRepository, DependencyRepository, LineageRepository, TransactionManager } from "../../src/ports/repositories.js";
 
 const fixedTime = new Date("2026-01-01T00:00:00Z");
+const noOpTransactions: TransactionManager = { run: async (work) => work() };
 const sourceArtifact = Artifact.create({ id: "source", ownerId: "owner", name: "Source", slug: "source", visibility: "public", createdAt: fixedTime });
 const sourceVersion = (id: string, version: string, artifactId = "source") => ArtifactVersion.create({ id, artifactId, version, contentHash: `sha256:${id}`, contentLocation: id, createdAt: fixedTime, publishedAt: fixedTime });
 
@@ -83,7 +84,7 @@ describe("dependency resolution", () => {
     const saved: unknown[] = [];
     const dependencyRepo = { createResolution: async (record: unknown) => { saved.push(record); } } as unknown as DependencyRepository;
     const dependency = Dependency.create({ id: "dependency", artifactVersionId: "source-version", targetArtifactId: "source", declaredRange: "^2.1.0", createdAt: fixedTime });
-    const service = new ResolveDependencyService(dependencyRepo, versionRepo, { next: () => "resolution" }, { now: () => fixedTime });
+    const service = new ResolveDependencyService(dependencyRepo, versionRepo, noOpTransactions, { next: () => "resolution" }, { now: () => fixedTime });
     const result = await service.execute({ dependencies: [dependency] });
 
     expect(result[0]?.resolvedArtifactVersionId).toBe("v243");
@@ -116,7 +117,7 @@ describe("dependency resolution", () => {
       createdAt: fixedTime,
     });
     const versionSnapshots = candidates.map((version) => version.snapshot());
-    const service = new ResolveDependencyService(dependencyRepo, versionRepo, { next: () => "resolution" }, { now: () => fixedTime });
+    const service = new ResolveDependencyService(dependencyRepo, versionRepo, noOpTransactions, { next: () => "resolution" }, { now: () => fixedTime });
 
     const result = await service.execute({ dependencies: [dependency] });
 
@@ -149,7 +150,7 @@ describe("dependency resolution", () => {
       declaredRange: "^4.0.0",
       createdAt: fixedTime,
     });
-    const service = new ResolveDependencyService(dependencyRepo, versionRepo, { next: () => "resolution" }, { now: () => fixedTime });
+    const service = new ResolveDependencyService(dependencyRepo, versionRepo, noOpTransactions, { next: () => "resolution" }, { now: () => fixedTime });
 
     await expect(service.execute({ dependencies: [resolvable, unresolved] }))
       .rejects.toMatchObject({ code: "DEPENDENCY_RESOLUTION_FAILED" });
@@ -317,7 +318,7 @@ describe("application transaction boundaries", () => {
     const targetVersion = sourceVersion("target-v1", "1.2.0");
     const targetVersions = { findForArtifact: async () => [targetVersion] } as unknown as ArtifactVersionRepository;
     const dependency = Dependency.create({ id: "dependency", artifactVersionId: "source-v1", targetArtifactId: "source", declaredRange: "^1.0.0", createdAt: fixedTime });
-    await new ResolveDependencyService(resolutionRepo, targetVersions, { next: () => "resolution" }, { now: () => fixedTime }, resolutionTracker.transactions).execute({ dependencies: [dependency] });
+    await new ResolveDependencyService(resolutionRepo, targetVersions, resolutionTracker.transactions, { next: () => "resolution" }, { now: () => fixedTime }).execute({ dependencies: [dependency] });
     expect(resolutionTracker.runCount()).toBe(1);
     expect(resolutionWrites).toEqual([true]);
   });

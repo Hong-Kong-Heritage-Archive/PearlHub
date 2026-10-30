@@ -11,6 +11,8 @@ interface OpenApiSchema {
   required?: string[];
   additionalProperties?: boolean | OpenApiSchema;
   enum?: string[];
+  format?: string;
+  description?: string;
   readOnly?: boolean;
   minLength?: number;
   maxLength?: number;
@@ -30,6 +32,7 @@ interface OpenApiOperation {
   parameters?: Array<{
     name: string;
     in: string;
+    description?: string;
     style?: string;
     explode?: boolean;
     schema?: OpenApiSchema;
@@ -192,8 +195,13 @@ describe("canonical OpenAPI contract", () => {
 
     expect(dependencies?.security).toEqual([{}, { BearerAuth: [] }]);
     expect(dependencies?.responses).toHaveProperty("200");
+    expect(dependencies?.responses).toHaveProperty("400");
     expect(dependencies?.responses).toHaveProperty("404");
     expect(dependencies?.responses).toHaveProperty("410");
+    expect(dependencies?.parameters?.find((parameter) => parameter.name === "artifactId")?.schema)
+      .toMatchObject({ type: "string", format: "uuid" });
+    expect(dependencies?.parameters?.find((parameter) => parameter.name === "version")?.schema?.description)
+      .toContain("SemVer 2.x");
     expect(dependencySchema?.required?.slice().sort()).toEqual(["artifactId", "dependencies", "version"]);
     expect(dependencySchema?.properties?.dependencies?.type).toBe("array");
 
@@ -226,6 +234,9 @@ describe("canonical OpenAPI contract", () => {
       const actual = runtime.paths[path]?.[method];
       expect(actual?.security).toEqual(canonical?.security);
       expect(Object.keys(actual?.responses ?? {}).sort()).toEqual(Object.keys(canonical?.responses ?? {}).sort());
+      if (path === "/api/v1/artifacts/{artifactId}/versions/{version}/dependencies") {
+        expect(actual?.parameters).toEqual(canonical?.parameters);
+      }
     }
   });
 

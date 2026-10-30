@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DeleteArtifactService, DraftWorkflowService, ImportDraftService, PublishVersionService, RestoreArtifactService } from "../../src/application/services.js";
+import { DeleteArtifactService, DraftWorkflowService, ImportDraftService, PublishVersionService, ResolveDependencyService, RestoreArtifactService } from "../../src/application/services.js";
 import { baselinePostgresMigrations, runPostgresMigrations } from "../../src/adapters/postgres-migrations.js";
 import { PostgresArtifactDiscoveryRepository, PostgresArtifactRepository, PostgresArtifactVersionRepository, PostgresCompatibilityReportRepository, PostgresDependencyRepository, PostgresDraftRepository, PostgresLineageRepository, PostgresProvenanceRepository, PostgresTransactionManager, PostgresUserIdentityRepository } from "../../src/adapters/postgres.js";
 import { MemoryArtifactContentStore } from "../../src/adapters/content-store.js";
@@ -890,6 +890,76 @@ describe("PostgreSQL persistence hardening", () => {
     const dependencies = new PostgresDependencyRepository(pool!);
     await dependencies.createResolution({ id: randomUUID(), dependencyId, resolvedArtifactVersionId: versionA, resolvedAt: new Date() });
     await expect(dependencies.createResolution({ id: randomUUID(), dependencyId, resolvedArtifactVersionId: versionB, resolvedAt: new Date() })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+  });
+
+  it("rolls back all new dependency resolutions when a later persistence write fails", async () => {
+    const sourceArtifactId = await createArtifact();
+    const targetArtifactA = await createArtifact();
+    const targetArtifactB = await createArtifact();
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    const targetVersionA = await createVersion(targetArtifactA, "2.1.0");
+    const targetVersionB = await createVersion(targetArtifactB, "2.2.0");
+    const dependencyA = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetArtifactA,
+      declaredRange: "^2.0.0",
+      createdAt: new Date(),
+    });
+    const dependencyB = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetArtifactB,
+      declaredRange: "^2.0.0",
+      createdAt: new Date(),
+    });
+    const repository = new PostgresDependencyRepository(pool!);
+    await repository.create(dependencyA);
+    await repository.create(dependencyB);
+
+    const previousA = {
+      id: randomUUID(),
+      dependencyId: dependencyA.id,
+      resolvedArtifactVersionId: targetVersionA,
+      resolvedAt: new Date("2026-01-01T00:00:00.000Z"),
+    };
+    const previousB = {
+      id: randomUUID(),
+      dependencyId: dependencyB.id,
+      resolvedArtifactVersionId: targetVersionB,
+      resolvedAt: new Date("2026-01-02T00:00:00.000Z"),
+    };
+    await repository.createResolution(previousA);
+    await repository.createResolution(previousB);
+
+    const transactions = new PostgresTransactionManager(pool!);
+    const transactionalDependencies = new PostgresDependencyRepository(transactions.database);
+    const versions = new PostgresArtifactVersionRepository(transactions.database);
+    const service = new ResolveDependencyService(transactionalDependencies, versions, transactions);
+
+    try {
+      await pool!.query(`
+        CREATE FUNCTION fail_test_dependency_resolution() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'injected dependency resolution persistence failure' USING ERRCODE = 'P0001';
+        END;
+        $$;
+        CREATE TRIGGER fail_later_test_dependency_resolution
+        BEFORE INSERT ON dependency_resolutions
+        FOR EACH ROW
+        WHEN (NEW.dependency_id = '${dependencyB.id}'::uuid)
+        EXECUTE FUNCTION fail_test_dependency_resolution();
+      `);
+
+      await expect(service.execute({ dependencies: [dependencyA, dependencyB] }))
+        .rejects.toMatchObject({ code: "P0001", message: "injected dependency resolution persistence failure" });
+    } finally {
+      await pool!.query("DROP TRIGGER IF EXISTS fail_later_test_dependency_resolution ON dependency_resolutions");
+      await pool!.query("DROP FUNCTION IF EXISTS fail_test_dependency_resolution()");
+    }
+
+    expect(await repository.findResolutions(dependencyA.id)).toEqual([previousA]);
+    expect(await repository.findResolutions(dependencyB.id)).toEqual([previousB]);
   });
 
   it("enforces foreign keys for all persisted relationships", async () => {

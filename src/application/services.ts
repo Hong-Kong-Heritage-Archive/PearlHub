@@ -564,7 +564,7 @@ export class ImportDraftService {
 }
 
 export class ResolveDependencyService {
-  constructor(private readonly dependencies: DependencyRepository, private readonly versions: ArtifactVersionRepository, private readonly ids = uuidGenerator, private readonly clock = systemClock, private readonly transactions?: TransactionManager) {}
+  constructor(private readonly dependencies: DependencyRepository, private readonly versions: ArtifactVersionRepository, private readonly transactions: TransactionManager, private readonly ids = uuidGenerator, private readonly clock = systemClock) {}
   async execute(input: { dependencies: Dependency[] }): Promise<DependencyResolution[]> {
     const resolutions: DependencyResolution[] = [];
     for (const dependency of input.dependencies) {
@@ -578,7 +578,7 @@ export class ResolveDependencyService {
       resolutions.push({ id: this.ids.next(), dependencyId: dependency.id, resolvedArtifactVersionId: selected.id, resolvedAt: this.clock.now() });
     }
     const persist = async () => { for (const resolution of resolutions) await this.dependencies.createResolution(resolution); };
-    if (this.transactions) await this.transactions.run(persist); else await persist();
+    await this.transactions.run(persist);
     return resolutions;
   }
   private async listCandidates(artifactId: string): Promise<ArtifactVersion[]> {

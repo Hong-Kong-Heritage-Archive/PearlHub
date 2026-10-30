@@ -10,7 +10,7 @@ const authenticator = new DevelopmentOnlyFakeAuthenticator(ownerId, "owner-token
   { userId: "non-owner", token: "non-owner-token" },
 ]);
 const artifact = Artifact.create({
-  id: "artifact-1",
+  id: "00000000-0000-4000-8000-000000000001",
   ownerId,
   name: "Phase Six Pearl",
   slug: "phase-six-pearl",
@@ -120,6 +120,28 @@ describe("PATCH /api/v1/artifacts/{artifactId}", () => {
 });
 
 describe("GET /api/v1/artifacts/{artifactId}/versions/{version}/dependencies", () => {
+  it("rejects malformed UUID and SemVer path parameters before dependency lookup", async () => {
+    const getDependencies = vi.fn(async () => ({
+      artifactId: artifact.id,
+      version: "1.2.0",
+      dependencies: [],
+    }));
+    const app = makeApp(undefined, getDependencies);
+
+    const malformedArtifactId = await app.request(
+      "/api/v1/artifacts/not-a-uuid/versions/1.2.0/dependencies",
+    );
+    expect(malformedArtifactId.status).toBe(400);
+    expect(await malformedArtifactId.json()).toMatchObject({ error: { code: "INVALID_REQUEST" } });
+
+    const malformedVersion = await app.request(
+      `/api/v1/artifacts/${artifact.id}/versions/v1/dependencies`,
+    );
+    expect(malformedVersion.status).toBe(400);
+    expect(await malformedVersion.json()).toMatchObject({ error: { code: "INVALID_SEMVER" } });
+    expect(getDependencies).not.toHaveBeenCalled();
+  });
+
   it("passes the exact requested Version and returns only recorded target identifiers and resolutions", async () => {
     const getDependencies = vi.fn(async () => ({
       artifactId: artifact.id,

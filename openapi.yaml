@@ -955,11 +955,11 @@ paths:
     get:
       tags: [Dependencies]
       summary: Read dependencies for an exact published version
-      description: >-
-        Returns only declarations stored for the exact requested Version and
-        any persisted resolution history associated with those declarations.
-        Resolutions are not calculated and this endpoint performs no writes.
       operationId: getArtifactVersionDependencies
+      description: >-
+        Returns declarations and persisted resolution history for exactly the
+        requested Artifact Version. The path requires a UUID and strict SemVer
+        2.x version. This read does not resolve dependencies or mutate data.
       security:
         - {}
         - BearerAuth: []
@@ -969,13 +969,15 @@ paths:
           required: true
           schema:
             type: string
-            minLength: 1
+            format: uuid
         - name: version
           in: path
           required: true
+          description: Exact SemVer 2.x version.
           schema:
             type: string
             minLength: 1
+            description: Exact SemVer 2.x version.
       responses:
         "200":
           description: Recorded declarations and persisted resolution history, or an empty dependency list.

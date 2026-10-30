@@ -116,6 +116,12 @@ Fields:
 
 The declared range is a SemVer range such as `^2.1.0`.
 
+Dependency resolution follows SemVer precedence, not lexical string ordering.
+Prerelease versions are excluded by default; the resolver selects the highest
+eligible stable version satisfying an ordinary declared range. A range that
+explicitly references a prerelease is evaluated using the existing SemVer
+matching behavior; there is no separate prerelease opt-in.
+
 A dependency resolution records:
 
 - declared range through the dependency

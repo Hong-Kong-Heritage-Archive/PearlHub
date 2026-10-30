@@ -91,6 +91,9 @@ Dependency resolution records both:
 - resolved version
 
 Playground / Export may resolve the latest version satisfying the declared range.
+Resolution uses SemVer precedence rather than lexical string ordering.
+Prerelease versions are excluded by default; ranges that explicitly reference a
+prerelease follow the existing SemVer matching behavior.
 
 ### Compatibility
 

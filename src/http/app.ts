@@ -5,6 +5,7 @@ import type { ArtifactReadService, DeleteArtifactService, DraftWorkflow, DraftWo
 import { parseArtifactDiscoveryQuery } from "../contracts/discovery.js";
 import { toArtifactDiscoveryResponse, toArtifactLineageResponse, toArtifactResponse, toCompatibilityReportResponse } from "../contracts/dto.js";
 import { DomainError } from "../domain/errors.js";
+import { parseSemVer } from "../domain/semver.js";
 import type { AuthenticatedPrincipal, Authenticator } from "./authentication.js";
 import { mapHttpError } from "./error-mapping.js";
 
@@ -66,6 +67,10 @@ const draftSummaryResponseSchema = z.object({
 }).openapi("DraftSummary");
 const draftIdParams = z.object({ draftId: z.string().min(1) });
 const artifactVersionParams = z.object({ artifactId: z.string().min(1), version: z.string().min(1) });
+const dependencyVersionParams = z.object({
+  artifactId: z.string().uuid(),
+  version: z.string().min(1).openapi({ description: "Exact SemVer 2.x version." }),
+});
 const artifactIdParams = z.object({ artifactId: z.string().min(1) });
 
 const artifactResponseSchema = z.object({
@@ -465,10 +470,10 @@ const getVersionDependenciesRoute = createRoute({
   path: "/api/v1/artifacts/{artifactId}/versions/{version}/dependencies",
   tags: ["Dependencies"],
   summary: "Read dependencies for a published version",
-  description: "Returns declarations and persisted resolution history for exactly the requested Artifact Version. This read does not resolve dependencies or mutate data.",
+  description: "Returns declarations and persisted resolution history for exactly the requested Artifact Version. The path requires a UUID and strict SemVer 2.x version. This read does not resolve dependencies or mutate data.",
   operationId: "getArtifactVersionDependencies",
   security: [{}, { BearerAuth: [] }],
-  request: { params: artifactVersionParams },
+  request: { params: dependencyVersionParams },
   responses: {
     200: { description: "Recorded declarations and any stored resolution history.", content: { "application/json": { schema: artifactVersionDependenciesResponseSchema } } },
     400: { description: "Invalid Artifact identifier or Version.", content: { "application/json": { schema: errorResponseSchema } } },
@@ -693,9 +698,10 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
     return context.json(toVersionResponse(result.artifact, result.version, requireCompleteSnapshot(result.version.contentSnapshot)), 200);
   });
   app.openapi(getVersionDependenciesRoute, async (context) => {
+    const { artifactId, version } = context.req.valid("param");
+    parseSemVer(version);
     if (!dependencies.artifactVersionDependencies) throw new Error("Artifact Version dependency reads are not configured.");
     const principal = await dependencies.authenticator.authenticate(context.req.raw.headers);
-    const { artifactId, version } = await context.req.valid("param");
     const result = await dependencies.artifactVersionDependencies.getVersionDependencies({
       actorId: principal?.userId ?? null,
       artifactId,

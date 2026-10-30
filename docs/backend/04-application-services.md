@@ -164,7 +164,8 @@ Given dependency declarations:
 
 1. interpret SemVer ranges
 2. find compatible Artifact Versions
-3. choose a resolved version according to resolver policy
+3. choose the highest eligible version by SemVer precedence, not lexical
+   string ordering; prerelease versions are excluded by default
 4. record declared range and resolved Artifact Version
 
 The resolver must never mutate a published Artifact Version.
