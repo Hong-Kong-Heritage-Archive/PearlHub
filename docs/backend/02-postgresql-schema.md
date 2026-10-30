@@ -196,6 +196,17 @@ The transaction owner must create the run and its items in the same transaction.
 The database prevents adding or mutating source declarations after a run exists,
 so a completed run's item set cannot be extended later.
 
+Migration 008 serializes run creation and dependency declaration changes with a
+row-level `FOR UPDATE` lock on the source `artifact_versions` row. The
+`dependency_resolution_runs_lock_source` trigger acquires it before a run is
+inserted. The `dependencies_resolution_runs_immutable` trigger acquires the same
+lock before dependency INSERT, UPDATE, or DELETE and before checking for an
+existing run. An UPDATE locks both its old and new source-version rows in
+ascending ID order. The lock is held through commit or rollback: a mutation
+that wins first completes before run creation can establish its item set; run
+creation that wins first causes the waiting mutation to observe the committed
+run and be rejected.
+
 Run rows and resolution history rows reject update, delete, and truncate. The
 run-aware repository operations do not start transactions themselves. The
 existing resolver is intentionally not wired to these operations in this phase.
@@ -253,6 +264,7 @@ Checks enforce Artifact name length, slug format, visibility values, status valu
 | `dependency_resolution_runs_no_update_or_delete` / `dependency_resolution_runs_no_truncate` | Prevent modification or removal of persisted run records. |
 | `dependency_resolutions_no_update_or_delete` / `dependency_resolutions_no_truncate` | Preserve resolution history as append-only records. |
 | `dependencies_resolution_runs_immutable` | Prevents changing source declarations after a resolution run exists. |
+| `dependency_resolution_runs_lock_source` | Locks the source Artifact Version before a resolution run is inserted. |
 | `dependency_resolution_runs_complete` / `dependency_resolution_items_complete` | Deferred checks require exactly one item per direct source dependency at commit; empty runs are valid. |
 | `tombstone_snapshots_no_update_or_delete` | Rejects updates and deletes of tombstone snapshots. |
 | `tombstone_snapshots_no_truncate` | Rejects truncating the snapshot table. |
@@ -268,6 +280,7 @@ trigger, and composite keys/foreign keys for dependency-resolution target integr
 source-version lineage references, and immutable lifecycle snapshots. Migration 005 adds
 Draft persistence and version content snapshots. Migration 007 adds resolution-run
 persistence, integrity and immutability triggers, and run-aware tombstone snapshots.
+Migration 008 serializes run creation against dependency INSERT, UPDATE, and DELETE.
 
 ## Indexes
 

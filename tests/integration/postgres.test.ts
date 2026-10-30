@@ -43,6 +43,19 @@ function requiredTestDatabaseUrl(): string {
   return value;
 }
 
+async function waitForTransactionBlocker(pool: Pool, blockedPid: number, blockerPid: number): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const result = await pool.query<{ blocked: boolean }>(
+      "SELECT $2::integer = ANY(pg_blocking_pids($1::integer)) AS blocked",
+      [blockedPid, blockerPid],
+    );
+    if (result.rows[0]?.blocked) return;
+    await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 10));
+  }
+  throw new Error(`Backend ${blockedPid} did not block on backend ${blockerPid} within 5 seconds.`);
+}
+
 const databaseUrl = requiredTestDatabaseUrl();
 const adminPool = new Pool({ connectionString: databaseUrl });
 const schema = `pearlhub_test_${randomUUID().replaceAll("-", "")}`;
@@ -80,12 +93,13 @@ describe("PostgreSQL persistence hardening", () => {
       "005_drafts_and_version_snapshots.sql",
       "006_draft_origins.sql",
       "007_dependency_resolution_runs.sql",
+      "008_dependency_resolution_concurrency.sql",
     ]);
     expect(repeatedMigrationRun).toEqual([]);
     const ledger = await pool.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM schema_migrations",
     );
-    expect(ledger.rows[0]?.count).toBe(7);
+    expect(ledger.rows[0]?.count).toBe(8);
   });
 
   it("baselines a complete manually migrated schema without rerunning SQL", async () => {
@@ -106,6 +120,7 @@ describe("PostgreSQL persistence hardening", () => {
         "005_drafts_and_version_snapshots.sql",
         "006_draft_origins.sql",
         "007_dependency_resolution_runs.sql",
+        "008_dependency_resolution_concurrency.sql",
       ]) {
         const sql = await readFile(resolve(process.cwd(), "migrations", migrationName), "utf8");
         await baselinePool.query(sql);
@@ -119,6 +134,7 @@ describe("PostgreSQL persistence hardening", () => {
         "005_drafts_and_version_snapshots.sql",
         "006_draft_origins.sql",
         "007_dependency_resolution_runs.sql",
+        "008_dependency_resolution_concurrency.sql",
       ]);
       expect(await runPostgresMigrations(baselinePool)).toEqual([]);
     } finally {
@@ -127,7 +143,7 @@ describe("PostgreSQL persistence hardening", () => {
     }
   });
 
-  it("preserves ungrouped legacy resolution history when applying the run migration", async () => {
+  it("preserves ungrouped legacy resolution history when applying the run migrations", async () => {
     const legacySchema = `pearlhub_legacy_${randomUUID().replaceAll("-", "")}`;
     const legacyPool = new Pool({
       connectionString: databaseUrl,
@@ -176,6 +192,8 @@ describe("PostgreSQL persistence hardening", () => {
 
       const migration = await readFile(resolve(process.cwd(), "migrations", "007_dependency_resolution_runs.sql"), "utf8");
       await legacyPool.query(migration);
+      const concurrencyMigration = await readFile(resolve(process.cwd(), "migrations", "008_dependency_resolution_concurrency.sql"), "utf8");
+      await legacyPool.query(concurrencyMigration);
 
       const dependencies = new PostgresDependencyRepository(legacyPool);
       expect(await dependencies.findResolutions(dependencyId)).toEqual([{
@@ -596,7 +614,7 @@ describe("PostgreSQL persistence hardening", () => {
     expect(triggers.rows.map((row) => row.tgname)).toEqual([
       "artifact_versions_immutable", "artifacts_identity_immutable", "artifacts_no_physical_delete",
       "dependencies_resolution_runs_immutable", "dependency_resolution_items_complete", "dependency_resolution_runs_complete",
-      "dependency_resolution_runs_no_truncate", "dependency_resolution_runs_no_update_or_delete",
+      "dependency_resolution_runs_lock_source", "dependency_resolution_runs_no_truncate", "dependency_resolution_runs_no_update_or_delete",
       "dependency_resolutions_no_truncate", "dependency_resolutions_no_update_or_delete", "dependency_resolutions_set_target",
       "tombstone_snapshots_no_truncate", "tombstone_snapshots_no_update_or_delete",
     ]);
@@ -918,6 +936,10 @@ describe("PostgreSQL persistence hardening", () => {
       declaredRange: "^2.0.0",
       createdAt: new Date(),
     }))).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(pool!.query("UPDATE dependencies SET declared_range='^9.0.0' WHERE id=$1", [dependencyA.id]))
+      .rejects.toMatchObject({ code: "55000", constraint: "dependencies_resolution_runs_immutable" });
+    await expect(pool!.query("DELETE FROM dependencies WHERE id=$1", [dependencyA.id]))
+      .rejects.toMatchObject({ code: "55000", constraint: "dependencies_resolution_runs_immutable" });
 
     await expect(pool!.query("UPDATE dependency_resolution_runs SET created_at=now() WHERE id=$1", [run.id]))
       .rejects.toMatchObject({ code: "55000", constraint: "dependency_resolution_runs_immutable" });
@@ -929,6 +951,15 @@ describe("PostgreSQL persistence hardening", () => {
       .rejects.toMatchObject({ code: "55000", constraint: "dependency_resolutions_immutable" });
     await expect(pool!.query("TRUNCATE dependency_resolutions"))
       .rejects.toMatchObject({ code: "55000", constraint: "dependency_resolutions_immutable" });
+    await expect(pool!.query("TRUNCATE dependency_resolution_runs"))
+      .rejects.toMatchObject({ code: "0A000" });
+    await expect(pool!.query("TRUNCATE dependency_resolution_runs CASCADE"))
+      .rejects.toMatchObject({ code: "55000" });
+    expect((await dependencies.findRunById(run.id))?.snapshot()).toEqual(run.snapshot());
+    expect(await dependencies.findResolutionsForRun(run.id)).toEqual([
+      { ...itemA, runId: run.id },
+      { ...itemB, runId: run.id },
+    ]);
   });
 
   it("rolls back a run whose item set is incomplete at commit", async () => {
@@ -975,6 +1006,142 @@ describe("PostgreSQL persistence hardening", () => {
     expect(await repository.findRunById(run.id)).toBeNull();
     expect(await repository.findResolutionsForRun(run.id)).toEqual([]);
   });
+
+  it("serializes run creation against a concurrent dependency insert", async () => {
+    const sourceArtifactId = await createArtifact();
+    const targetArtifactId = await createArtifact();
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    const run = DependencyResolutionRun.create({
+      id: randomUUID(),
+      sourceArtifactVersionId: sourceVersionId,
+      createdAt: new Date(),
+    });
+    const dependency = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    const runClient = await pool!.connect();
+    const mutationClient = await pool!.connect();
+    let mutationOutcome: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined;
+    try {
+      await runClient.query("BEGIN");
+      await mutationClient.query("BEGIN");
+      const runPidResult = await runClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const mutationPidResult = await mutationClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const runPid = runPidResult.rows[0]?.pid;
+      const mutationPid = mutationPidResult.rows[0]?.pid;
+      if (runPid === undefined || mutationPid === undefined) throw new Error("Could not identify PostgreSQL test backends.");
+
+      await new PostgresDependencyRepository(runClient).createRun(run);
+      mutationOutcome = mutationClient.query(
+        "INSERT INTO dependencies (id,artifact_version_id,target_artifact_id,declared_range,created_at) VALUES ($1,$2,$3,$4,$5)",
+        [dependency.id, dependency.artifactVersionId, dependency.targetArtifactId, dependency.declaredRange, dependency.createdAt],
+      ).then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+
+      await waitForTransactionBlocker(pool!, mutationPid, runPid);
+      await runClient.query("COMMIT");
+      const outcome = await mutationOutcome;
+      expect(outcome).toMatchObject({
+        ok: false,
+        error: { code: "55000", constraint: "dependencies_resolution_runs_immutable" },
+      });
+      await mutationClient.query("ROLLBACK");
+
+      const repository = new PostgresDependencyRepository(pool!);
+      expect((await repository.findRunById(run.id))?.snapshot()).toEqual(run.snapshot());
+      expect((await repository.findForVersion(sourceVersionId)).map((item) => item.id)).toEqual([]);
+      expect(await repository.findResolutionsForRun(run.id)).toEqual([]);
+    } finally {
+      try {
+        await runClient.query("ROLLBACK");
+        if (mutationOutcome) await mutationOutcome;
+        await mutationClient.query("ROLLBACK");
+      } finally {
+        runClient.release();
+        mutationClient.release();
+      }
+    }
+  });
+
+  it.each(["UPDATE", "DELETE"] as const)(
+    "serializes run creation against a concurrent dependency %s",
+    async (operation) => {
+      const sourceArtifactId = await createArtifact();
+      const targetArtifactId = await createArtifact();
+      const sourceVersionId = await createVersion(sourceArtifactId);
+      const targetVersionId = await createVersion(targetArtifactId, "1.0.0");
+      const dependency = Dependency.create({
+        id: randomUUID(),
+        artifactVersionId: sourceVersionId,
+        targetArtifactId,
+        declaredRange: "^1.0.0",
+        createdAt: new Date(),
+      });
+      const repository = new PostgresDependencyRepository(pool!);
+      await repository.create(dependency);
+      const run = DependencyResolutionRun.create({
+        id: randomUUID(),
+        sourceArtifactVersionId: sourceVersionId,
+        createdAt: new Date(),
+      });
+      const runClient = await pool!.connect();
+      const mutationClient = await pool!.connect();
+      let mutationOutcome: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined;
+      try {
+        await runClient.query("BEGIN");
+        await mutationClient.query("BEGIN");
+        const runPidResult = await runClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        const mutationPidResult = await mutationClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        const runPid = runPidResult.rows[0]?.pid;
+        const mutationPid = mutationPidResult.rows[0]?.pid;
+        if (runPid === undefined || mutationPid === undefined) throw new Error("Could not identify PostgreSQL test backends.");
+
+        const runRepository = new PostgresDependencyRepository(runClient);
+        await runRepository.createRun(run);
+        await runRepository.createResolutionForRun(run.id, {
+          id: randomUUID(),
+          dependencyId: dependency.id,
+          resolvedArtifactVersionId: targetVersionId,
+          resolvedAt: new Date(),
+        });
+        const statement = operation === "UPDATE"
+          ? "UPDATE dependencies SET declared_range='^2.0.0' WHERE id=$1"
+          : "DELETE FROM dependencies WHERE id=$1";
+        mutationOutcome = mutationClient.query(statement, [dependency.id]).then(
+          () => ({ ok: true as const }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+
+        await waitForTransactionBlocker(pool!, mutationPid, runPid);
+        await runClient.query("COMMIT");
+        const outcome = await mutationOutcome;
+        expect(outcome).toMatchObject({
+          ok: false,
+          error: { code: "55000", constraint: "dependencies_resolution_runs_immutable" },
+        });
+        await mutationClient.query("ROLLBACK");
+
+        expect((await repository.findRunById(run.id))?.snapshot()).toEqual(run.snapshot());
+        expect(await repository.findForVersion(sourceVersionId)).toEqual([dependency]);
+        expect(await repository.findResolutionsForRun(run.id)).toHaveLength(1);
+      } finally {
+        try {
+          await runClient.query("ROLLBACK");
+          if (mutationOutcome) await mutationOutcome;
+          await mutationClient.query("ROLLBACK");
+        } finally {
+          runClient.release();
+          mutationClient.release();
+        }
+      }
+    },
+  );
 
   it("preserves owner-scoped slug, version, and content-hash uniqueness", async () => {
     const artifactA = await createArtifact(owners[0], "shared-slug");

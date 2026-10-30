@@ -234,6 +234,7 @@ async function verifyExistingFinalSchema(client: PoolClient): Promise<void> {
     "artifacts_identity_immutable",
     "artifacts_no_physical_delete",
     "dependency_resolutions_set_target",
+    "dependency_resolution_runs_lock_source",
     "dependency_resolution_runs_no_update_or_delete",
     "dependency_resolution_runs_no_truncate",
     "dependency_resolutions_no_update_or_delete",
