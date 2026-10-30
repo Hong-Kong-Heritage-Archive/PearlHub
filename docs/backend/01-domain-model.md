@@ -127,6 +127,16 @@ A dependency resolution records:
 - declared range through the dependency
 - resolved `ArtifactVersionId`
 - resolution timestamp
+- an optional `DependencyResolutionRun` identity
+
+A resolution run belongs to one exact source Artifact Version and groups all of
+that version's direct dependency resolutions. Empty runs are valid; partial runs
+are rejected at transaction commit. Run-associated resolution history is
+append-only. Existing resolution records remain ungrouped with a null run
+identity; the Phase 2E-A migration does not infer historical runs.
+
+The persistence model is available, but this phase does not create runs from an
+application workflow, authorize targets, or expose run history through HTTP.
 
 ## Compatibility Report
 

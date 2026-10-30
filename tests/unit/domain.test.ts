@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
+import { DependencyResolutionRun } from "../../src/domain/dependency-resolution-run.js";
 import { normalizePearlTags } from "../../src/domain/discovery.js";
 import { Dependency } from "../../src/domain/dependency.js";
 import { DomainError } from "../../src/domain/errors.js";
@@ -85,6 +86,38 @@ describe("SemVer domain values", () => {
         publishedAt: new Date(),
       })).toThrowError(DomainError);
     }
+  });
+
+  describe("DependencyResolutionRun", () => {
+    it("preserves its source version and protects its timestamp", () => {
+      const createdAt = new Date("2026-10-30T12:00:00Z");
+      const run = DependencyResolutionRun.create({
+        id: "run-1",
+        sourceArtifactVersionId: "source-version-1",
+        createdAt,
+      });
+
+      createdAt.setUTCFullYear(2000);
+      expect(run.createdAt).toEqual(new Date("2026-10-30T12:00:00Z"));
+      expect(run.snapshot()).toEqual({
+        id: "run-1",
+        sourceArtifactVersionId: "source-version-1",
+        createdAt: new Date("2026-10-30T12:00:00Z"),
+      });
+    });
+
+    it("rejects incomplete identity or an invalid creation time", () => {
+      expect(() => DependencyResolutionRun.create({
+        id: "",
+        sourceArtifactVersionId: "source-version-1",
+        createdAt: new Date(),
+      })).toThrowError(DomainError);
+      expect(() => DependencyResolutionRun.create({
+        id: "run-1",
+        sourceArtifactVersionId: "source-version-1",
+        createdAt: new Date(Number.NaN),
+      })).toThrowError(DomainError);
+    });
   });
 
   it("validates dependency ranges and recognizes compatible versions", () => {

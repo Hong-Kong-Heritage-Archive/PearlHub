@@ -7,6 +7,7 @@ import { ArtifactVersion } from "../domain/artifact-version.js";
 import { Draft, type DraftProvenance, type DraftState } from "../domain/draft.js";
 import type { ArtifactDiscoveryPageRow, ArtifactDiscoveryQuery, ArtifactSummary } from "../domain/discovery.js";
 import { Dependency } from "../domain/dependency.js";
+import { DependencyResolutionRun } from "../domain/dependency-resolution-run.js";
 import { DomainError } from "../domain/errors.js";
 import type { CompatibilityReport, DependencyResolution, Lineage, Provenance } from "../domain/records.js";
 import type {
@@ -16,6 +17,7 @@ import type {
   ArtifactDiscoveryRepository,
   CompatibilityReportRepository,
   DependencyRepository,
+  DependencyResolutionRunRepository,
   DiscoveryReindexLock,
   LineageRepository,
   ProvenanceRepository,
@@ -488,7 +490,7 @@ export class PostgresProvenanceRepository implements ProvenanceRepository {
   }
 }
 
-export class PostgresDependencyRepository implements DependencyRepository {
+export class PostgresDependencyRepository implements DependencyRepository, DependencyResolutionRunRepository {
   constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
   async findForVersion(versionId: string): Promise<Dependency[]> {
     const result = await this.db.query<{ id: string; artifact_version_id: string; target_artifact_id: string; declared_range: string; created_at: Date }>("SELECT id,artifact_version_id,target_artifact_id,declared_range,created_at FROM dependencies WHERE artifact_version_id=$1 ORDER BY created_at,id", [versionId]);
@@ -498,11 +500,43 @@ export class PostgresDependencyRepository implements DependencyRepository {
     const row = value.snapshot();
     await this.db.query("INSERT INTO dependencies (id,artifact_version_id,target_artifact_id,declared_range,created_at) VALUES ($1,$2,$3,$4,$5)", [row.id, row.artifactVersionId, row.targetArtifactId, row.declaredRange, row.createdAt]);
   }
-  async createResolution(value: DependencyResolution): Promise<void> {
-    await this.db.query("INSERT INTO dependency_resolutions (id,dependency_id,resolved_artifact_version_id,resolved_at) VALUES ($1,$2,$3,$4)", [value.id, value.dependencyId, value.resolvedArtifactVersionId, value.resolvedAt]);
+  async createResolution(value: Omit<DependencyResolution, "runId">): Promise<void> {
+    await this.insertResolution(value, null);
+  }
+  async createResolutionForRun(runId: string, value: Omit<DependencyResolution, "runId">): Promise<void> {
+    await this.insertResolution(value, runId);
+  }
+  private async insertResolution(value: Omit<DependencyResolution, "runId">, runId: string | null): Promise<void> {
+    await this.db.query("INSERT INTO dependency_resolutions (id,dependency_id,resolved_artifact_version_id,resolved_at,run_id) VALUES ($1,$2,$3,$4,$5)", [value.id, value.dependencyId, value.resolvedArtifactVersionId, value.resolvedAt, runId]);
   }
   async findResolutions(dependencyId: string): Promise<DependencyResolution[]> {
-    const result = await this.db.query<DependencyResolution>("SELECT id,dependency_id AS \"dependencyId\",resolved_artifact_version_id AS \"resolvedArtifactVersionId\",resolved_at AS \"resolvedAt\" FROM dependency_resolutions WHERE dependency_id=$1 ORDER BY resolved_at,id", [dependencyId]);
+    const result = await this.db.query<DependencyResolution>("SELECT id,dependency_id AS \"dependencyId\",run_id AS \"runId\",resolved_artifact_version_id AS \"resolvedArtifactVersionId\",resolved_at AS \"resolvedAt\" FROM dependency_resolutions WHERE dependency_id=$1 ORDER BY resolved_at,id", [dependencyId]);
+    return result.rows;
+  }
+  async createRun(value: DependencyResolutionRun): Promise<void> {
+    const run = value.snapshot();
+    await this.db.query("INSERT INTO dependency_resolution_runs (id,source_artifact_version_id,created_at) VALUES ($1,$2,$3)", [run.id, run.sourceArtifactVersionId, run.createdAt]);
+  }
+  async findRunById(id: string): Promise<DependencyResolutionRun | null> {
+    const result = await this.db.query<{ id: string; sourceArtifactVersionId: string; createdAt: Date }>(
+      "SELECT id,source_artifact_version_id AS \"sourceArtifactVersionId\",created_at AS \"createdAt\" FROM dependency_resolution_runs WHERE id=$1",
+      [id],
+    );
+    const row = result.rows[0];
+    return row ? DependencyResolutionRun.create(row) : null;
+  }
+  async findRunsForVersion(sourceArtifactVersionId: string): Promise<DependencyResolutionRun[]> {
+    const result = await this.db.query<{ id: string; sourceArtifactVersionId: string; createdAt: Date }>(
+      "SELECT id,source_artifact_version_id AS \"sourceArtifactVersionId\",created_at AS \"createdAt\" FROM dependency_resolution_runs WHERE source_artifact_version_id=$1 ORDER BY created_at,id",
+      [sourceArtifactVersionId],
+    );
+    return result.rows.map((row) => DependencyResolutionRun.create(row));
+  }
+  async findResolutionsForRun(runId: string): Promise<DependencyResolution[]> {
+    const result = await this.db.query<DependencyResolution>(
+      "SELECT id,dependency_id AS \"dependencyId\",run_id AS \"runId\",resolved_artifact_version_id AS \"resolvedArtifactVersionId\",resolved_at AS \"resolvedAt\" FROM dependency_resolutions WHERE run_id=$1 ORDER BY resolved_at,id",
+      [runId],
+    );
     return result.rows;
   }
 }

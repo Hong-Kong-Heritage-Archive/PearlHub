@@ -1,6 +1,6 @@
 # 02 — PostgreSQL Schema
 
-The persistence contract is implemented by migrations `001` through `005`. Together they create thirteen application tables. The migration runner also creates the operational `schema_migrations` ledger; it is not a domain table. The schema uses PostgreSQL constraints and triggers for database invariants; SemVer parsing and range evaluation remain domain/application responsibilities.
+The persistence contract is implemented by migrations `001` through `007`. Together they create fourteen application tables. The migration runner also creates the operational `schema_migrations` ledger; it is not a domain table. The schema uses PostgreSQL constraints and triggers for database invariants; SemVer parsing and range evaluation remain domain/application responsibilities.
 
 `npm run db:migrate` applies ordered migrations in transactions, records the migration
 filename and SHA-256 checksum, and verifies checksums on repeat runs. Applied migration
@@ -174,8 +174,31 @@ GitHub import is represented as source/provenance metadata and does not create F
 | `resolved_artifact_version_id` | `UUID` | not null, FK to `artifact_versions(id)` |
 | `resolved_at` | `TIMESTAMPTZ` | not null, default `now()` |
 | `target_artifact_id` | `UUID` | not null; internal integrity helper, set by trigger |
+| `run_id` | `UUID` | nullable; null for legacy ungrouped history, otherwise linked to a run |
+| `source_artifact_version_id` | `UUID` | not null; internal integrity helper, set by trigger |
 
-`target_artifact_id` is a PostgreSQL persistence detail, not part of the public dependency-resolution model. Composite foreign keys link `(dependency_id, target_artifact_id)` to the dependency and `(resolved_artifact_version_id, target_artifact_id)` to the version, so the resolved version must belong to the declared target Artifact.
+`target_artifact_id` and `source_artifact_version_id` are PostgreSQL persistence details, not part of the public resolution-item model. Composite foreign keys link the dependency to its source Artifact Version and target Artifact, the run to that same source version, and the resolved version to the target Artifact. A unique constraint on `(run_id, dependency_id)` prevents duplicate items within a run; PostgreSQL permits multiple null `run_id` values so legacy rows remain ungrouped.
+
+`createResolutionForRun` is the run-aware repository write and requires a run ID. The older `createResolution` write remains for the existing resolver compatibility path; it creates ungrouped legacy rows until the later workflow phase adopts run persistence.
+
+### `dependency_resolution_runs`
+
+| Column | Type | Nullability / default |
+| --- | --- | --- |
+| `id` | `UUID` | primary key |
+| `source_artifact_version_id` | `UUID` | not null, FK to `artifact_versions(id)` |
+| `created_at` | `TIMESTAMPTZ` | not null, default `now()` |
+
+A run is the parent for the complete direct-dependency resolution set of one
+exact source Artifact Version. Deferred constraint triggers check at commit that
+the run has exactly one item for every source declaration; empty sets are valid.
+The transaction owner must create the run and its items in the same transaction.
+The database prevents adding or mutating source declarations after a run exists,
+so a completed run's item set cannot be extended later.
+
+Run rows and resolution history rows reject update, delete, and truncate. The
+run-aware repository operations do not start transactions themselves. The
+existing resolver is intentionally not wired to these operations in this phase.
 
 ### `compatibility_reports`
 
@@ -197,13 +220,17 @@ Compatibility is a separate record attached to an Artifact Version, with an opti
 | `id` | `UUID` | primary key |
 | `artifact_id` | `UUID` | not null, FK to `artifacts(id)` |
 | `snapshot_number` | `INTEGER` | not null, > 0 |
-| `snapshot` | `JSONB` | not null; format version 1 |
+| `snapshot` | `JSONB` | not null; format version 1 for existing snapshots, version 2 for new snapshots |
 | `created_at` | `TIMESTAMPTZ` | not null |
 
 `UNIQUE(artifact_id, snapshot_number)` sequences successful active-to-tombstone
-transitions. The JSONB snapshot captures pre-transition Artifact state, versions,
-content hashes/locations, dependencies and resolutions, provenance, compatibility
-reports, and lineage. Update, delete, and truncate are rejected by triggers. Repeated
+transitions. New format-version-2 snapshots additionally include each resolution
+run and its associated items; the existing per-dependency history remains present,
+including legacy rows whose `run_id` is null. Existing format-version-1 snapshots
+are immutable and are not rewritten. The JSONB snapshot captures pre-transition
+Artifact state, versions, content hashes/locations, dependencies and resolutions,
+resolution runs, provenance, compatibility reports, and lineage. Update, delete,
+and truncate are rejected by triggers. Repeated
 deletion while tombstoned does not append or replace a snapshot; after restoration,
 a later deletion appends a new snapshot.
 
@@ -213,7 +240,7 @@ locations; PostgreSQL transactions cannot roll back or guarantee external-store 
 
 ## Constraints and triggers
 
-Every table has a UUID primary key. Foreign keys are the relationships listed above; there are no cascading deletes. Unique constraints include `users.external_subject`, `user_identities(provider, subject)`, `artifacts(owner_id, slug)`, `artifact_versions(artifact_id, version)`, `artifact_versions(artifact_id, content_hash)`, `artifact_versions(id, artifact_id)`, `dependencies(id, target_artifact_id)`, the lineage triple, and `tombstone_snapshots(artifact_id, snapshot_number)`. The composite unique keys support resolution and lineage foreign keys.
+Every table has a UUID primary key. Foreign keys are the relationships listed above; there are no cascading deletes. Unique constraints include `users.external_subject`, `user_identities(provider, subject)`, `artifacts(owner_id, slug)`, `artifact_versions(artifact_id, version)`, `artifact_versions(artifact_id, content_hash)`, `artifact_versions(id, artifact_id)`, `dependencies(id, target_artifact_id)`, `dependencies(id, artifact_version_id)`, `dependency_resolution_runs(id, source_artifact_version_id)`, `dependency_resolutions(run_id, dependency_id)`, the lineage triple, and `tombstone_snapshots(artifact_id, snapshot_number)`. The composite unique keys support resolution and lineage foreign keys.
 
 Checks enforce Artifact name length, slug format, visibility values, status values, tombstone-implies-unlisted, Fork-only lineage, and non-self lineage. PostgreSQL does not parse SemVer versions or ranges.
 
@@ -223,6 +250,10 @@ Checks enforce Artifact name length, slug format, visibility values, status valu
 | `artifacts_no_physical_delete` | Rejects physical Artifact deletion. Deletion is a tombstone update; versions, provenance, dependencies, and lineage remain. |
 | `artifact_versions_immutable` | Rejects every update or delete of a published Artifact Version. |
 | `dependency_resolutions_set_target` | Copies the target Artifact ID from the selected dependency before insert or dependency reassignment; composite foreign keys enforce consistency. |
+| `dependency_resolution_runs_no_update_or_delete` / `dependency_resolution_runs_no_truncate` | Prevent modification or removal of persisted run records. |
+| `dependency_resolutions_no_update_or_delete` / `dependency_resolutions_no_truncate` | Preserve resolution history as append-only records. |
+| `dependencies_resolution_runs_immutable` | Prevents changing source declarations after a resolution run exists. |
+| `dependency_resolution_runs_complete` / `dependency_resolution_items_complete` | Deferred checks require exactly one item per direct source dependency at commit; empty runs are valid. |
 | `tombstone_snapshots_no_update_or_delete` | Rejects updates and deletes of tombstone snapshots. |
 | `tombstone_snapshots_no_truncate` | Rejects truncating the snapshot table. |
 
@@ -235,7 +266,8 @@ indexes; `002_persistence_hardening.sql` adds the tombstone check, Artifact iden
 trigger, and composite keys/foreign keys for dependency-resolution target integrity;
 `003_identity_mapping_and_tombstone_snapshots.sql` adds provider identity mappings,
 source-version lineage references, and immutable lifecycle snapshots. Migration 005 adds
-Draft persistence and version content snapshots.
+Draft persistence and version content snapshots. Migration 007 adds resolution-run
+persistence, integrity and immutability triggers, and run-aware tombstone snapshots.
 
 ## Indexes
 
@@ -255,6 +287,8 @@ The primary-key and unique constraints create their own indexes. The initial mig
 | `dependencies_source_idx` | Dependencies declared by an Artifact Version. |
 | `dependencies_target_idx` | Dependencies that target an Artifact. |
 | `dependency_resolutions_dependency_idx` | Resolutions for a dependency. |
+| `dependency_resolution_runs_source_created_idx` | Stable run history for a source Artifact Version. |
+| `dependency_resolutions_run_idx` | Ordered items belonging to a run. |
 | `compatibility_reports_source_idx` | Compatibility reports for a source Artifact Version. |
 | `compatibility_reports_target_idx` | Reports targeting an Artifact Version. |
 | `user_identities_user_idx` | External identities associated with an internal User. |

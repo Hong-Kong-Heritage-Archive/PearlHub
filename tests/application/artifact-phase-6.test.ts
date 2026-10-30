@@ -115,7 +115,7 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       declaredRange: "~1.0.0", createdAt: now,
     });
     const resolution: DependencyResolution = {
-      id: "resolution-1", dependencyId: declaration.id, resolvedArtifactVersionId: resolved.id, resolvedAt: now,
+      id: "resolution-1", dependencyId: declaration.id, runId: null, resolvedArtifactVersionId: resolved.id, resolvedAt: now,
     };
     const versions: ArtifactVersionRepository = {
       findById: async (id) => id === resolved.id ? resolved : null,
@@ -134,6 +134,7 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       findForVersion,
       create: async () => {},
       createResolution,
+      createResolutionForRun: async () => {},
       findResolutions,
     };
     const report: CompatibilityReport = {
@@ -233,6 +234,7 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       findForVersion: async () => [],
       create: async () => {},
       createResolution: async () => {},
+      createResolutionForRun: async () => {},
       findResolutions: async () => [],
     };
     const versions: ArtifactVersionRepository = {

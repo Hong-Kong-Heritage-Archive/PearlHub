@@ -2,6 +2,7 @@ import type { Artifact } from "../domain/artifact.js";
 import type { ArtifactVersion } from "../domain/artifact-version.js";
 import type { Draft } from "../domain/draft.js";
 import type { Dependency } from "../domain/dependency.js";
+import type { DependencyResolutionRun } from "../domain/dependency-resolution-run.js";
 import type { CompatibilityReport, DependencyResolution, Lineage, Provenance } from "../domain/records.js";
 import type {
   ArtifactDiscoveryCursorPosition,
@@ -78,8 +79,16 @@ export interface ProvenanceRepository {
 export interface DependencyRepository {
   findForVersion(versionId: string): Promise<Dependency[]>;
   create(dependency: Dependency): Promise<void>;
-  createResolution(resolution: DependencyResolution): Promise<void>;
+  createResolution(resolution: Omit<DependencyResolution, "runId">): Promise<void>;
+  createResolutionForRun(runId: string, resolution: Omit<DependencyResolution, "runId">): Promise<void>;
   findResolutions(dependencyId: string): Promise<DependencyResolution[]>;
+}
+
+export interface DependencyResolutionRunRepository {
+  createRun(run: DependencyResolutionRun): Promise<void>;
+  findRunById(id: string): Promise<DependencyResolutionRun | null>;
+  findRunsForVersion(sourceArtifactVersionId: string): Promise<DependencyResolutionRun[]>;
+  findResolutionsForRun(runId: string): Promise<DependencyResolution[]>;
 }
 
 export interface CompatibilityReportRepository {

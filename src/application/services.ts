@@ -575,7 +575,7 @@ export class ResolveDependencyService {
       candidates.sort((left, right) => semver.rcompare(left.version, right.version));
       const selected = candidates[0];
       if (!selected) throw new DomainError("DEPENDENCY_RESOLUTION_FAILED", "No compatible Artifact Version found.", { dependencyId: dependency.id });
-      resolutions.push({ id: this.ids.next(), dependencyId: dependency.id, resolvedArtifactVersionId: selected.id, resolvedAt: this.clock.now() });
+      resolutions.push({ id: this.ids.next(), dependencyId: dependency.id, runId: null, resolvedArtifactVersionId: selected.id, resolvedAt: this.clock.now() });
     }
     const persist = async () => { for (const resolution of resolutions) await this.dependencies.createResolution(resolution); };
     await this.transactions.run(persist);

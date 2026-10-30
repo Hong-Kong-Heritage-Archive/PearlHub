@@ -52,6 +52,7 @@ function fixture(canRead: (actorId: string, artifact: Artifact) => Promise<boole
       dependencies.push({ artifactVersionId: dependency.artifactVersionId, targetArtifactId: dependency.targetArtifactId, declaredRange: dependency.declaredRange });
     },
     createResolution: async () => {},
+    createResolutionForRun: async () => {},
     findResolutions: async () => [],
   };
   const discovery: ArtifactDiscoveryRepository = {

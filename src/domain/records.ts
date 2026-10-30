@@ -3,6 +3,7 @@ import { DomainError } from "./errors.js";
 export interface DependencyResolution {
   id: string;
   dependencyId: string;
+  runId: string | null;
   resolvedArtifactVersionId: string;
   resolvedAt: Date;
 }

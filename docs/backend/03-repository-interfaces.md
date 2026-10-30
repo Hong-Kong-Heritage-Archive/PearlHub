@@ -64,7 +64,24 @@ Required operations:
 - `findForVersion(versionId)`
 - `create(dependency)`
 - `createResolution(resolution)`
+- `createResolutionForRun(runId, resolution)`
 - `findResolutions(dependencyId)`
+
+`createResolution` is retained for ungrouped legacy history. New run-aware items
+must use `createResolutionForRun`; callers create the run and all its items in
+one outer transaction.
+
+## DependencyResolutionRunRepository
+
+Required operations:
+
+- `createRun(run)`
+- `findRunById(id)`
+- `findRunsForVersion(sourceArtifactVersionId)`
+- `findResolutionsForRun(runId)`
+
+These are persistence operations only. The repository does not select candidate
+versions, authorize Artifacts, or own the transaction that creates a complete run.
 
 ## CompatibilityReportRepository
 

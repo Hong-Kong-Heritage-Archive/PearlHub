@@ -9,6 +9,7 @@ import { PostgresArtifactDiscoveryRepository, PostgresArtifactRepository, Postgr
 import { MemoryArtifactContentStore } from "../../src/adapters/content-store.js";
 import { Artifact } from "../../src/domain/artifact.js";
 import { ArtifactVersion } from "../../src/domain/artifact-version.js";
+import { DependencyResolutionRun } from "../../src/domain/dependency-resolution-run.js";
 import { Draft } from "../../src/domain/draft.js";
 import { Dependency } from "../../src/domain/dependency.js";
 import { DevelopmentOnlyFakeAuthenticator } from "../../src/http/testing/development-fake-authenticator.js";
@@ -78,12 +79,13 @@ describe("PostgreSQL persistence hardening", () => {
       "004_artifact_discovery.sql",
       "005_drafts_and_version_snapshots.sql",
       "006_draft_origins.sql",
+      "007_dependency_resolution_runs.sql",
     ]);
     expect(repeatedMigrationRun).toEqual([]);
     const ledger = await pool.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM schema_migrations",
     );
-    expect(ledger.rows[0]?.count).toBe(6);
+    expect(ledger.rows[0]?.count).toBe(7);
   });
 
   it("baselines a complete manually migrated schema without rerunning SQL", async () => {
@@ -103,6 +105,7 @@ describe("PostgreSQL persistence hardening", () => {
         "004_artifact_discovery.sql",
         "005_drafts_and_version_snapshots.sql",
         "006_draft_origins.sql",
+        "007_dependency_resolution_runs.sql",
       ]) {
         const sql = await readFile(resolve(process.cwd(), "migrations", migrationName), "utf8");
         await baselinePool.query(sql);
@@ -115,11 +118,79 @@ describe("PostgreSQL persistence hardening", () => {
         "004_artifact_discovery.sql",
         "005_drafts_and_version_snapshots.sql",
         "006_draft_origins.sql",
+        "007_dependency_resolution_runs.sql",
       ]);
       expect(await runPostgresMigrations(baselinePool)).toEqual([]);
     } finally {
       await baselinePool.end();
       if (created) await adminPool.query(`DROP SCHEMA ${baselineSchema} CASCADE`);
+    }
+  });
+
+  it("preserves ungrouped legacy resolution history when applying the run migration", async () => {
+    const legacySchema = `pearlhub_legacy_${randomUUID().replaceAll("-", "")}`;
+    const legacyPool = new Pool({
+      connectionString: databaseUrl,
+      options: `-c search_path=${legacySchema}`,
+    });
+    let created = false;
+    try {
+      await adminPool.query(`CREATE SCHEMA ${legacySchema}`);
+      created = true;
+      for (const migrationName of [
+        "001_initial.sql",
+        "002_persistence_hardening.sql",
+        "003_identity_mapping_and_tombstone_snapshots.sql",
+        "004_artifact_discovery.sql",
+        "005_drafts_and_version_snapshots.sql",
+        "006_draft_origins.sql",
+      ]) {
+        const sql = await readFile(resolve(process.cwd(), "migrations", migrationName), "utf8");
+        await legacyPool.query(sql);
+      }
+
+      const ownerId = randomUUID();
+      const sourceArtifactId = randomUUID();
+      const targetArtifactId = randomUUID();
+      const sourceVersionId = randomUUID();
+      const targetVersionId = randomUUID();
+      const dependencyId = randomUUID();
+      const resolutionId = randomUUID();
+      await legacyPool.query("INSERT INTO users (id,external_subject) VALUES ($1,$2)", [ownerId, `legacy-owner-${ownerId}`]);
+      await legacyPool.query(
+        "INSERT INTO artifacts (id,owner_id,name,slug,visibility,status) VALUES ($1,$2,'Legacy source',$3,'private','active'),($4,$2,'Legacy target',$5,'public','active')",
+        [sourceArtifactId, ownerId, `legacy-${sourceArtifactId.replaceAll("-", "")}`, targetArtifactId, `legacy-${targetArtifactId.replaceAll("-", "")}`],
+      );
+      await legacyPool.query(
+        "INSERT INTO artifact_versions (id,artifact_id,version,content_hash,content_location,published_at) VALUES ($1,$2,'1.0.0','source-hash','source-location',now()),($3,$4,'1.0.0','target-hash','target-location',now())",
+        [sourceVersionId, sourceArtifactId, targetVersionId, targetArtifactId],
+      );
+      await legacyPool.query(
+        "INSERT INTO dependencies (id,artifact_version_id,target_artifact_id,declared_range) VALUES ($1,$2,$3,'^1.0.0')",
+        [dependencyId, sourceVersionId, targetArtifactId],
+      );
+      await legacyPool.query(
+        "INSERT INTO dependency_resolutions (id,dependency_id,resolved_artifact_version_id) VALUES ($1,$2,$3)",
+        [resolutionId, dependencyId, targetVersionId],
+      );
+
+      const migration = await readFile(resolve(process.cwd(), "migrations", "007_dependency_resolution_runs.sql"), "utf8");
+      await legacyPool.query(migration);
+
+      const dependencies = new PostgresDependencyRepository(legacyPool);
+      expect(await dependencies.findResolutions(dependencyId)).toEqual([{
+        id: resolutionId,
+        dependencyId,
+        runId: null,
+        resolvedArtifactVersionId: targetVersionId,
+        resolvedAt: expect.any(Date),
+      }]);
+      expect((await legacyPool.query("SELECT count(*)::int AS count FROM dependency_resolution_runs")).rows[0]?.count).toBe(0);
+      expect((await legacyPool.query("SELECT source_artifact_version_id FROM dependency_resolutions WHERE id=$1", [resolutionId])).rows[0])
+        .toEqual({ source_artifact_version_id: sourceVersionId });
+    } finally {
+      await legacyPool.end();
+      if (created) await adminPool.query(`DROP SCHEMA ${legacySchema} CASCADE`);
     }
   });
 
@@ -401,7 +472,7 @@ describe("PostgreSQL persistence hardening", () => {
     expect(tables.rows.map((row) => row.table_name)).toEqual([
       "artifact_discovery_index", "artifact_discovery_index_state",
       "artifact_lineage", "artifact_versions", "artifacts", "compatibility_reports",
-      "dependencies", "dependency_resolutions", "drafts", "provenances", "schema_migrations",
+      "dependencies", "dependency_resolution_runs", "dependency_resolutions", "drafts", "provenances", "schema_migrations",
       "tombstone_snapshots", "user_identities", "users",
     ]);
 
@@ -422,7 +493,8 @@ describe("PostgreSQL persistence hardening", () => {
       artifact_lineage: ["id", "parent_artifact_id", "child_artifact_id", "source_version_id", "relationship_type", "created_at"],
       provenances: ["id", "artifact_version_id", "source_type", "source_url", "source_ref", "imported_at"],
       dependencies: ["id", "artifact_version_id", "target_artifact_id", "declared_range", "created_at"],
-      dependency_resolutions: ["id", "dependency_id", "resolved_artifact_version_id", "resolved_at", "target_artifact_id"],
+      dependency_resolutions: ["id", "dependency_id", "resolved_artifact_version_id", "resolved_at", "target_artifact_id", "run_id", "source_artifact_version_id"],
+      dependency_resolution_runs: ["id", "source_artifact_version_id", "created_at"],
       compatibility_reports: ["id", "artifact_version_id", "target_artifact_version_id", "status", "report", "created_at"],
       tombstone_snapshots: ["id", "artifact_id", "snapshot_number", "snapshot", "created_at"],
       user_identities: ["id", "user_id", "provider", "subject", "created_at"],
@@ -470,6 +542,7 @@ describe("PostgreSQL persistence hardening", () => {
       ["compatibility_reports_target_artifact_version_id_fkey", "f"],
       ["dependencies_artifact_version_id_fkey", "f"],
       ["dependencies_id_target_artifact_id_key", "u"],
+      ["dependencies_id_artifact_version_key", "u"],
       ["dependencies_pkey", "p"],
       ["dependencies_target_artifact_id_fkey", "f"],
       ["drafts_artifact_id_fkey", "f"],
@@ -487,10 +560,18 @@ describe("PostgreSQL persistence hardening", () => {
       ["drafts_state_check", "c"],
       ["drafts_visibility_check", "c"],
       ["dependency_resolutions_dependency_id_fkey", "f"],
+      ["dependency_resolutions_dependency_source_fkey", "f"],
       ["dependency_resolutions_dependency_target_fkey", "f"],
       ["dependency_resolutions_pkey", "p"],
       ["dependency_resolutions_resolved_artifact_version_id_fkey", "f"],
+      ["dependency_resolutions_run_dependency_key", "u"],
+      ["dependency_resolutions_run_source_fkey", "f"],
       ["dependency_resolutions_version_target_fkey", "f"],
+      ["dependency_resolution_items_complete", "t"],
+      ["dependency_resolution_runs_complete", "t"],
+      ["dependency_resolution_runs_id_source_version_key", "u"],
+      ["dependency_resolution_runs_pkey", "p"],
+      ["dependency_resolution_runs_source_artifact_version_id_fkey", "f"],
       ["provenances_artifact_version_id_fkey", "f"],
       ["provenances_pkey", "p"],
       ["schema_migrations_pkey", "p"],
@@ -513,7 +594,10 @@ describe("PostgreSQL persistence hardening", () => {
       "SELECT tgname FROM pg_trigger JOIN pg_class ON pg_class.oid=tgrelid JOIN pg_namespace ON pg_namespace.oid=pg_class.relnamespace WHERE nspname=current_schema() AND NOT tgisinternal ORDER BY tgname",
     );
     expect(triggers.rows.map((row) => row.tgname)).toEqual([
-      "artifact_versions_immutable", "artifacts_identity_immutable", "artifacts_no_physical_delete", "dependency_resolutions_set_target",
+      "artifact_versions_immutable", "artifacts_identity_immutable", "artifacts_no_physical_delete",
+      "dependencies_resolution_runs_immutable", "dependency_resolution_items_complete", "dependency_resolution_runs_complete",
+      "dependency_resolution_runs_no_truncate", "dependency_resolution_runs_no_update_or_delete",
+      "dependency_resolutions_no_truncate", "dependency_resolutions_no_update_or_delete", "dependency_resolutions_set_target",
       "tombstone_snapshots_no_truncate", "tombstone_snapshots_no_update_or_delete",
     ]);
 
@@ -528,6 +612,7 @@ describe("PostgreSQL persistence hardening", () => {
       "artifacts_discovery_updated_idx", "artifacts_discovery_name_idx",
       "artifact_lineage_parent_idx", "artifact_lineage_child_idx", "provenances_version_idx",
       "dependencies_source_idx", "dependencies_target_idx", "dependency_resolutions_dependency_idx",
+      "dependency_resolution_runs_source_created_idx", "dependency_resolutions_run_idx",
       "compatibility_reports_source_idx", "compatibility_reports_target_idx",
       "user_identities_user_idx", "tombstone_snapshots_artifact_idx",
       "drafts_owner_state_idx", "drafts_one_active_per_artifact_idx",
@@ -693,7 +778,7 @@ describe("PostgreSQL persistence hardening", () => {
     expect(dependencyRows.map((row) => row.snapshot())).toEqual([dependency.snapshot(), secondDependency.snapshot()]);
     expectDateOrder(dependencyRows.map((row) => ({ id: row.id, date: row.createdAt })));
     const resolutionAt = new Date("2026-04-03T00:00:00.000Z");
-    const firstResolution = { id: randomUUID(), dependencyId: dependency.id, resolvedArtifactVersionId: targetVersionId, resolvedAt: resolutionAt };
+    const firstResolution = { id: randomUUID(), dependencyId: dependency.id, runId: null, resolvedArtifactVersionId: targetVersionId, resolvedAt: resolutionAt };
     const secondResolution = { ...firstResolution, id: randomUUID(), resolvedAt: new Date(resolutionAt.getTime() + 1000) };
     await dependencies.createResolution(firstResolution);
     await dependencies.createResolution(secondResolution);
@@ -711,6 +796,184 @@ describe("PostgreSQL persistence hardening", () => {
     const reportRows = await reports.findForArtifactVersion(sourceVersionId);
     expect(reportRows).toEqual([report, secondReport, emptyReport]);
     expectDateOrder(reportRows.map(({ id, createdAt }) => ({ id, date: createdAt })));
+  });
+
+  it("persists complete resolution runs, run items, empty runs, and legacy history", async () => {
+    const sourceArtifactId = await createArtifact();
+    const targetArtifactA = await createArtifact();
+    const targetArtifactB = await createArtifact();
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    const targetVersionA = await createVersion(targetArtifactA, "2.1.0");
+    const targetVersionB = await createVersion(targetArtifactB, "3.1.0");
+    const dependencyA = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetArtifactA,
+      declaredRange: "^2.0.0",
+      createdAt: new Date("2026-04-10T00:00:00Z"),
+    });
+    const dependencyB = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetArtifactB,
+      declaredRange: "^3.0.0",
+      createdAt: new Date("2026-04-10T00:00:01Z"),
+    });
+    const dependencies = new PostgresDependencyRepository(pool!);
+    await dependencies.create(dependencyA);
+    await dependencies.create(dependencyB);
+
+    const run = DependencyResolutionRun.create({
+      id: randomUUID(),
+      sourceArtifactVersionId: sourceVersionId,
+      createdAt: new Date("2026-04-11T00:00:00Z"),
+    });
+    const itemA = {
+      id: randomUUID(),
+      dependencyId: dependencyA.id,
+      resolvedArtifactVersionId: targetVersionA,
+      resolvedAt: new Date("2026-04-11T00:00:01Z"),
+    };
+    const itemB = {
+      id: randomUUID(),
+      dependencyId: dependencyB.id,
+      resolvedArtifactVersionId: targetVersionB,
+      resolvedAt: new Date("2026-04-11T00:00:02Z"),
+    };
+    const transactions = new PostgresTransactionManager(pool!);
+    const transactionalDependencies = new PostgresDependencyRepository(transactions.database);
+    await transactions.run(async () => {
+      await transactionalDependencies.createRun(run);
+      await transactionalDependencies.createResolutionForRun(run.id, itemA);
+      await transactionalDependencies.createResolutionForRun(run.id, itemB);
+    });
+
+    expect((await dependencies.findRunById(run.id))?.snapshot()).toEqual(run.snapshot());
+    expect((await dependencies.findRunsForVersion(sourceVersionId)).map((item) => item.id)).toEqual([run.id]);
+    expect(await dependencies.findResolutionsForRun(run.id)).toEqual([
+      { ...itemA, runId: run.id },
+      { ...itemB, runId: run.id },
+    ]);
+    expect(await dependencies.findResolutions(dependencyA.id)).toEqual([{ ...itemA, runId: run.id }]);
+
+    const emptySourceVersionId = await createVersion(sourceArtifactId, "2.0.0");
+    const emptyRun = DependencyResolutionRun.create({
+      id: randomUUID(),
+      sourceArtifactVersionId: emptySourceVersionId,
+      createdAt: new Date("2026-04-12T00:00:00Z"),
+    });
+    await dependencies.createRun(emptyRun);
+    expect((await dependencies.findRunById(emptyRun.id))?.snapshot()).toEqual(emptyRun.snapshot());
+    expect(await dependencies.findResolutionsForRun(emptyRun.id)).toEqual([]);
+
+    const legacySourceVersionId = await createVersion(sourceArtifactId, "3.0.0");
+    const legacyDependency = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: legacySourceVersionId,
+      targetArtifactId: targetArtifactA,
+      declaredRange: "^2.0.0",
+      createdAt: new Date("2026-04-13T00:00:00Z"),
+    });
+    await dependencies.create(legacyDependency);
+    const legacyResolution = {
+      id: randomUUID(),
+      dependencyId: legacyDependency.id,
+      resolvedArtifactVersionId: targetVersionA,
+      resolvedAt: new Date("2026-04-13T00:00:01Z"),
+    };
+    await dependencies.createResolution(legacyResolution);
+    expect(await dependencies.findResolutions(legacyDependency.id)).toEqual([{ ...legacyResolution, runId: null }]);
+
+    const foreignSourceVersionId = await createVersion(sourceArtifactId, "4.0.0");
+    const foreignDependency = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: foreignSourceVersionId,
+      targetArtifactId: targetArtifactA,
+      declaredRange: "^2.0.0",
+      createdAt: new Date(),
+    });
+    await dependencies.create(foreignDependency);
+    await expect(dependencies.createResolutionForRun(run.id, {
+      id: randomUUID(),
+      dependencyId: foreignDependency.id,
+      resolvedArtifactVersionId: targetVersionA,
+      resolvedAt: new Date(),
+    })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(dependencies.createResolutionForRun(run.id, {
+      id: randomUUID(),
+      dependencyId: dependencyA.id,
+      resolvedArtifactVersionId: targetVersionB,
+      resolvedAt: new Date(),
+    })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(dependencies.createResolutionForRun(run.id, {
+      id: randomUUID(),
+      dependencyId: dependencyA.id,
+      resolvedArtifactVersionId: targetVersionA,
+      resolvedAt: new Date(),
+    })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(dependencies.create(Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetArtifactA,
+      declaredRange: "^2.0.0",
+      createdAt: new Date(),
+    }))).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+
+    await expect(pool!.query("UPDATE dependency_resolution_runs SET created_at=now() WHERE id=$1", [run.id]))
+      .rejects.toMatchObject({ code: "55000", constraint: "dependency_resolution_runs_immutable" });
+    await expect(pool!.query("DELETE FROM dependency_resolution_runs WHERE id=$1", [run.id]))
+      .rejects.toMatchObject({ code: "55000", constraint: "dependency_resolution_runs_immutable" });
+    await expect(pool!.query("UPDATE dependency_resolutions SET resolved_at=now() WHERE id=$1", [itemA.id]))
+      .rejects.toMatchObject({ code: "55000", constraint: "dependency_resolutions_immutable" });
+    await expect(pool!.query("DELETE FROM dependency_resolutions WHERE id=$1", [itemA.id]))
+      .rejects.toMatchObject({ code: "55000", constraint: "dependency_resolutions_immutable" });
+    await expect(pool!.query("TRUNCATE dependency_resolutions"))
+      .rejects.toMatchObject({ code: "55000", constraint: "dependency_resolutions_immutable" });
+  });
+
+  it("rolls back a run whose item set is incomplete at commit", async () => {
+    const sourceArtifactId = await createArtifact();
+    const targetArtifactA = await createArtifact();
+    const targetArtifactB = await createArtifact();
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    const targetVersionA = await createVersion(targetArtifactA, "2.1.0");
+    const dependencyA = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetArtifactA,
+      declaredRange: "^2.0.0",
+      createdAt: new Date(),
+    });
+    const dependencyB = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetArtifactB,
+      declaredRange: "^3.0.0",
+      createdAt: new Date(),
+    });
+    const repository = new PostgresDependencyRepository(pool!);
+    await repository.create(dependencyA);
+    await repository.create(dependencyB);
+    const run = DependencyResolutionRun.create({
+      id: randomUUID(),
+      sourceArtifactVersionId: sourceVersionId,
+      createdAt: new Date(),
+    });
+    const transactions = new PostgresTransactionManager(pool!);
+    const transactionalRepository = new PostgresDependencyRepository(transactions.database);
+
+    await expect(transactions.run(async () => {
+      await transactionalRepository.createRun(run);
+      await transactionalRepository.createResolutionForRun(run.id, {
+        id: randomUUID(),
+        dependencyId: dependencyA.id,
+        resolvedArtifactVersionId: targetVersionA,
+        resolvedAt: new Date(),
+      });
+    })).rejects.toMatchObject({ code: "23514", constraint: "dependency_resolution_runs_complete" });
+
+    expect(await repository.findRunById(run.id)).toBeNull();
+    expect(await repository.findResolutionsForRun(run.id)).toEqual([]);
   });
 
   it("preserves owner-scoped slug, version, and content-hash uniqueness", async () => {
@@ -767,6 +1030,23 @@ describe("PostgreSQL persistence hardening", () => {
       "INSERT INTO dependency_resolutions (id,dependency_id,resolved_artifact_version_id) VALUES ($1,$2,$3)",
       [resolutionId, dependencyId, targetVersionId],
     );
+    const resolutionRun = DependencyResolutionRun.create({
+      id: randomUUID(),
+      sourceArtifactVersionId: sourceVersionId,
+      createdAt: new Date("2026-05-01T00:00:00Z"),
+    });
+    const runItem = {
+      id: randomUUID(),
+      dependencyId,
+      resolvedArtifactVersionId: targetVersionId,
+      resolvedAt: new Date("2026-05-01T00:00:01Z"),
+    };
+    const runTransactions = new PostgresTransactionManager(pool!);
+    const runDependencies = new PostgresDependencyRepository(runTransactions.database);
+    await runTransactions.run(async () => {
+      await runDependencies.createRun(resolutionRun);
+      await runDependencies.createResolutionForRun(resolutionRun.id, runItem);
+    });
     await pool!.query(
       "INSERT INTO provenances (id,artifact_version_id,source_type,source_url,source_ref) VALUES ($1,$2,'github','https://example.test/repo','main')",
       [randomUUID(), sourceVersionId],
@@ -789,13 +1069,21 @@ describe("PostgreSQL persistence hardening", () => {
     );
     expect(snapshotResult.rows).toHaveLength(1);
     const snapshot = snapshotResult.rows[0]!.snapshot;
-    expect(snapshot.format_version).toBe(1);
+    expect(snapshot.format_version).toBe(2);
     expect(snapshot.artifact).toMatchObject({ id: artifactId, owner_id: owners[0], visibility: "public", status: "active" });
     expect(snapshot.versions).toHaveLength(1);
     expect(snapshot.versions[0]).toMatchObject({ id: sourceVersionId, content_hash: "sha256:source", content_location: "loc" });
     expect(snapshot.dependencies).toHaveLength(1);
     expect(snapshot.dependencies[0]).toMatchObject({ id: dependencyId, declared_range: "^2.1.0" });
-    expect(snapshot.dependencies[0].resolutions).toMatchObject([{ id: resolutionId, resolved_artifact_version_id: targetVersionId }]);
+    expect(snapshot.dependencies[0].resolutions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: resolutionId, run_id: null, resolved_artifact_version_id: targetVersionId }),
+      expect.objectContaining({ id: runItem.id, run_id: resolutionRun.id, resolved_artifact_version_id: targetVersionId }),
+    ]));
+    expect(snapshot.dependency_resolution_runs).toMatchObject([{
+      id: resolutionRun.id,
+      source_artifact_version_id: sourceVersionId,
+      items: [{ id: runItem.id, run_id: resolutionRun.id, dependency_id: dependencyId }],
+    }]);
     expect(snapshot.provenances).toHaveLength(1);
     expect(snapshot.compatibility_reports).toHaveLength(1);
     expect(snapshot.lineage).toEqual(expect.arrayContaining([
@@ -920,12 +1208,14 @@ describe("PostgreSQL persistence hardening", () => {
     const previousA = {
       id: randomUUID(),
       dependencyId: dependencyA.id,
+      runId: null,
       resolvedArtifactVersionId: targetVersionA,
       resolvedAt: new Date("2026-01-01T00:00:00.000Z"),
     };
     const previousB = {
       id: randomUUID(),
       dependencyId: dependencyB.id,
+      runId: null,
       resolvedArtifactVersionId: targetVersionB,
       resolvedAt: new Date("2026-01-02T00:00:00.000Z"),
     };

@@ -42,12 +42,13 @@ function copyServices() {
     Dependency.create({ id: "source-dependency-b", artifactVersionId: sourceVersionWithLocation.id, targetArtifactId: "pearl-b", declaredRange: "^1.4.0", createdAt: fixedTime }),
   ];
   const dependencies = [...sourceDependencies];
-  const sourceResolutions: DependencyResolution[] = [{ id: "source-resolution", dependencyId: "source-dependency-a", resolvedArtifactVersionId: "pearl-a-v243", resolvedAt: fixedTime }];
+  const sourceResolutions: DependencyResolution[] = [{ id: "source-resolution", dependencyId: "source-dependency-a", runId: null, resolvedArtifactVersionId: "pearl-a-v243", resolvedAt: fixedTime }];
   const createdResolutions: DependencyResolution[] = [];
   const dependencyRepo: DependencyRepository = {
     findForVersion: async (versionId) => dependencies.filter((dependency) => dependency.artifactVersionId === versionId),
     create: async (dependency) => { dependencies.push(dependency); },
-    createResolution: async (resolution) => { createdResolutions.push(resolution); },
+    createResolution: async (resolution) => { createdResolutions.push({ ...resolution, runId: null }); },
+    createResolutionForRun: async (runId, resolution) => { createdResolutions.push({ ...resolution, runId }); },
     findResolutions: async (dependencyId) => sourceResolutions.filter((resolution) => resolution.dependencyId === dependencyId),
   };
   const store = {
