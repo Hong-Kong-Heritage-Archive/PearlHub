@@ -573,7 +573,7 @@ export class PostgresTransactionManager implements TransactionManager {
     let discardClient: Error | boolean | undefined;
     try {
       try {
-        await client.query("BEGIN");
+        await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
       } catch (error) {
         discardClient = error instanceof Error ? error : true;
         throw error;

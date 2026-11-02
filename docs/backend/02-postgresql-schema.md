@@ -207,9 +207,33 @@ that wins first completes before run creation can establish its item set; run
 creation that wins first causes the waiting mutation to observe the committed
 run and be rejected.
 
+The protocol requires PostgreSQL `READ COMMITTED` isolation so statements
+executed after waiting for a source-version lock can observe the transaction
+that released it. `PostgresTransactionManager` explicitly starts managed
+transactions with `BEGIN ISOLATION LEVEL READ COMMITTED`; callers that issue
+these writes through another transaction entry point must establish the same
+isolation level themselves.
+
+Dependency row locks can still invert with source-version locks during a
+concurrent run-item insert and dependency DELETE or source reassignment.
+PostgreSQL may detect this cycle and abort one transaction with SQLSTATE
+`40P01`. The aborted transaction must be rolled back; callers may retry only
+the complete logical operation in a new transaction after re-reading state.
+Retry is the caller's responsibility. The transaction manager does not retry
+automatically because its callback may contain work that cannot safely be
+replayed, and the complete operation must re-evaluate current database state.
+Other database errors are not retryable under this policy. The integration
+suite reproduces the cycle and verifies that the surviving transaction commits
+a complete run or the dependency deletion, never a partial run.
+
 Run rows and resolution history rows reject update, delete, and truncate. The
 run-aware repository operations do not start transactions themselves. The
 existing resolver is intentionally not wired to these operations in this phase.
+PostgreSQL integration tests exercise run-first and mutation-first INSERT,
+UPDATE, and DELETE ordering, source reassignment against run creation on both
+versions, opposite reassignment operations, and rollback lock release. A
+controlled run-item/DELETE cycle records the deadlock outcome and checks the
+committed state.
 
 ### `compatibility_reports`
 

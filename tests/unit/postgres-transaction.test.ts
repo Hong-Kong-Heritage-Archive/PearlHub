@@ -15,7 +15,7 @@ function createPool(options: {
   const client = {
     query: async <Row extends QueryResultRow = QueryResultRow>(text: string): Promise<QueryResult<Row>> => {
       queries.push(text);
-      const failure = text === "BEGIN" ? options.beginError
+      const failure = text.startsWith("BEGIN") ? options.beginError
         : text === "COMMIT" ? options.commitError
           : text === "ROLLBACK" ? options.rollbackError
             : text === options.failOn ? new Error(`failed: ${text}`)
@@ -41,7 +41,7 @@ describe("PostgresTransactionManager lifecycle", () => {
     await transactions.run(async () => { await transactions.database.query("SELECT inside"); });
     await transactions.database.query("SELECT outside");
 
-    expect(fixture.queries).toEqual(["BEGIN", "SELECT inside", "COMMIT"]);
+    expect(fixture.queries).toEqual(["BEGIN ISOLATION LEVEL READ COMMITTED", "SELECT inside", "COMMIT"]);
     expect(fixture.poolQueryCount).toBe(1);
     expect(fixture.checkoutCount).toBe(1);
     expect(fixture.releases).toEqual([undefined]);
@@ -56,7 +56,7 @@ describe("PostgresTransactionManager lifecycle", () => {
     });
 
     expect(fixture.checkoutCount).toBe(1);
-    expect(fixture.queries).toEqual(["BEGIN", "COMMIT"]);
+    expect(fixture.queries).toEqual(["BEGIN ISOLATION LEVEL READ COMMITTED", "COMMIT"]);
   });
 
   it("releases after BEGIN failure without running work", async () => {
@@ -65,7 +65,7 @@ describe("PostgresTransactionManager lifecycle", () => {
     const work = async () => { throw new Error("work must not run"); };
 
     await expect(new PostgresTransactionManager(fixture.pool).run(work)).rejects.toBe(beginError);
-    expect(fixture.queries).toEqual(["BEGIN"]);
+    expect(fixture.queries).toEqual(["BEGIN ISOLATION LEVEL READ COMMITTED"]);
     expect(fixture.releases).toEqual([beginError]);
   });
 
@@ -74,7 +74,7 @@ describe("PostgresTransactionManager lifecycle", () => {
     const workError = new Error("work failed");
 
     await expect(new PostgresTransactionManager(fixture.pool).run(async () => { throw workError; })).rejects.toBe(workError);
-    expect(fixture.queries).toEqual(["BEGIN", "ROLLBACK"]);
+    expect(fixture.queries).toEqual(["BEGIN ISOLATION LEVEL READ COMMITTED", "ROLLBACK"]);
     expect(fixture.releases).toEqual([undefined]);
   });
 
@@ -94,7 +94,7 @@ describe("PostgresTransactionManager lifecycle", () => {
     const fixture = createPool({ commitError, rollbackError });
 
     await expect(new PostgresTransactionManager(fixture.pool).run(async () => undefined)).rejects.toBe(commitError);
-    expect(fixture.queries).toEqual(["BEGIN", "COMMIT", "ROLLBACK"]);
+    expect(fixture.queries).toEqual(["BEGIN ISOLATION LEVEL READ COMMITTED", "COMMIT", "ROLLBACK"]);
     expect((commitError as Error & { rollbackError: Error }).rollbackError).toBe(rollbackError);
     expect(fixture.releases).toEqual([rollbackError]);
   });
@@ -104,7 +104,7 @@ describe("PostgresTransactionManager lifecycle", () => {
     const fixture = createPool({ commitError });
 
     await expect(new PostgresTransactionManager(fixture.pool).run(async () => undefined)).rejects.toBe(commitError);
-    expect(fixture.queries).toEqual(["BEGIN", "COMMIT", "ROLLBACK"]);
+    expect(fixture.queries).toEqual(["BEGIN ISOLATION LEVEL READ COMMITTED", "COMMIT", "ROLLBACK"]);
     expect(fixture.releases).toEqual([undefined]);
   });
 });

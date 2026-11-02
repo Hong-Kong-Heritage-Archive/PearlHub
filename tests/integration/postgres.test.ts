@@ -56,6 +56,23 @@ async function waitForTransactionBlocker(pool: Pool, blockedPid: number, blocker
   throw new Error(`Backend ${blockedPid} did not block on backend ${blockerPid} within 5 seconds.`);
 }
 
+function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function captureOutcome<T>(promise: Promise<T>): Promise<
+  { ok: true; value: T } | { ok: false; error: unknown }
+> {
+  return promise.then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+}
+
 const databaseUrl = requiredTestDatabaseUrl();
 const adminPool = new Pool({ connectionString: databaseUrl });
 const schema = `pearlhub_test_${randomUUID().replaceAll("-", "")}`;
@@ -672,6 +689,55 @@ describe("PostgreSQL persistence hardening", () => {
     return id;
   }
 
+  async function createCompleteResolutionRun(
+    sourceVersionId: string,
+    onBackendPid?: (pid: number) => void,
+  ): Promise<{
+    run: DependencyResolutionRun;
+    dependencies: Dependency[];
+    resolutions: Awaited<ReturnType<PostgresDependencyRepository["findResolutionsForRun"]>>;
+  }> {
+    const transactions = new PostgresTransactionManager(pool!);
+    const repository = new PostgresDependencyRepository(transactions.database);
+    const run = DependencyResolutionRun.create({
+      id: randomUUID(),
+      sourceArtifactVersionId: sourceVersionId,
+      createdAt: new Date(),
+    });
+
+    await transactions.run(async () => {
+      const backendResult = await transactions.database.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const pid = backendResult.rows[0]?.pid;
+      if (pid === undefined) throw new Error("Could not identify the managed transaction backend.");
+      onBackendPid?.(pid);
+
+      await repository.createRun(run);
+      const dependencies = await repository.findForVersion(sourceVersionId);
+      for (const dependency of dependencies) {
+        const targetResult = await transactions.database.query<{ id: string }>(
+          "SELECT id FROM artifact_versions WHERE artifact_id=$1 ORDER BY id LIMIT 1",
+          [dependency.targetArtifactId],
+        );
+        const resolvedVersionId = targetResult.rows[0]?.id;
+        if (!resolvedVersionId) throw new Error(`No target version exists for dependency ${dependency.id}.`);
+        await repository.createResolutionForRun(run.id, {
+          id: randomUUID(),
+          dependencyId: dependency.id,
+          resolvedArtifactVersionId: resolvedVersionId,
+          resolvedAt: new Date(),
+        });
+      }
+    });
+
+    const persistedRun = await repository.findRunById(run.id);
+    if (!persistedRun) throw new Error(`Resolution run ${run.id} was not persisted.`);
+    return {
+      run: persistedRun,
+      dependencies: await repository.findForVersion(sourceVersionId),
+      resolutions: await repository.findResolutionsForRun(run.id),
+    };
+  }
+
   it("maps Artifact rows, updates only mutable state, and translates identity and slug constraints", async () => {
     const artifacts = new PostgresArtifactRepository(pool!);
     const createdAt = new Date("2026-02-03T04:05:06.000Z");
@@ -1007,6 +1073,20 @@ describe("PostgreSQL persistence hardening", () => {
     expect(await repository.findResolutionsForRun(run.id)).toEqual([]);
   });
 
+  it("starts managed transactions at READ COMMITTED", async () => {
+    const transactions = new PostgresTransactionManager(pool!);
+    let isolationLevel: string | undefined;
+
+    await transactions.run(async () => {
+      const result = await transactions.database.query<{ transaction_isolation: string }>(
+        "SHOW transaction_isolation",
+      );
+      isolationLevel = result.rows[0]?.transaction_isolation;
+    });
+
+    expect(isolationLevel).toBe("read committed");
+  });
+
   it("serializes run creation against a concurrent dependency insert", async () => {
     const sourceArtifactId = await createArtifact();
     const targetArtifactId = await createArtifact();
@@ -1142,6 +1222,438 @@ describe("PostgreSQL persistence hardening", () => {
       }
     },
   );
+
+  it.each(["INSERT", "UPDATE", "DELETE"] as const)(
+    "captures the committed dependency set when %s commits before run creation",
+    async (operation) => {
+      const sourceArtifactId = await createArtifact();
+      const targetArtifactId = await createArtifact();
+      const sourceVersionId = await createVersion(sourceArtifactId);
+      await createVersion(targetArtifactId);
+      const repository = new PostgresDependencyRepository(pool!);
+      const existing = Dependency.create({
+        id: randomUUID(),
+        artifactVersionId: sourceVersionId,
+        targetArtifactId,
+        declaredRange: "^1.0.0",
+        createdAt: new Date(),
+      });
+      const retained = Dependency.create({
+        id: randomUUID(),
+        artifactVersionId: sourceVersionId,
+        targetArtifactId,
+        declaredRange: "^1.0.0",
+        createdAt: new Date(),
+      });
+      const inserted = Dependency.create({
+        id: randomUUID(),
+        artifactVersionId: sourceVersionId,
+        targetArtifactId,
+        declaredRange: "^3.0.0",
+        createdAt: new Date(),
+      });
+      await repository.create(existing);
+      if (operation !== "INSERT") await repository.create(retained);
+
+      const mutationClient = await pool!.connect();
+      const runPidReady = createDeferred<number>();
+      type RunSnapshot = Awaited<ReturnType<typeof createCompleteResolutionRun>>;
+      let runAttempt: Promise<
+        { ok: true; value: RunSnapshot } | { ok: false; error: unknown }
+      > | undefined;
+      try {
+        await mutationClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+        const mutationPidResult = await mutationClient.query<{ pid: number }>(
+          "SELECT pg_backend_pid() AS pid",
+        );
+        const mutationPid = mutationPidResult.rows[0]?.pid;
+        if (mutationPid === undefined) throw new Error("Could not identify the mutation backend.");
+
+        if (operation === "INSERT") {
+          await mutationClient.query(
+            "INSERT INTO dependencies (id,artifact_version_id,target_artifact_id,declared_range,created_at) VALUES ($1,$2,$3,$4,$5)",
+            [inserted.id, inserted.artifactVersionId, inserted.targetArtifactId, inserted.declaredRange, inserted.createdAt],
+          );
+        } else if (operation === "UPDATE") {
+          await mutationClient.query(
+            "UPDATE dependencies SET declared_range='^2.0.0' WHERE id=$1",
+            [existing.id],
+          );
+        } else {
+          await mutationClient.query("DELETE FROM dependencies WHERE id=$1", [existing.id]);
+        }
+
+        runAttempt = captureOutcome(createCompleteResolutionRun(sourceVersionId, runPidReady.resolve));
+        const runPid = await runPidReady.promise;
+        await waitForTransactionBlocker(pool!, runPid, mutationPid);
+        await mutationClient.query("COMMIT");
+
+        const outcome = await runAttempt;
+        if (!outcome.ok) throw outcome.error;
+        expect(outcome.value.run.sourceArtifactVersionId).toBe(sourceVersionId);
+
+        const expected = operation === "INSERT"
+          ? [[existing.id, existing.declaredRange], [inserted.id, inserted.declaredRange]]
+          : operation === "UPDATE"
+            ? [[existing.id, "^2.0.0"], [retained.id, retained.declaredRange]]
+            : [[retained.id, retained.declaredRange]];
+        expect(outcome.value.dependencies.map(({ id, declaredRange }) => [id, declaredRange]).sort())
+          .toEqual(expected.sort());
+        expect(outcome.value.resolutions.map(({ dependencyId }) => dependencyId).sort())
+          .toEqual(expected.map(([id]) => id).sort());
+      } finally {
+        try {
+          await mutationClient.query("ROLLBACK");
+          if (runAttempt) await runAttempt;
+        } finally {
+          mutationClient.release();
+        }
+      }
+    },
+  );
+
+  it("locks both source versions during reassignment and blocks run snapshots on either", async () => {
+    const sourceA = await createVersion(await createArtifact());
+    const sourceB = await createVersion(await createArtifact());
+    const targetArtifactId = await createArtifact();
+    await createVersion(targetArtifactId);
+    const dependency = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceA,
+      targetArtifactId,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    await new PostgresDependencyRepository(pool!).create(dependency);
+
+    const mutationClient = await pool!.connect();
+    const sourceAPidReady = createDeferred<number>();
+    const sourceBPidReady = createDeferred<number>();
+    type RunSnapshot = Awaited<ReturnType<typeof createCompleteResolutionRun>>;
+    let sourceARun: Promise<{ ok: true; value: RunSnapshot } | { ok: false; error: unknown }> | undefined;
+    let sourceBRun: Promise<{ ok: true; value: RunSnapshot } | { ok: false; error: unknown }> | undefined;
+    try {
+      await mutationClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      const mutationPidResult = await mutationClient.query<{ pid: number }>(
+        "SELECT pg_backend_pid() AS pid",
+      );
+      const mutationPid = mutationPidResult.rows[0]?.pid;
+      if (mutationPid === undefined) throw new Error("Could not identify the reassignment backend.");
+      await mutationClient.query("UPDATE dependencies SET artifact_version_id=$2 WHERE id=$1", [dependency.id, sourceB]);
+
+      sourceARun = captureOutcome(createCompleteResolutionRun(sourceA, sourceAPidReady.resolve));
+      sourceBRun = captureOutcome(createCompleteResolutionRun(sourceB, sourceBPidReady.resolve));
+      const [sourceAPid, sourceBPid] = await Promise.all([sourceAPidReady.promise, sourceBPidReady.promise]);
+      await waitForTransactionBlocker(pool!, sourceAPid, mutationPid);
+      await waitForTransactionBlocker(pool!, sourceBPid, mutationPid);
+      await mutationClient.query("COMMIT");
+
+      const [sourceAOutcome, sourceBOutcome] = await Promise.all([sourceARun, sourceBRun]);
+      if (!sourceAOutcome.ok) throw sourceAOutcome.error;
+      if (!sourceBOutcome.ok) throw sourceBOutcome.error;
+      expect(sourceAOutcome.value.dependencies).toEqual([]);
+      expect(sourceAOutcome.value.resolutions).toEqual([]);
+      expect(sourceBOutcome.value.dependencies.map(({ id }) => id)).toEqual([dependency.id]);
+      expect(sourceBOutcome.value.resolutions.map(({ dependencyId }) => dependencyId)).toEqual([dependency.id]);
+      expect((await pool!.query<{ artifact_version_id: string }>(
+        "SELECT artifact_version_id FROM dependencies WHERE id=$1",
+        [dependency.id],
+      )).rows).toEqual([{ artifact_version_id: sourceB }]);
+
+      await expect(pool!.query(
+        "UPDATE dependencies SET artifact_version_id=$2 WHERE id=$1",
+        [dependency.id, sourceA],
+      )).rejects.toMatchObject({ code: "55000", constraint: "dependencies_resolution_runs_immutable" });
+      await expect(pool!.query(
+        "UPDATE dependency_resolution_runs SET created_at=now() WHERE id=$1",
+        [sourceBOutcome.value.run.id],
+      )).rejects.toMatchObject({ code: "55000", constraint: "dependency_resolution_runs_immutable" });
+    } finally {
+      try {
+        await mutationClient.query("ROLLBACK");
+        if (sourceARun) await sourceARun;
+        if (sourceBRun) await sourceBRun;
+      } finally {
+        mutationClient.release();
+      }
+    }
+  });
+
+  it("acquires reassignment source locks in ascending ID order", async () => {
+    const sourceVersions = [
+      await createVersion(await createArtifact()),
+      await createVersion(await createArtifact()),
+    ].sort();
+    const lowerSource = sourceVersions[0]!;
+    const higherSource = sourceVersions[1]!;
+    const targetArtifactId = await createArtifact();
+    await createVersion(targetArtifactId);
+    const dependency = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: higherSource,
+      targetArtifactId,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    await new PostgresDependencyRepository(pool!).create(dependency);
+
+    const guardClient = await pool!.connect();
+    const updateClient = await pool!.connect();
+    const probeClient = await pool!.connect();
+    try {
+      await guardClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      const guardPidResult = await guardClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const guardPid = guardPidResult.rows[0]?.pid;
+      if (guardPid === undefined) throw new Error("Could not identify the source-lock guard backend.");
+      await guardClient.query("SELECT id FROM artifact_versions WHERE id=$1 FOR UPDATE", [lowerSource]);
+
+      await updateClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      const updatePidResult = await updateClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const updatePid = updatePidResult.rows[0]?.pid;
+      if (updatePid === undefined) throw new Error("Could not identify the reassignment backend.");
+      const updateOutcome = captureOutcome(updateClient.query(
+        "UPDATE dependencies SET artifact_version_id=$2 WHERE id=$1",
+        [dependency.id, lowerSource],
+      ));
+      await waitForTransactionBlocker(pool!, updatePid, guardPid);
+
+      await probeClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      await expect(probeClient.query(
+        "SELECT id FROM artifact_versions WHERE id=$1 FOR UPDATE NOWAIT",
+        [higherSource],
+      )).resolves.toMatchObject({ rows: [{ id: higherSource }] });
+      await probeClient.query("COMMIT");
+
+      await guardClient.query("COMMIT");
+      const outcome = await updateOutcome;
+      if (!outcome.ok) throw outcome.error;
+      await updateClient.query("COMMIT");
+      expect((await pool!.query<{ artifact_version_id: string }>(
+        "SELECT artifact_version_id FROM dependencies WHERE id=$1",
+        [dependency.id],
+      )).rows).toEqual([{ artifact_version_id: lowerSource }]);
+    } finally {
+      try {
+        await guardClient.query("ROLLBACK");
+        await updateClient.query("ROLLBACK");
+        await probeClient.query("ROLLBACK");
+      } finally {
+        guardClient.release();
+        updateClient.release();
+        probeClient.release();
+      }
+    }
+  });
+
+  it("serializes opposite source reassignments without an uncontrolled deadlock", async () => {
+    const sourceA = await createVersion(await createArtifact());
+    const sourceB = await createVersion(await createArtifact());
+    const targetArtifactId = await createArtifact();
+    await createVersion(targetArtifactId);
+    const dependencyA = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceA,
+      targetArtifactId,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    const dependencyB = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceB,
+      targetArtifactId,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    const repository = new PostgresDependencyRepository(pool!);
+    await repository.create(dependencyA);
+    await repository.create(dependencyB);
+
+    const firstClient = await pool!.connect();
+    const secondClient = await pool!.connect();
+    let secondOutcome: ReturnType<typeof captureOutcome<unknown>> | undefined;
+    try {
+      await firstClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      await secondClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      const firstPidResult = await firstClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const secondPidResult = await secondClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const firstPid = firstPidResult.rows[0]?.pid;
+      const secondPid = secondPidResult.rows[0]?.pid;
+      if (firstPid === undefined || secondPid === undefined) throw new Error("Could not identify reassignment backends.");
+
+      await firstClient.query("UPDATE dependencies SET artifact_version_id=$2 WHERE id=$1", [dependencyA.id, sourceB]);
+      secondOutcome = captureOutcome(secondClient.query(
+        "UPDATE dependencies SET artifact_version_id=$2 WHERE id=$1",
+        [dependencyB.id, sourceA],
+      ));
+      await waitForTransactionBlocker(pool!, secondPid, firstPid);
+      await firstClient.query("COMMIT");
+      if (!secondOutcome) throw new Error("The crossing reassignment was not started.");
+      const outcome = await secondOutcome;
+      if (!outcome.ok) throw outcome.error;
+      await secondClient.query("COMMIT");
+
+      expect((await pool!.query<{ id: string; artifact_version_id: string }>(
+        "SELECT id,artifact_version_id FROM dependencies WHERE id=ANY($1::uuid[]) ORDER BY id",
+        [[dependencyA.id, dependencyB.id]],
+      )).rows).toEqual([
+        { id: dependencyA.id, artifact_version_id: sourceB },
+        { id: dependencyB.id, artifact_version_id: sourceA },
+      ].sort((left, right) => left.id.localeCompare(right.id)));
+    } finally {
+      try {
+        await firstClient.query("ROLLBACK");
+        if (secondOutcome) await secondOutcome;
+        await secondClient.query("ROLLBACK");
+      } finally {
+        firstClient.release();
+        secondClient.release();
+      }
+    }
+  });
+
+  it("releases a dependency source lock after rollback before creating a run", async () => {
+    const sourceArtifactId = await createArtifact();
+    const targetArtifactId = await createArtifact();
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    await createVersion(targetArtifactId);
+    const repository = new PostgresDependencyRepository(pool!);
+    const existing = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    const rolledBack = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId,
+      declaredRange: "^2.0.0",
+      createdAt: new Date(),
+    });
+    await repository.create(existing);
+
+    const mutationClient = await pool!.connect();
+    const runPidReady = createDeferred<number>();
+    type RunSnapshot = Awaited<ReturnType<typeof createCompleteResolutionRun>>;
+    let runAttempt: Promise<{ ok: true; value: RunSnapshot } | { ok: false; error: unknown }> | undefined;
+    try {
+      await mutationClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      const mutationPidResult = await mutationClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const mutationPid = mutationPidResult.rows[0]?.pid;
+      if (mutationPid === undefined) throw new Error("Could not identify the rollback backend.");
+      await mutationClient.query(
+        "INSERT INTO dependencies (id,artifact_version_id,target_artifact_id,declared_range,created_at) VALUES ($1,$2,$3,$4,$5)",
+        [rolledBack.id, rolledBack.artifactVersionId, rolledBack.targetArtifactId, rolledBack.declaredRange, rolledBack.createdAt],
+      );
+
+      runAttempt = captureOutcome(createCompleteResolutionRun(sourceVersionId, runPidReady.resolve));
+      const runPid = await runPidReady.promise;
+      await waitForTransactionBlocker(pool!, runPid, mutationPid);
+      await mutationClient.query("ROLLBACK");
+      const outcome = await runAttempt;
+      if (!outcome.ok) throw outcome.error;
+
+      expect(outcome.value.dependencies.map(({ id }) => id)).toEqual([existing.id]);
+      expect(outcome.value.resolutions.map(({ dependencyId }) => dependencyId)).toEqual([existing.id]);
+      expect(await repository.findForVersion(sourceVersionId)).toEqual([existing]);
+      expect(await repository.findRunById(outcome.value.run.id)).not.toBeNull();
+      expect(await repository.findResolutionsForRun(outcome.value.run.id)).toHaveLength(1);
+    } finally {
+      try {
+        await mutationClient.query("ROLLBACK");
+        if (runAttempt) await runAttempt;
+      } finally {
+        mutationClient.release();
+      }
+    }
+  });
+
+  it("reproduces and safely aborts the run-item and dependency-delete lock inversion", async () => {
+    const sourceArtifactId = await createArtifact();
+    const targetArtifactId = await createArtifact();
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    const targetVersionId = await createVersion(targetArtifactId);
+    const dependency = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    await new PostgresDependencyRepository(pool!).create(dependency);
+    const run = DependencyResolutionRun.create({
+      id: randomUUID(),
+      sourceArtifactVersionId: sourceVersionId,
+      createdAt: new Date(),
+    });
+    const runClient = await pool!.connect();
+    const mutationClient = await pool!.connect();
+    let deleteOutcome: ReturnType<typeof captureOutcome<unknown>> | undefined;
+    let itemOutcome: ReturnType<typeof captureOutcome<unknown>> | undefined;
+    try {
+      await runClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      await mutationClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      const runPidResult = await runClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const mutationPidResult = await mutationClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const runPid = runPidResult.rows[0]?.pid;
+      const mutationPid = mutationPidResult.rows[0]?.pid;
+      if (runPid === undefined || mutationPid === undefined) throw new Error("Could not identify deadlock test backends.");
+
+      const runRepository = new PostgresDependencyRepository(runClient);
+      await runRepository.createRun(run);
+      deleteOutcome = captureOutcome(mutationClient.query("DELETE FROM dependencies WHERE id=$1", [dependency.id]));
+      await waitForTransactionBlocker(pool!, mutationPid, runPid);
+      itemOutcome = captureOutcome(runRepository.createResolutionForRun(run.id, {
+        id: randomUUID(),
+        dependencyId: dependency.id,
+        resolvedArtifactVersionId: targetVersionId,
+        resolvedAt: new Date(),
+      }));
+
+      if (!deleteOutcome || !itemOutcome) throw new Error("The deadlock scenario did not start both operations.");
+      const [deletion, item] = await Promise.all([deleteOutcome, itemOutcome]);
+      const deadlocks = [deletion, item].filter(
+        (outcome) => !outcome.ok && typeof outcome.error === "object" && outcome.error !== null
+          && "code" in outcome.error && outcome.error.code === "40P01",
+      );
+      expect(deadlocks).toHaveLength(1);
+      expect([deletion, item].filter((outcome) => !outcome.ok)).toHaveLength(1);
+
+      if (item.ok) {
+        await runClient.query("COMMIT");
+        await mutationClient.query("ROLLBACK");
+        expect(deletion).toMatchObject({ ok: false, error: { code: "40P01" } });
+      } else {
+        await runClient.query("ROLLBACK");
+        expect(item).toMatchObject({ ok: false, error: { code: "40P01" } });
+        if (!deletion.ok) throw deletion.error;
+        await mutationClient.query("COMMIT");
+      }
+
+      const persistedRun = await new PostgresDependencyRepository(pool!).findRunById(run.id);
+      const persistedDependencies = await new PostgresDependencyRepository(pool!).findForVersion(sourceVersionId);
+      if (item.ok) {
+        expect(persistedRun?.snapshot()).toEqual(run.snapshot());
+        expect(persistedDependencies.map(({ id }) => id)).toEqual([dependency.id]);
+        expect(await new PostgresDependencyRepository(pool!).findResolutionsForRun(run.id)).toHaveLength(1);
+      } else {
+        expect(persistedRun).toBeNull();
+        expect(persistedDependencies).toEqual([]);
+        expect(await new PostgresDependencyRepository(pool!).findResolutionsForRun(run.id)).toEqual([]);
+      }
+    } finally {
+      try {
+        await runClient.query("ROLLBACK");
+        if (deleteOutcome) await deleteOutcome;
+        if (itemOutcome) await itemOutcome;
+        await mutationClient.query("ROLLBACK");
+      } finally {
+        runClient.release();
+        mutationClient.release();
+      }
+    }
+  }, 15_000);
 
   it("preserves owner-scoped slug, version, and content-hash uniqueness", async () => {
     const artifactA = await createArtifact(owners[0], "shared-slug");
