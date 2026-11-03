@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DeleteArtifactService, DraftWorkflowService, ImportDraftService, PublishVersionService, ResolveDependencyService, RestoreArtifactService } from "../../src/application/services.js";
 import { baselinePostgresMigrations, runPostgresMigrations } from "../../src/adapters/postgres-migrations.js";
@@ -56,21 +56,133 @@ async function waitForTransactionBlocker(pool: Pool, blockedPid: number, blocker
   throw new Error(`Backend ${blockedPid} did not block on backend ${blockerPid} within 5 seconds.`);
 }
 
-function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
+async function cancelBackendQuery(pool: Pool, pid: number): Promise<boolean> {
+  const result = await pool.query<{ canceled: boolean }>(
+    "SELECT pg_cancel_backend($1) AS canceled",
+    [pid],
+  );
+  return result.rows[0]?.canceled === true;
 }
 
-function captureOutcome<T>(promise: Promise<T>): Promise<
-  { ok: true; value: T } | { ok: false; error: unknown }
-> {
+type OperationOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function captureOutcome<T>(promise: Promise<T>): Promise<OperationOutcome<T>> {
   return promise.then(
     (value) => ({ ok: true as const, value }),
     (error: unknown) => ({ ok: false as const, error }),
   );
+}
+
+function startOperationWithBackendPid<T>(
+  operation: (publishPid: (pid: number) => void) => Promise<T>,
+): { backendPid: Promise<number>; outcome: Promise<OperationOutcome<T>> } {
+  const readiness = createDeferred<number>();
+  const outcome = captureOutcome(Promise.resolve().then(() => operation(readiness.resolve)));
+  void outcome.then((result) => {
+    readiness.reject(result.ok
+      ? new Error("Operation completed without publishing its PostgreSQL backend PID.")
+      : result.error);
+  });
+  return { backendPid: readiness.promise, outcome };
+}
+
+async function cleanupClientAndSettle(
+  client: PoolClient,
+  operations: readonly Promise<OperationOutcome<unknown>>[],
+): Promise<void> {
+  const errors: unknown[] = [];
+  let released = false;
+  try {
+    await client.query("ROLLBACK");
+  } catch (error) {
+    errors.push(error);
+    try {
+      client.release(error instanceof Error ? error : true);
+      released = true;
+    } catch (releaseError) {
+      errors.push(releaseError);
+    }
+  }
+
+  const outcomes = await Promise.allSettled(operations);
+  for (const result of outcomes) {
+    if (result.status === "rejected") errors.push(result.reason);
+    else if (!result.value.ok) errors.push(result.value.error);
+  }
+
+  if (!released) {
+    try {
+      client.release();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length > 0) throw new AggregateError(errors, "PostgreSQL test cleanup failed.");
+}
+
+async function cleanupClientsAndSettle(
+  entries: readonly {
+    client: PoolClient;
+    operations: readonly Promise<OperationOutcome<unknown>>[];
+  }[],
+): Promise<void> {
+  const errors: unknown[] = [];
+  for (const entry of entries) {
+    try {
+      await cleanupClientAndSettle(entry.client, entry.operations);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length > 0) throw new AggregateError(errors, "PostgreSQL test cleanup failed.");
+}
+
+async function withCleanupPreservingFailure<T>(
+  operation: () => Promise<T>,
+  cleanup: () => Promise<void>,
+): Promise<T> {
+  let operationFailed = false;
+  let operationError: unknown;
+  try {
+    return await operation();
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+    throw error;
+  } finally {
+    try {
+      await cleanup();
+    } catch (cleanupError) {
+      if (!operationFailed) throw cleanupError;
+      if ((typeof operationError === "object" || typeof operationError === "function") && operationError !== null) {
+        try {
+          Object.defineProperty(operationError, "cleanupError", { configurable: true, value: cleanupError });
+        } catch (diagnosticError) {
+          throw new AggregateError([operationError, cleanupError, diagnosticError], "Operation and cleanup both failed.", {
+            cause: operationError,
+          });
+        }
+      } else {
+        throw new AggregateError([operationError, cleanupError], "Operation and cleanup both failed.", {
+          cause: operationError,
+        });
+      }
+    }
+  }
 }
 
 const databaseUrl = requiredTestDatabaseUrl();
@@ -691,7 +803,7 @@ describe("PostgreSQL persistence hardening", () => {
 
   async function createCompleteResolutionRun(
     sourceVersionId: string,
-    onBackendPid?: (pid: number) => void,
+    onBackendPid: (pid: number) => void,
   ): Promise<{
     run: DependencyResolutionRun;
     dependencies: Dependency[];
@@ -709,7 +821,7 @@ describe("PostgreSQL persistence hardening", () => {
       const backendResult = await transactions.database.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
       const pid = backendResult.rows[0]?.pid;
       if (pid === undefined) throw new Error("Could not identify the managed transaction backend.");
-      onBackendPid?.(pid);
+      onBackendPid(pid);
 
       await repository.createRun(run);
       const dependencies = await repository.findForVersion(sourceVersionId);
@@ -1087,6 +1199,49 @@ describe("PostgreSQL persistence hardening", () => {
     expect(isolationLevel).toBe("read committed");
   });
 
+  it("rejects backend readiness promptly on pre-PID failure and cleans up", async () => {
+    const client = await pool!.connect();
+    const markerId = randomUUID();
+    const operationError = new Error("Injected managed transaction failure before backend PID publication.");
+    let operation: ReturnType<typeof startOperationWithBackendPid<void>> | undefined;
+    const attempt = withCleanupPreservingFailure(async () => {
+      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      await client.query("INSERT INTO users (id) VALUES ($1)", [markerId]);
+      operation = startOperationWithBackendPid(async () => {
+        const transactions = new PostgresTransactionManager(pool!);
+        await transactions.run(async () => {
+          throw operationError;
+        });
+      });
+
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let readiness: { status: "ready"; pid: number } | { status: "rejected"; error: unknown } | { status: "timeout" };
+      try {
+        readiness = await Promise.race([
+          operation.backendPid.then(
+            (pid) => ({ status: "ready" as const, pid }),
+            (error: unknown) => ({ status: "rejected" as const, error }),
+          ),
+          new Promise<{ status: "timeout" }>((resolveTimeout) => {
+            timeout = setTimeout(() => resolveTimeout({ status: "timeout" }), 1000);
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+
+      if (readiness.status === "rejected") throw readiness.error;
+      throw new Error("Backend readiness did not reject promptly with the operation failure.");
+    }, () => cleanupClientAndSettle(client, operation ? [operation.outcome] : []));
+
+    await expect(attempt).rejects.toBe(operationError);
+    const marker = await pool!.query<{ present: boolean }>(
+      "SELECT EXISTS (SELECT 1 FROM users WHERE id=$1) AS present",
+      [markerId],
+    );
+    expect(marker.rows[0]?.present).toBe(false);
+  });
+
   it("serializes run creation against a concurrent dependency insert", async () => {
     const sourceArtifactId = await createArtifact();
     const targetArtifactId = await createArtifact();
@@ -1256,12 +1411,9 @@ describe("PostgreSQL persistence hardening", () => {
       if (operation !== "INSERT") await repository.create(retained);
 
       const mutationClient = await pool!.connect();
-      const runPidReady = createDeferred<number>();
       type RunSnapshot = Awaited<ReturnType<typeof createCompleteResolutionRun>>;
-      let runAttempt: Promise<
-        { ok: true; value: RunSnapshot } | { ok: false; error: unknown }
-      > | undefined;
-      try {
+      let runAttempt: ReturnType<typeof startOperationWithBackendPid<RunSnapshot>> | undefined;
+      await withCleanupPreservingFailure(async () => {
         await mutationClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
         const mutationPidResult = await mutationClient.query<{ pid: number }>(
           "SELECT pg_backend_pid() AS pid",
@@ -1283,12 +1435,13 @@ describe("PostgreSQL persistence hardening", () => {
           await mutationClient.query("DELETE FROM dependencies WHERE id=$1", [existing.id]);
         }
 
-        runAttempt = captureOutcome(createCompleteResolutionRun(sourceVersionId, runPidReady.resolve));
-        const runPid = await runPidReady.promise;
+        runAttempt = startOperationWithBackendPid((publishPid) =>
+          createCompleteResolutionRun(sourceVersionId, publishPid));
+        const runPid = await runAttempt.backendPid;
         await waitForTransactionBlocker(pool!, runPid, mutationPid);
         await mutationClient.query("COMMIT");
 
-        const outcome = await runAttempt;
+        const outcome = await runAttempt.outcome;
         if (!outcome.ok) throw outcome.error;
         expect(outcome.value.run.sourceArtifactVersionId).toBe(sourceVersionId);
 
@@ -1301,14 +1454,7 @@ describe("PostgreSQL persistence hardening", () => {
           .toEqual(expected.sort());
         expect(outcome.value.resolutions.map(({ dependencyId }) => dependencyId).sort())
           .toEqual(expected.map(([id]) => id).sort());
-      } finally {
-        try {
-          await mutationClient.query("ROLLBACK");
-          if (runAttempt) await runAttempt;
-        } finally {
-          mutationClient.release();
-        }
-      }
+      }, () => cleanupClientAndSettle(mutationClient, runAttempt ? [runAttempt.outcome] : []));
     },
   );
 
@@ -1327,12 +1473,10 @@ describe("PostgreSQL persistence hardening", () => {
     await new PostgresDependencyRepository(pool!).create(dependency);
 
     const mutationClient = await pool!.connect();
-    const sourceAPidReady = createDeferred<number>();
-    const sourceBPidReady = createDeferred<number>();
     type RunSnapshot = Awaited<ReturnType<typeof createCompleteResolutionRun>>;
-    let sourceARun: Promise<{ ok: true; value: RunSnapshot } | { ok: false; error: unknown }> | undefined;
-    let sourceBRun: Promise<{ ok: true; value: RunSnapshot } | { ok: false; error: unknown }> | undefined;
-    try {
+    let sourceARun: ReturnType<typeof startOperationWithBackendPid<RunSnapshot>> | undefined;
+    let sourceBRun: ReturnType<typeof startOperationWithBackendPid<RunSnapshot>> | undefined;
+    await withCleanupPreservingFailure(async () => {
       await mutationClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
       const mutationPidResult = await mutationClient.query<{ pid: number }>(
         "SELECT pg_backend_pid() AS pid",
@@ -1341,14 +1485,14 @@ describe("PostgreSQL persistence hardening", () => {
       if (mutationPid === undefined) throw new Error("Could not identify the reassignment backend.");
       await mutationClient.query("UPDATE dependencies SET artifact_version_id=$2 WHERE id=$1", [dependency.id, sourceB]);
 
-      sourceARun = captureOutcome(createCompleteResolutionRun(sourceA, sourceAPidReady.resolve));
-      sourceBRun = captureOutcome(createCompleteResolutionRun(sourceB, sourceBPidReady.resolve));
-      const [sourceAPid, sourceBPid] = await Promise.all([sourceAPidReady.promise, sourceBPidReady.promise]);
+      sourceARun = startOperationWithBackendPid((publishPid) => createCompleteResolutionRun(sourceA, publishPid));
+      sourceBRun = startOperationWithBackendPid((publishPid) => createCompleteResolutionRun(sourceB, publishPid));
+      const [sourceAPid, sourceBPid] = await Promise.all([sourceARun.backendPid, sourceBRun.backendPid]);
       await waitForTransactionBlocker(pool!, sourceAPid, mutationPid);
       await waitForTransactionBlocker(pool!, sourceBPid, mutationPid);
       await mutationClient.query("COMMIT");
 
-      const [sourceAOutcome, sourceBOutcome] = await Promise.all([sourceARun, sourceBRun]);
+      const [sourceAOutcome, sourceBOutcome] = await Promise.all([sourceARun.outcome, sourceBRun.outcome]);
       if (!sourceAOutcome.ok) throw sourceAOutcome.error;
       if (!sourceBOutcome.ok) throw sourceBOutcome.error;
       expect(sourceAOutcome.value.dependencies).toEqual([]);
@@ -1368,15 +1512,10 @@ describe("PostgreSQL persistence hardening", () => {
         "UPDATE dependency_resolution_runs SET created_at=now() WHERE id=$1",
         [sourceBOutcome.value.run.id],
       )).rejects.toMatchObject({ code: "55000", constraint: "dependency_resolution_runs_immutable" });
-    } finally {
-      try {
-        await mutationClient.query("ROLLBACK");
-        if (sourceARun) await sourceARun;
-        if (sourceBRun) await sourceBRun;
-      } finally {
-        mutationClient.release();
-      }
-    }
+    }, () => cleanupClientAndSettle(mutationClient, [
+      ...(sourceARun ? [sourceARun.outcome] : []),
+      ...(sourceBRun ? [sourceBRun.outcome] : []),
+    ]));
   });
 
   it("acquires reassignment source locks in ascending ID order", async () => {
@@ -1532,12 +1671,10 @@ describe("PostgreSQL persistence hardening", () => {
       createdAt: new Date(),
     });
     await repository.create(existing);
-
     const mutationClient = await pool!.connect();
-    const runPidReady = createDeferred<number>();
     type RunSnapshot = Awaited<ReturnType<typeof createCompleteResolutionRun>>;
-    let runAttempt: Promise<{ ok: true; value: RunSnapshot } | { ok: false; error: unknown }> | undefined;
-    try {
+    let runAttempt: ReturnType<typeof startOperationWithBackendPid<RunSnapshot>> | undefined;
+    await withCleanupPreservingFailure(async () => {
       await mutationClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
       const mutationPidResult = await mutationClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
       const mutationPid = mutationPidResult.rows[0]?.pid;
@@ -1547,11 +1684,12 @@ describe("PostgreSQL persistence hardening", () => {
         [rolledBack.id, rolledBack.artifactVersionId, rolledBack.targetArtifactId, rolledBack.declaredRange, rolledBack.createdAt],
       );
 
-      runAttempt = captureOutcome(createCompleteResolutionRun(sourceVersionId, runPidReady.resolve));
-      const runPid = await runPidReady.promise;
+      runAttempt = startOperationWithBackendPid((publishPid) =>
+        createCompleteResolutionRun(sourceVersionId, publishPid));
+      const runPid = await runAttempt.backendPid;
       await waitForTransactionBlocker(pool!, runPid, mutationPid);
       await mutationClient.query("ROLLBACK");
-      const outcome = await runAttempt;
+      const outcome = await runAttempt.outcome;
       if (!outcome.ok) throw outcome.error;
 
       expect(outcome.value.dependencies.map(({ id }) => id)).toEqual([existing.id]);
@@ -1559,14 +1697,191 @@ describe("PostgreSQL persistence hardening", () => {
       expect(await repository.findForVersion(sourceVersionId)).toEqual([existing]);
       expect(await repository.findRunById(outcome.value.run.id)).not.toBeNull();
       expect(await repository.findResolutionsForRun(outcome.value.run.id)).toHaveLength(1);
-    } finally {
-      try {
-        await mutationClient.query("ROLLBACK");
-        if (runAttempt) await runAttempt;
-      } finally {
-        mutationClient.release();
+    }, () => cleanupClientAndSettle(mutationClient, runAttempt ? [runAttempt.outcome] : []));
+  });
+
+  it("keeps a complete run when a blocked dependency deletion is explicitly aborted", async () => {
+    const sourceVersionId = await createVersion(await createArtifact());
+    const targetArtifactA = await createArtifact();
+    const targetVersionA = await createVersion(targetArtifactA);
+    const targetArtifactB = await createArtifact();
+    const targetVersionB = await createVersion(targetArtifactB);
+    const repository = new PostgresDependencyRepository(pool!);
+    const dependencyA = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetArtifactA,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    const dependencyB = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetArtifactB,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    await repository.create(dependencyA);
+    await repository.create(dependencyB);
+
+    const run = DependencyResolutionRun.create({
+      id: randomUUID(),
+      sourceArtifactVersionId: sourceVersionId,
+      createdAt: new Date(),
+    });
+    const runClient = await pool!.connect();
+    const deleteClient = await pool!.connect();
+    let deletePid: number | undefined;
+    let deleteAttempt: Promise<OperationOutcome<unknown>> | undefined;
+    let deleteOutcomeObserved = false;
+    await withCleanupPreservingFailure(async () => {
+      await runClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      await deleteClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      const runPidResult = await runClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const deletePidResult = await deleteClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const runPid = runPidResult.rows[0]?.pid;
+      deletePid = deletePidResult.rows[0]?.pid;
+      if (runPid === undefined || deletePid === undefined) {
+        throw new Error("Could not identify the survivor-state test backends.");
       }
-    }
+
+      const transactionalRepository = new PostgresDependencyRepository(runClient);
+      await transactionalRepository.createRun(run);
+      deleteAttempt = captureOutcome(deleteClient.query(
+        "DELETE FROM dependencies WHERE id=$1",
+        [dependencyA.id],
+      ));
+      await waitForTransactionBlocker(pool!, deletePid, runPid);
+      expect(await cancelBackendQuery(pool!, deletePid)).toBe(true);
+
+      const deleteOutcome = await deleteAttempt;
+      deleteOutcomeObserved = true;
+      expect(deleteOutcome).toMatchObject({ ok: false, error: { code: "57014" } });
+      await deleteClient.query("ROLLBACK");
+
+      await transactionalRepository.createResolutionForRun(run.id, {
+        id: randomUUID(),
+        dependencyId: dependencyA.id,
+        resolvedArtifactVersionId: targetVersionA,
+        resolvedAt: new Date(),
+      });
+      await transactionalRepository.createResolutionForRun(run.id, {
+        id: randomUUID(),
+        dependencyId: dependencyB.id,
+        resolvedArtifactVersionId: targetVersionB,
+        resolvedAt: new Date(),
+      });
+      await runClient.query("COMMIT");
+
+      expect((await repository.findRunById(run.id))?.snapshot()).toEqual(run.snapshot());
+      expect((await repository.findForVersion(sourceVersionId)).map(({ id }) => id).sort())
+        .toEqual([dependencyA.id, dependencyB.id].sort());
+      expect((await repository.findResolutionsForRun(run.id).then((items) =>
+        items.map(({ dependencyId }) => dependencyId).sort()))
+      ).toEqual([dependencyA.id, dependencyB.id].sort());
+    }, () => cleanupClientsAndSettle([
+      { client: runClient, operations: [] },
+      { client: deleteClient, operations: deleteAttempt && !deleteOutcomeObserved ? [deleteAttempt] : [] },
+    ]));
+  });
+
+  it("keeps a dependency deletion when the blocked run transaction is explicitly aborted", async () => {
+    const sourceVersionId = await createVersion(await createArtifact());
+    const targetArtifactA = await createArtifact();
+    const targetVersionA = await createVersion(targetArtifactA);
+    const targetArtifactB = await createArtifact();
+    const targetVersionB = await createVersion(targetArtifactB);
+    const repository = new PostgresDependencyRepository(pool!);
+    const dependencyA = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetArtifactA,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    const dependencyB = Dependency.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetArtifactB,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    await repository.create(dependencyA);
+    await repository.create(dependencyB);
+
+    const run = DependencyResolutionRun.create({
+      id: randomUUID(),
+      sourceArtifactVersionId: sourceVersionId,
+      createdAt: new Date(),
+    });
+    const runClient = await pool!.connect();
+    const deleteClient = await pool!.connect();
+    let runPid: number | undefined;
+    let deleteAttempt: Promise<OperationOutcome<unknown>> | undefined;
+    let runItemAttempt: Promise<OperationOutcome<unknown>> | undefined;
+    let deleteOutcomeObserved = false;
+    let runItemOutcomeObserved = false;
+    await withCleanupPreservingFailure(async () => {
+      await runClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      await deleteClient.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      const runPidResult = await runClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const deletePidResult = await deleteClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      runPid = runPidResult.rows[0]?.pid;
+      const deletePid = deletePidResult.rows[0]?.pid;
+      if (runPid === undefined || deletePid === undefined) {
+        throw new Error("Could not identify the survivor-state test backends.");
+      }
+
+      const transactionalRepository = new PostgresDependencyRepository(runClient);
+      await transactionalRepository.createRun(run);
+      deleteAttempt = captureOutcome(deleteClient.query(
+        "DELETE FROM dependencies WHERE id=$1",
+        [dependencyA.id],
+      ));
+      await waitForTransactionBlocker(pool!, deletePid, runPid);
+      runItemAttempt = captureOutcome(transactionalRepository.createResolutionForRun(run.id, {
+        id: randomUUID(),
+        dependencyId: dependencyA.id,
+        resolvedArtifactVersionId: targetVersionA,
+        resolvedAt: new Date(),
+      }));
+      await waitForTransactionBlocker(pool!, runPid, deletePid);
+      expect(await cancelBackendQuery(pool!, runPid)).toBe(true);
+
+      const runItemOutcome = await runItemAttempt;
+      runItemOutcomeObserved = true;
+      expect(runItemOutcome).toMatchObject({ ok: false, error: { code: "57014" } });
+      await runClient.query("ROLLBACK");
+
+      const deleteOutcome = await deleteAttempt;
+      deleteOutcomeObserved = true;
+      if (!deleteOutcome.ok) throw deleteOutcome.error;
+      await deleteClient.query("COMMIT");
+
+      expect(await repository.findRunById(run.id)).toBeNull();
+      expect(await repository.findResolutionsForRun(run.id)).toEqual([]);
+      expect((await repository.findForVersion(sourceVersionId)).map(({ id }) => id)).toEqual([dependencyB.id]);
+      expect((await repository.findForVersion(sourceVersionId))[0]?.artifactVersionId).toBe(sourceVersionId);
+    }, async () => {
+      const cleanupErrors: unknown[] = [];
+      if (runItemAttempt && !runItemOutcomeObserved && runPid !== undefined) {
+        try {
+          await cancelBackendQuery(pool!, runPid);
+          await runItemAttempt;
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+      try {
+        await cleanupClientsAndSettle([
+          { client: runClient, operations: runItemAttempt && !runItemOutcomeObserved ? [runItemAttempt] : [] },
+          { client: deleteClient, operations: deleteAttempt && !deleteOutcomeObserved ? [deleteAttempt] : [] },
+        ]);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, "PostgreSQL test cleanup failed.");
+    });
   });
 
   it("reproduces and safely aborts the run-item and dependency-delete lock inversion", async () => {
