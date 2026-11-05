@@ -1,6 +1,6 @@
 # 02 — PostgreSQL Schema
 
-The persistence contract is implemented by migrations `001` through `007`. Together they create fourteen application tables. The migration runner also creates the operational `schema_migrations` ledger; it is not a domain table. The schema uses PostgreSQL constraints and triggers for database invariants; SemVer parsing and range evaluation remain domain/application responsibilities.
+The persistence contract is implemented by migrations `001` through `009`. Together they create fourteen application tables. The migration runner also creates the operational `schema_migrations` ledger; it is not a domain table. The schema uses PostgreSQL constraints and triggers for database invariants; SemVer parsing and range evaluation remain domain/application responsibilities.
 
 `npm run db:migrate` applies ordered migrations in transactions, records the migration
 filename and SHA-256 checksum, and verifies checksums on repeat runs. Applied migration
@@ -188,6 +188,10 @@ GitHub import is represented as source/provenance metadata and does not create F
 | `id` | `UUID` | primary key |
 | `source_artifact_version_id` | `UUID` | not null, FK to `artifact_versions(id)` |
 | `created_at` | `TIMESTAMPTZ` | not null, default `now()` |
+| `initiator_user_id` | `UUID` | nullable, FK to `users(id)`; null for pre-manifest runs |
+| `manifest_version` | `SMALLINT` | nullable for pre-manifest runs; positive when populated |
+| `policy_version` | `TEXT` | nullable for pre-manifest runs; non-empty when populated |
+| `manifest_hash` | `TEXT` | nullable for pre-manifest runs; `sha256:` plus 64 lowercase hex characters when populated |
 
 A run is the parent for the complete direct-dependency resolution set of one
 exact source Artifact Version. Deferred constraint triggers check at commit that
@@ -195,6 +199,14 @@ the run has exactly one item for every source declaration; empty sets are valid.
 The transaction owner must create the run and its items in the same transaction.
 The database prevents adding or mutating source declarations after a run exists,
 so a completed run's item set cannot be extended later.
+
+Migration 009 adds the initiator and canonical-manifest metadata. Existing runs
+retain null metadata because their initiating actors and historical manifests
+cannot be reconstructed. A check constraint requires metadata to be either
+entirely absent or complete and valid; the source-version workflow populates all
+four fields for each new run. These columns are included in future tombstone
+snapshots by the existing `to_jsonb(run)` snapshot builder; previously persisted
+snapshots are not rewritten.
 
 Migration 008 serializes run creation and dependency declaration changes with a
 row-level `FOR UPDATE` lock on the source `artifact_versions` row. The
@@ -305,6 +317,8 @@ source-version lineage references, and immutable lifecycle snapshots. Migration 
 Draft persistence and version content snapshots. Migration 007 adds resolution-run
 persistence, integrity and immutability triggers, and run-aware tombstone snapshots.
 Migration 008 serializes run creation against dependency INSERT, UPDATE, and DELETE.
+Migration 009 adds initiator and canonical-manifest metadata to resolution runs without
+backfilling unknown historical values.
 
 ## Indexes
 

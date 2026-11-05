@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { RebuildArtifactDiscoveryIndexService, ListArtifactsService } from "./application/discovery.js";
 import { DeleteArtifactService, DraftWorkflowService, ImportDraftService, UpdateArtifactMetadataService } from "./application/services.js";
+import { ResolveSourceVersionDependenciesService } from "./application/source-version-dependency-resolution.js";
 import { assertPostgresMigrationsCurrent } from "./adapters/postgres-migrations.js";
 import {
   PostgresArtifactDiscoveryRepository,
@@ -67,6 +68,15 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
       provenances,
       compatibilityReports,
     );
+    const resolveSourceVersionDependencies = new ResolveSourceVersionDependenciesService(
+      artifacts,
+      versions,
+      versions,
+      dependencyRepository,
+      dependencyRepository,
+      access,
+      transactions,
+    );
     const deleteArtifact = new DeleteArtifactService(artifacts, access, undefined, transactions);
     const updateArtifactMetadata = new UpdateArtifactMetadataService(artifacts, access, undefined, transactions);
     const importDraft = new ImportDraftService(new SafeGitHubRawSource(), drafts);
@@ -84,6 +94,7 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
         authenticator: options.authenticator,
         ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),
       }),
+      resolveSourceVersionDependencies,
       close: async () => {
         if (ownsPool) await pool.end();
       },

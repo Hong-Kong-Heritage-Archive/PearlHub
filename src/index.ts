@@ -1,4 +1,5 @@
 export * from "./application/services.js";
+export * from "./application/source-version-dependency-resolution.js";
 export * from "./contracts/index.js";
 export * from "./domain/artifact.js";
 export * from "./domain/artifact-version.js";

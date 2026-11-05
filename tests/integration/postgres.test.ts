@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DeleteArtifactService, DraftWorkflowService, ImportDraftService, PublishVersionService, ResolveDependencyService, RestoreArtifactService } from "../../src/application/services.js";
+import { ResolveSourceVersionDependenciesService } from "../../src/application/source-version-dependency-resolution.js";
 import { baselinePostgresMigrations, runPostgresMigrations } from "../../src/adapters/postgres-migrations.js";
 import { PostgresArtifactDiscoveryRepository, PostgresArtifactRepository, PostgresArtifactVersionRepository, PostgresCompatibilityReportRepository, PostgresDependencyRepository, PostgresDraftRepository, PostgresLineageRepository, PostgresProvenanceRepository, PostgresTransactionManager, PostgresUserIdentityRepository } from "../../src/adapters/postgres.js";
 import { MemoryArtifactContentStore } from "../../src/adapters/content-store.js";
@@ -17,6 +18,7 @@ import { createHttpApp } from "../../src/http/app.js";
 import { ListArtifactsService } from "../../src/application/discovery.js";
 import { createPostgresRuntime } from "../../src/runtime.js";
 import type { CompatibilityReport, Provenance } from "../../src/domain/records.js";
+import type { ResolutionSourceVersionLock } from "../../src/ports/repositories.js";
 
 function requiredTestDatabaseUrl(): string {
   const value = process.env.TEST_DATABASE_URL;
@@ -223,12 +225,13 @@ describe("PostgreSQL persistence hardening", () => {
       "006_draft_origins.sql",
       "007_dependency_resolution_runs.sql",
       "008_dependency_resolution_concurrency.sql",
+      "009_dependency_resolution_manifest.sql",
     ]);
     expect(repeatedMigrationRun).toEqual([]);
     const ledger = await pool.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM schema_migrations",
     );
-    expect(ledger.rows[0]?.count).toBe(8);
+    expect(ledger.rows[0]?.count).toBe(9);
   });
 
   it("baselines a complete manually migrated schema without rerunning SQL", async () => {
@@ -250,6 +253,7 @@ describe("PostgreSQL persistence hardening", () => {
         "006_draft_origins.sql",
         "007_dependency_resolution_runs.sql",
         "008_dependency_resolution_concurrency.sql",
+        "009_dependency_resolution_manifest.sql",
       ]) {
         const sql = await readFile(resolve(process.cwd(), "migrations", migrationName), "utf8");
         await baselinePool.query(sql);
@@ -264,6 +268,7 @@ describe("PostgreSQL persistence hardening", () => {
         "006_draft_origins.sql",
         "007_dependency_resolution_runs.sql",
         "008_dependency_resolution_concurrency.sql",
+        "009_dependency_resolution_manifest.sql",
       ]);
       expect(await runPostgresMigrations(baselinePool)).toEqual([]);
     } finally {
@@ -323,6 +328,23 @@ describe("PostgreSQL persistence hardening", () => {
       await legacyPool.query(migration);
       const concurrencyMigration = await readFile(resolve(process.cwd(), "migrations", "008_dependency_resolution_concurrency.sql"), "utf8");
       await legacyPool.query(concurrencyMigration);
+      const historicalArtifactId = randomUUID();
+      const historicalVersionId = randomUUID();
+      const historicalRunId = randomUUID();
+      await legacyPool.query(
+        "INSERT INTO artifacts (id,owner_id,name,slug,visibility,status) VALUES ($1,$2,'Historical run',$3,'private','active')",
+        [historicalArtifactId, ownerId, `historical-${historicalArtifactId.replaceAll("-", "")}`],
+      );
+      await legacyPool.query(
+        "INSERT INTO artifact_versions (id,artifact_id,version,content_hash,content_location,published_at) VALUES ($1,$2,'1.0.0','historical-hash','historical-location',now())",
+        [historicalVersionId, historicalArtifactId],
+      );
+      await legacyPool.query(
+        "INSERT INTO dependency_resolution_runs (id,source_artifact_version_id) VALUES ($1,$2)",
+        [historicalRunId, historicalVersionId],
+      );
+      const manifestMigration = await readFile(resolve(process.cwd(), "migrations", "009_dependency_resolution_manifest.sql"), "utf8");
+      await legacyPool.query(manifestMigration);
 
       const dependencies = new PostgresDependencyRepository(legacyPool);
       expect(await dependencies.findResolutions(dependencyId)).toEqual([{
@@ -332,9 +354,18 @@ describe("PostgreSQL persistence hardening", () => {
         resolvedArtifactVersionId: targetVersionId,
         resolvedAt: expect.any(Date),
       }]);
-      expect((await legacyPool.query("SELECT count(*)::int AS count FROM dependency_resolution_runs")).rows[0]?.count).toBe(0);
+      expect((await legacyPool.query("SELECT count(*)::int AS count FROM dependency_resolution_runs")).rows[0]?.count).toBe(1);
       expect((await legacyPool.query("SELECT source_artifact_version_id FROM dependency_resolutions WHERE id=$1", [resolutionId])).rows[0])
         .toEqual({ source_artifact_version_id: sourceVersionId });
+      expect((await legacyPool.query(
+        "SELECT initiator_user_id,manifest_version,policy_version,manifest_hash FROM dependency_resolution_runs WHERE id=$1",
+        [historicalRunId],
+      )).rows).toEqual([{
+        initiator_user_id: null,
+        manifest_version: null,
+        policy_version: null,
+        manifest_hash: null,
+      }]);
     } finally {
       await legacyPool.end();
       if (created) await adminPool.query(`DROP SCHEMA ${legacySchema} CASCADE`);
@@ -641,7 +672,7 @@ describe("PostgreSQL persistence hardening", () => {
       provenances: ["id", "artifact_version_id", "source_type", "source_url", "source_ref", "imported_at"],
       dependencies: ["id", "artifact_version_id", "target_artifact_id", "declared_range", "created_at"],
       dependency_resolutions: ["id", "dependency_id", "resolved_artifact_version_id", "resolved_at", "target_artifact_id", "run_id", "source_artifact_version_id"],
-      dependency_resolution_runs: ["id", "source_artifact_version_id", "created_at"],
+      dependency_resolution_runs: ["id", "source_artifact_version_id", "created_at", "initiator_user_id", "manifest_version", "policy_version", "manifest_hash"],
       compatibility_reports: ["id", "artifact_version_id", "target_artifact_version_id", "status", "report", "created_at"],
       tombstone_snapshots: ["id", "artifact_id", "snapshot_number", "snapshot", "created_at"],
       user_identities: ["id", "user_id", "provider", "subject", "created_at"],
@@ -716,7 +747,9 @@ describe("PostgreSQL persistence hardening", () => {
       ["dependency_resolutions_version_target_fkey", "f"],
       ["dependency_resolution_items_complete", "t"],
       ["dependency_resolution_runs_complete", "t"],
+      ["dependency_resolution_runs_initiator_user_id_fkey", "f"],
       ["dependency_resolution_runs_id_source_version_key", "u"],
+      ["dependency_resolution_runs_manifest_metadata_check", "c"],
       ["dependency_resolution_runs_pkey", "p"],
       ["dependency_resolution_runs_source_artifact_version_id_fkey", "f"],
       ["provenances_artifact_version_id_fkey", "f"],
@@ -849,6 +882,335 @@ describe("PostgreSQL persistence hardening", () => {
       resolutions: await repository.findResolutionsForRun(run.id),
     };
   }
+
+  it("resolves every direct dependency through the runtime and persists its actor and manifest", async () => {
+    const sourceArtifactId = await createArtifact(owners[0], randomUUID(), "private");
+    const targetA = await createArtifact(owners[1], randomUUID(), "public");
+    const targetB = await createArtifact(owners[2], randomUUID(), "public");
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    await createVersion(targetA, "1.1.0", "target-a-low");
+    const targetAHigh = await createVersion(targetA, "1.8.0", "target-a-high");
+    const targetBMatch = await createVersion(targetB, "2.2.0", "target-b-match");
+    await createVersion(targetB, "3.0.0", "target-b-high");
+    const dependencyAId = "00000000-0000-4000-8000-000000000011";
+    const dependencyBId = "00000000-0000-4000-8000-000000000012";
+    const dependencyA = Dependency.create({
+      id: dependencyAId,
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetA,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    });
+    const dependencyB = Dependency.create({
+      id: dependencyBId,
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetB,
+      declaredRange: "^2.0.0",
+      createdAt: new Date(),
+    });
+    const dependencyRepository = new PostgresDependencyRepository(pool!);
+    await dependencyRepository.create(dependencyA);
+    await dependencyRepository.create(dependencyB);
+
+    const runtime = await createPostgresRuntime({
+      databaseUrl,
+      pool: pool!,
+      authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "resolution-test-token"),
+      contentStore: new MemoryArtifactContentStore(),
+    });
+    try {
+      const result = await runtime.resolveSourceVersionDependencies.execute({
+        sourceArtifactVersionId: sourceVersionId,
+        actorId: owners[0]!,
+      });
+      expect(result.dependencies.map(({ dependencyId, resolvedArtifactVersionId }) => [dependencyId, resolvedArtifactVersionId]))
+        .toEqual([[dependencyA.id, targetAHigh], [dependencyB.id, targetBMatch]]);
+      expect(result.initiatorUserId).toBe(owners[0]);
+      expect(result.manifestVersion).toBe(1);
+      expect(result.resolverPolicyVersion).toBe("semver-highest-v1");
+      expect(result.manifestHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+
+      const persistedRun = await dependencyRepository.findRunById(result.runId);
+      expect(persistedRun?.snapshot()).toMatchObject({
+        sourceArtifactVersionId: sourceVersionId,
+        initiatorUserId: owners[0],
+        manifestVersion: 1,
+        resolverPolicyVersion: "semver-highest-v1",
+        manifestHash: result.manifestHash,
+      });
+      expect(await dependencyRepository.findResolutionsForRun(result.runId)).toHaveLength(2);
+      expect(await dependencyRepository.findResolutions(dependencyA.id)).toEqual([
+        expect.objectContaining({ runId: result.runId, resolvedArtifactVersionId: targetAHigh }),
+      ]);
+
+      await pool!.query("SELECT tombstone_artifact($1,$2,$3)", [sourceArtifactId, randomUUID(), new Date()]);
+      const snapshot = await pool!.query<{ snapshot: Record<string, any> }>(
+        "SELECT snapshot FROM tombstone_snapshots WHERE artifact_id=$1",
+        [sourceArtifactId],
+      );
+      expect(snapshot.rows[0]?.snapshot.dependency_resolution_runs).toMatchObject([{
+        id: result.runId,
+        initiator_user_id: owners[0],
+        manifest_version: 1,
+        policy_version: "semver-highest-v1",
+        manifest_hash: result.manifestHash,
+      }]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("rejects partial or malformed manifest metadata in the database", async () => {
+    const sourceArtifactId = await createArtifact(owners[0], randomUUID(), "private");
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    await expect(pool!.query(
+      "INSERT INTO dependency_resolution_runs (id,source_artifact_version_id,initiator_user_id) VALUES ($1,$2,$3)",
+      [randomUUID(), sourceVersionId, owners[0]],
+    )).rejects.toMatchObject({
+      code: "23514",
+      constraint: "dependency_resolution_runs_manifest_metadata_check",
+    });
+    await expect(pool!.query(
+      "INSERT INTO dependency_resolution_runs (id,source_artifact_version_id,initiator_user_id,manifest_version,policy_version,manifest_hash) VALUES ($1,$2,$3,1,'semver-highest-v1','sha256:invalid')",
+      [randomUUID(), sourceVersionId, owners[0]],
+    )).rejects.toMatchObject({
+      code: "23514",
+      constraint: "dependency_resolution_runs_manifest_metadata_check",
+    });
+    expect(await new PostgresDependencyRepository(pool!).findRunsForVersion(sourceVersionId)).toEqual([]);
+  });
+
+  it("commits an empty source-version run", async () => {
+    const sourceArtifactId = await createArtifact(owners[0], randomUUID(), "private");
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    const runtime = await createPostgresRuntime({
+      databaseUrl,
+      pool: pool!,
+      authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "empty-resolution-token"),
+      contentStore: new MemoryArtifactContentStore(),
+    });
+    try {
+      const result = await runtime.resolveSourceVersionDependencies.execute({
+        sourceArtifactVersionId: sourceVersionId,
+        actorId: owners[0]!,
+      });
+      expect(result.dependencies).toEqual([]);
+      expect(await new PostgresDependencyRepository(pool!).findResolutionsForRun(result.runId)).toEqual([]);
+      expect((await pool!.query(
+        "SELECT manifest_hash FROM dependency_resolution_runs WHERE id=$1",
+        [result.runId],
+      )).rows[0]?.manifest_hash).toBe(result.manifestHash);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("waits for the source-version lock before loading dependency declarations", async () => {
+    const sourceArtifactId = await createArtifact(owners[0], randomUUID(), "private");
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    const blocker = await pool!.connect();
+    const transactions = new PostgresTransactionManager(pool!);
+    const artifacts = new PostgresArtifactRepository(transactions.database);
+    const versions = new PostgresArtifactVersionRepository(transactions.database);
+    let publishBackendPid: (pid: number) => void = () => {};
+    const sourceLock: ResolutionSourceVersionLock = {
+      lockSourceVersionForResolution: async (id) => {
+        const result = await transactions.database.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        const pid = result.rows[0]?.pid;
+        if (pid === undefined) throw new Error("Could not identify the resolver transaction backend.");
+        publishBackendPid(pid);
+        return versions.lockSourceVersionForResolution(id);
+      },
+    };
+    class ObservedDependencyRepository extends PostgresDependencyRepository {
+      declarationsRead = false;
+      override async findForVersion(versionId: string): Promise<Dependency[]> {
+        this.declarationsRead = true;
+        return super.findForVersion(versionId);
+      }
+    }
+    const dependencies = new ObservedDependencyRepository(transactions.database);
+    const service = new ResolveSourceVersionDependenciesService(
+      artifacts,
+      versions,
+      sourceLock,
+      dependencies,
+      dependencies,
+      {
+        canRead: async (actorId, artifact) => actorId === artifact.ownerId || artifact.visibility === "public",
+        canWrite: async (actorId, artifact) => actorId === artifact.ownerId,
+      },
+      transactions,
+    );
+    let blockerOpen = false;
+    let operation: ReturnType<typeof startOperationWithBackendPid> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      blockerOpen = true;
+      const blockerPidResult = await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const blockerPid = blockerPidResult.rows[0]?.pid;
+      if (blockerPid === undefined) throw new Error("Could not identify the source-lock blocker backend.");
+      await blocker.query("SELECT id FROM artifact_versions WHERE id=$1 FOR UPDATE", [sourceVersionId]);
+      operation = startOperationWithBackendPid((publishPid) => {
+        publishBackendPid = publishPid;
+        return service.execute({ sourceArtifactVersionId: sourceVersionId, actorId: owners[0]! });
+      });
+      const resolverPid = await operation.backendPid;
+      await waitForTransactionBlocker(pool!, resolverPid, blockerPid);
+      expect(dependencies.declarationsRead).toBe(false);
+
+      await blocker.query("COMMIT");
+      blockerOpen = false;
+      const outcome = await operation.outcome;
+      if (!outcome.ok) throw outcome.error;
+      expect(dependencies.declarationsRead).toBe(true);
+      expect(outcome.ok).toBe(true);
+    } finally {
+      if (blockerOpen) await cleanupClientAndSettle(blocker, operation ? [operation.outcome] : []);
+      else {
+        if (operation) await operation.outcome;
+        blocker.release();
+      }
+    }
+  });
+
+  it("fails selection without persisting a run or any items", async () => {
+    const sourceArtifactId = await createArtifact(owners[0], randomUUID(), "private");
+    const targetA = await createArtifact(owners[1], randomUUID(), "public");
+    const targetB = await createArtifact(owners[2], randomUUID(), "public");
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    await createVersion(targetA, "1.0.0");
+    const dependencyAId = "00000000-0000-4000-8000-000000000021";
+    const dependencyBId = "00000000-0000-4000-8000-000000000022";
+    const repository = new PostgresDependencyRepository(pool!);
+    await repository.create(Dependency.create({
+      id: dependencyAId,
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetA,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    }));
+    await repository.create(Dependency.create({
+      id: dependencyBId,
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetB,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    }));
+    const runtime = await createPostgresRuntime({
+      databaseUrl,
+      pool: pool!,
+      authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "resolution-selection-token"),
+      contentStore: new MemoryArtifactContentStore(),
+    });
+    try {
+      await expect(runtime.resolveSourceVersionDependencies.execute({
+        sourceArtifactVersionId: sourceVersionId,
+        actorId: owners[0]!,
+      })).rejects.toMatchObject({ code: "DEPENDENCY_RESOLUTION_FAILED" });
+      expect(await repository.findRunsForVersion(sourceVersionId)).toEqual([]);
+      expect(await repository.findResolutions(dependencyAId)).toEqual([]);
+      expect(await repository.findResolutions(dependencyBId)).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("serializes concurrent resolutions while creating one complete run per call", async () => {
+    const sourceArtifactId = await createArtifact(owners[0], randomUUID(), "private");
+    const targetArtifactId = await createArtifact(owners[1], randomUUID(), "public");
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    await createVersion(targetArtifactId, "1.2.0");
+    const dependencyId = "00000000-0000-4000-8000-000000000031";
+    const repository = new PostgresDependencyRepository(pool!);
+    await repository.create(Dependency.create({
+      id: dependencyId,
+      artifactVersionId: sourceVersionId,
+      targetArtifactId,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    }));
+    const runtime = await createPostgresRuntime({
+      databaseUrl,
+      pool: pool!,
+      authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "resolution-concurrent-token"),
+      contentStore: new MemoryArtifactContentStore(),
+    });
+    try {
+      const [first, second] = await Promise.all([
+        runtime.resolveSourceVersionDependencies.execute({ sourceArtifactVersionId: sourceVersionId, actorId: owners[0]! }),
+        runtime.resolveSourceVersionDependencies.execute({ sourceArtifactVersionId: sourceVersionId, actorId: owners[0]! }),
+      ]);
+      expect(first.runId).not.toBe(second.runId);
+      expect(first.manifestHash).toBe(second.manifestHash);
+      expect(await repository.findRunsForVersion(sourceVersionId)).toHaveLength(2);
+      expect(await repository.findResolutionsForRun(first.runId)).toHaveLength(1);
+      expect(await repository.findResolutionsForRun(second.runId)).toHaveLength(1);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("rolls back the run and earlier items when a later grouped item insert fails", async () => {
+    const sourceArtifactId = await createArtifact(owners[0], randomUUID(), "private");
+    const targetA = await createArtifact(owners[1], randomUUID(), "public");
+    const targetB = await createArtifact(owners[2], randomUUID(), "public");
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    await createVersion(targetA, "1.0.0");
+    await createVersion(targetB, "1.0.0");
+    const dependencyAId = "00000000-0000-4000-8000-000000000001";
+    const dependencyBId = "00000000-0000-4000-8000-000000000002";
+    const repository = new PostgresDependencyRepository(pool!);
+    await repository.create(Dependency.create({
+      id: dependencyAId,
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetA,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    }));
+    await repository.create(Dependency.create({
+      id: dependencyBId,
+      artifactVersionId: sourceVersionId,
+      targetArtifactId: targetB,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    }));
+    const runtime = await createPostgresRuntime({
+      databaseUrl,
+      pool: pool!,
+      authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "resolution-rollback-token"),
+      contentStore: new MemoryArtifactContentStore(),
+    });
+    try {
+      await pool!.query(`
+        CREATE FUNCTION fail_later_resolution_item() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'injected grouped resolution item failure' USING ERRCODE = 'P0001';
+        END;
+        $$;
+        CREATE TRIGGER fail_later_resolution_item_trigger
+        BEFORE INSERT ON dependency_resolutions
+        FOR EACH ROW
+        WHEN (NEW.dependency_id = '${dependencyBId}'::uuid)
+        EXECUTE FUNCTION fail_later_resolution_item();
+      `);
+
+      await expect(runtime.resolveSourceVersionDependencies.execute({
+        sourceArtifactVersionId: sourceVersionId,
+        actorId: owners[0]!,
+      })).rejects.toMatchObject({
+        code: "P0001",
+        message: "injected grouped resolution item failure",
+      });
+      expect(await repository.findRunsForVersion(sourceVersionId)).toEqual([]);
+      expect(await repository.findResolutions(dependencyAId)).toEqual([]);
+      expect(await repository.findResolutions(dependencyBId)).toEqual([]);
+    } finally {
+      await pool!.query("DROP TRIGGER IF EXISTS fail_later_resolution_item_trigger ON dependency_resolutions");
+      await pool!.query("DROP FUNCTION IF EXISTS fail_later_resolution_item()");
+      await runtime.close();
+    }
+  });
 
   it("maps Artifact rows, updates only mutable state, and translates identity and slug constraints", async () => {
     const artifacts = new PostgresArtifactRepository(pool!);

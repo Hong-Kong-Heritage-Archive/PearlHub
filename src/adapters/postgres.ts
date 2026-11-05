@@ -21,6 +21,7 @@ import type {
   DiscoveryReindexLock,
   LineageRepository,
   ProvenanceRepository,
+  ResolutionSourceVersionLock,
   TransactionManager,
   UserIdentity,
   UserIdentityRepository,
@@ -168,7 +169,7 @@ export class PostgresArtifactRepository implements ArtifactRepository {
   }
 }
 
-export class PostgresArtifactVersionRepository implements ArtifactVersionRepository {
+export class PostgresArtifactVersionRepository implements ArtifactVersionRepository, ResolutionSourceVersionLock {
   constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
 
   async findById(id: string): Promise<ArtifactVersion | null> {
@@ -196,6 +197,14 @@ export class PostgresArtifactVersionRepository implements ArtifactVersionReposit
 
   async lockArtifactForWrite(artifactId: string): Promise<boolean> {
     const result = await this.db.query<{ id: string }>("SELECT id FROM artifacts WHERE id=$1 FOR UPDATE", [artifactId]);
+    return result.rows.length > 0;
+  }
+
+  async lockSourceVersionForResolution(sourceArtifactVersionId: string): Promise<boolean> {
+    const result = await this.db.query<{ id: string }>(
+      "SELECT id FROM artifact_versions WHERE id=$1 FOR UPDATE",
+      [sourceArtifactVersionId],
+    );
     return result.rows.length > 0;
   }
 
@@ -515,19 +524,28 @@ export class PostgresDependencyRepository implements DependencyRepository, Depen
   }
   async createRun(value: DependencyResolutionRun): Promise<void> {
     const run = value.snapshot();
-    await this.db.query("INSERT INTO dependency_resolution_runs (id,source_artifact_version_id,created_at) VALUES ($1,$2,$3)", [run.id, run.sourceArtifactVersionId, run.createdAt]);
+    await this.db.query(
+      "INSERT INTO dependency_resolution_runs (id,source_artifact_version_id,created_at,initiator_user_id,manifest_version,policy_version,manifest_hash) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+      [run.id, run.sourceArtifactVersionId, run.createdAt, run.initiatorUserId, run.manifestVersion, run.resolverPolicyVersion, run.manifestHash],
+    );
   }
   async findRunById(id: string): Promise<DependencyResolutionRun | null> {
-    const result = await this.db.query<{ id: string; sourceArtifactVersionId: string; createdAt: Date }>(
-      "SELECT id,source_artifact_version_id AS \"sourceArtifactVersionId\",created_at AS \"createdAt\" FROM dependency_resolution_runs WHERE id=$1",
+    const result = await this.db.query<{
+      id: string; sourceArtifactVersionId: string; createdAt: Date; initiatorUserId: string | null;
+      manifestVersion: number | null; resolverPolicyVersion: string | null; manifestHash: string | null;
+    }>(
+      "SELECT id,source_artifact_version_id AS \"sourceArtifactVersionId\",created_at AS \"createdAt\",initiator_user_id AS \"initiatorUserId\",manifest_version AS \"manifestVersion\",policy_version AS \"resolverPolicyVersion\",manifest_hash AS \"manifestHash\" FROM dependency_resolution_runs WHERE id=$1",
       [id],
     );
     const row = result.rows[0];
     return row ? DependencyResolutionRun.create(row) : null;
   }
   async findRunsForVersion(sourceArtifactVersionId: string): Promise<DependencyResolutionRun[]> {
-    const result = await this.db.query<{ id: string; sourceArtifactVersionId: string; createdAt: Date }>(
-      "SELECT id,source_artifact_version_id AS \"sourceArtifactVersionId\",created_at AS \"createdAt\" FROM dependency_resolution_runs WHERE source_artifact_version_id=$1 ORDER BY created_at,id",
+    const result = await this.db.query<{
+      id: string; sourceArtifactVersionId: string; createdAt: Date; initiatorUserId: string | null;
+      manifestVersion: number | null; resolverPolicyVersion: string | null; manifestHash: string | null;
+    }>(
+      "SELECT id,source_artifact_version_id AS \"sourceArtifactVersionId\",created_at AS \"createdAt\",initiator_user_id AS \"initiatorUserId\",manifest_version AS \"manifestVersion\",policy_version AS \"resolverPolicyVersion\",manifest_hash AS \"manifestHash\" FROM dependency_resolution_runs WHERE source_artifact_version_id=$1 ORDER BY created_at,id",
       [sourceArtifactVersionId],
     );
     return result.rows.map((row) => DependencyResolutionRun.create(row));

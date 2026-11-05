@@ -31,6 +31,10 @@ export interface ArtifactVersionRepository {
   create(version: ArtifactVersion): Promise<void>;
 }
 
+export interface ResolutionSourceVersionLock {
+  lockSourceVersionForResolution(sourceArtifactVersionId: string): Promise<boolean>;
+}
+
 export interface DraftRepository {
   findActiveByOwner(ownerId: string): Promise<Draft[]>;
   findById(id: string): Promise<Draft | null>;

@@ -103,6 +103,10 @@ describe("SemVer domain values", () => {
         id: "run-1",
         sourceArtifactVersionId: "source-version-1",
         createdAt: new Date("2026-10-30T12:00:00Z"),
+        initiatorUserId: null,
+        manifestVersion: null,
+        resolverPolicyVersion: null,
+        manifestHash: null,
       });
     });
 
@@ -116,6 +120,24 @@ describe("SemVer domain values", () => {
         id: "run-1",
         sourceArtifactVersionId: "source-version-1",
         createdAt: new Date(Number.NaN),
+      })).toThrowError(DomainError);
+    });
+
+    it("requires complete valid manifest metadata when any metadata is supplied", () => {
+      expect(() => DependencyResolutionRun.create({
+        id: "run-1",
+        sourceArtifactVersionId: "source-version-1",
+        createdAt: new Date(),
+        initiatorUserId: "owner-1",
+      })).toThrowError(DomainError);
+      expect(() => DependencyResolutionRun.create({
+        id: "run-1",
+        sourceArtifactVersionId: "source-version-1",
+        createdAt: new Date(),
+        initiatorUserId: "owner-1",
+        manifestVersion: 1,
+        resolverPolicyVersion: "semver-highest-v1",
+        manifestHash: "sha256:invalid",
       })).toThrowError(DomainError);
     });
   });
