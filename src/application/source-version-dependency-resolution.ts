@@ -9,9 +9,11 @@ import type {
   ArtifactRepository,
   ArtifactVersionRepository,
   Clock,
+  DependencyTargetDiscovery,
   DependencyRepository,
   DependencyResolutionRunRepository,
   IdGenerator,
+  ResolutionArtifactLockRepository,
   ResolutionSourceVersionLock,
   TransactionManager,
 } from "../ports/repositories.js";
@@ -64,7 +66,9 @@ export class ResolveSourceVersionDependenciesService implements SourceVersionDep
   constructor(
     private readonly artifacts: ArtifactRepository,
     private readonly versions: ArtifactVersionRepository,
+    private readonly artifactLocks: ResolutionArtifactLockRepository,
     private readonly sourceVersionLock: ResolutionSourceVersionLock,
+    private readonly targetDiscovery: DependencyTargetDiscovery,
     private readonly dependencies: DependencyRepository,
     private readonly runs: DependencyResolutionRunRepository,
     private readonly access: AccessPolicy,
@@ -77,21 +81,35 @@ export class ResolveSourceVersionDependenciesService implements SourceVersionDep
     if (!input.actorId) throw new DomainError("UNAUTHENTICATED", "An authenticated actor is required.");
 
     return this.transactions.run(async () => {
+      const discoveredSourceVersion = await this.versions.findById(input.sourceArtifactVersionId);
+      if (!discoveredSourceVersion) throw new DomainError("VERSION_NOT_FOUND", "Source Artifact Version was not found.");
+      const discoveredSourceArtifact = await this.artifacts.findById(discoveredSourceVersion.artifactId);
+      if (!discoveredSourceArtifact) throw new DomainError("ARTIFACT_NOT_FOUND", "Source Artifact was not found.");
+      await this.authorizeSource(input.actorId, discoveredSourceArtifact);
+
+      const discoveredTargetIds = orderedUniqueIds(
+        await this.targetDiscovery.findTargetArtifactIdsForVersion(discoveredSourceVersion.id),
+      );
+      const lockedArtifactIds = orderedUniqueIds([discoveredSourceArtifact.id, ...discoveredTargetIds]);
+      const lockedArtifacts = await this.artifactLocks.lockArtifactsForResolution(lockedArtifactIds);
+      const artifactsById = new Map(lockedArtifacts.map((artifact) => [artifact.id, artifact]));
+      const sourceArtifact = artifactsById.get(discoveredSourceArtifact.id);
+      if (!sourceArtifact) throw new DomainError("ARTIFACT_NOT_FOUND", "Source Artifact was not found.");
+
       if (!await this.sourceVersionLock.lockSourceVersionForResolution(input.sourceArtifactVersionId)) {
         throw new DomainError("VERSION_NOT_FOUND", "Source Artifact Version was not found.");
       }
-
       const sourceVersion = await this.versions.findById(input.sourceArtifactVersionId);
-      if (!sourceVersion) throw new DomainError("VERSION_NOT_FOUND", "Source Artifact Version was not found.");
-      const sourceArtifact = await this.artifacts.findById(sourceVersion.artifactId);
-      if (!sourceArtifact) throw new DomainError("ARTIFACT_NOT_FOUND", "Source Artifact was not found.");
-      if (sourceArtifact.status !== "active") throw new DomainError("ARTIFACT_GONE", "Source Artifact has been tombstoned.");
-      if (sourceArtifact.ownerId !== input.actorId && !await this.access.canWrite(input.actorId, sourceArtifact)) {
-        throw new DomainError("FORBIDDEN", "Actor cannot resolve dependencies for this source Artifact.");
+      if (!sourceVersion || sourceVersion.artifactId !== discoveredSourceVersion.artifactId) {
+        throw new DomainError("VERSION_NOT_FOUND", "Source Artifact Version was not found.");
       }
 
       const declarations = await this.dependencies.findForVersion(sourceVersion.id);
-      const selected = await this.resolveDeclarations(sourceArtifact, input.actorId, declarations);
+      const authoritativeTargetIds = orderedUniqueIds(declarations.map((declaration) => declaration.targetArtifactId));
+      if (!sameIds(discoveredTargetIds, authoritativeTargetIds)) throw dependencyResolutionFailed();
+
+      await this.authorizeSource(input.actorId, sourceArtifact);
+      const selected = await this.resolveDeclarations(sourceArtifact, input.actorId, declarations, artifactsById);
       const manifest: ResolutionManifest = {
         manifestVersion: RESOLUTION_MANIFEST_VERSION,
         resolverPolicyVersion: RESOLUTION_POLICY_VERSION,
@@ -145,11 +163,12 @@ export class ResolveSourceVersionDependenciesService implements SourceVersionDep
     sourceArtifact: Artifact,
     actorId: string,
     declarations: Dependency[],
+    artifactsById: ReadonlyMap<string, Artifact>,
   ): Promise<Array<{ manifestDependency: ResolutionManifestDependency }>> {
     const ordered = [...declarations].sort((left, right) => compareText(left.id, right.id));
     const selected: Array<{ manifestDependency: ResolutionManifestDependency }> = [];
     for (const dependency of ordered) {
-      const target = await this.artifacts.findById(dependency.targetArtifactId);
+      const target = artifactsById.get(dependency.targetArtifactId);
       if (!target || target.status !== "active" || !await this.access.canRead(actorId, target)
         || (sourceArtifact.visibility === "public" && target.visibility !== "public")) {
         throw dependencyResolutionFailed();
@@ -171,6 +190,15 @@ export class ResolveSourceVersionDependenciesService implements SourceVersionDep
       });
     }
     return selected;
+  }
+
+  private async authorizeSource(actorId: string, sourceArtifact: Artifact): Promise<void> {
+    if (sourceArtifact.status !== "active") {
+      throw new DomainError("ARTIFACT_GONE", "Source Artifact has been tombstoned.");
+    }
+    if (sourceArtifact.ownerId !== actorId && !await this.access.canWrite(actorId, sourceArtifact)) {
+      throw new DomainError("FORBIDDEN", "Actor cannot resolve dependencies for this source Artifact.");
+    }
   }
 }
 
@@ -207,6 +235,14 @@ function compareEligibleVersions(left: ArtifactVersion, right: ArtifactVersion):
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function orderedUniqueIds(ids: string[]): string[] {
+  return [...new Set(ids)].sort(compareText);
+}
+
+function sameIds(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
 function dependencyResolutionFailed(): DomainError {

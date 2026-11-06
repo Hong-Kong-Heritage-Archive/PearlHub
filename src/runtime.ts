@@ -71,7 +71,9 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
     const resolveSourceVersionDependencies = new ResolveSourceVersionDependenciesService(
       artifacts,
       versions,
+      artifacts,
       versions,
+      dependencyRepository,
       dependencyRepository,
       dependencyRepository,
       access,

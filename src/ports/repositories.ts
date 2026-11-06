@@ -22,6 +22,10 @@ export interface ArtifactRepository {
   restore(artifact: Artifact): Promise<Artifact | null>;
 }
 
+export interface ResolutionArtifactLockRepository {
+  lockArtifactsForResolution(artifactIds: string[]): Promise<Artifact[]>;
+}
+
 export interface ArtifactVersionRepository {
   findById(id: string): Promise<ArtifactVersion | null>;
   findByArtifactAndVersion(artifactId: string, version: string): Promise<ArtifactVersion | null>;
@@ -33,6 +37,10 @@ export interface ArtifactVersionRepository {
 
 export interface ResolutionSourceVersionLock {
   lockSourceVersionForResolution(sourceArtifactVersionId: string): Promise<boolean>;
+}
+
+export interface DependencyTargetDiscovery {
+  findTargetArtifactIdsForVersion(versionId: string): Promise<string[]>;
 }
 
 export interface DraftRepository {

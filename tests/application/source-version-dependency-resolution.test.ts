@@ -15,9 +15,11 @@ import type {
   ArtifactRepository,
   ArtifactVersionRepository,
   Clock,
+  DependencyTargetDiscovery,
   DependencyRepository,
   DependencyResolutionRunRepository,
   IdGenerator,
+  ResolutionArtifactLockRepository,
   ResolutionSourceVersionLock,
   TransactionManager,
 } from "../../src/ports/repositories.js";
@@ -69,6 +71,7 @@ interface FixtureOptions {
   artifacts?: Artifact[];
   versions?: ArtifactVersion[];
   access?: AccessPolicy;
+  afterTargetDiscovery?: () => void;
 }
 
 function makeFixture(options: FixtureOptions = {}) {
@@ -116,11 +119,16 @@ function makeFixture(options: FixtureOptions = {}) {
       return id === sourceVersion.id;
     },
   };
-  const artifactRepository: ArtifactRepository = {
+  const artifactRepository: ArtifactRepository & ResolutionArtifactLockRepository = {
     findById: async (id) => {
       assertTransaction();
       events.push(`artifact:${id}`);
       return artifacts.get(id) ?? null;
+    },
+    lockArtifactsForResolution: async (ids) => {
+      assertTransaction();
+      events.push(`artifact-lock:${ids.join(",")}`);
+      return ids.flatMap((id) => artifacts.has(id) ? [artifacts.get(id)!] : []);
     },
     findByIds: async (ids) => ids.flatMap((id) => artifacts.has(id) ? [artifacts.get(id)!] : []),
     findTombstoneSnapshotArtifact: async () => null,
@@ -146,7 +154,14 @@ function makeFixture(options: FixtureOptions = {}) {
     lockArtifactForWrite: async () => false,
     create: async () => {},
   };
-  const dependencyRepository: DependencyRepository & DependencyResolutionRunRepository = {
+  const dependencyRepository: DependencyRepository & DependencyResolutionRunRepository & DependencyTargetDiscovery = {
+    findTargetArtifactIdsForVersion: async (id) => {
+      assertTransaction();
+      events.push("target-discovery");
+      const targetIds = id === sourceVersion.id ? declarations.map((declaration) => declaration.targetArtifactId) : [];
+      options.afterTargetDiscovery?.();
+      return targetIds;
+    },
     findForVersion: async (id) => {
       assertTransaction();
       events.push("declarations");
@@ -179,7 +194,9 @@ function makeFixture(options: FixtureOptions = {}) {
   const service = new ResolveSourceVersionDependenciesService(
     artifactRepository,
     versionRepository,
+    artifactRepository,
     lock,
+    dependencyRepository,
     dependencyRepository,
     dependencyRepository,
     access,
@@ -228,6 +245,11 @@ describe("source-version dependency resolution", () => {
       actorId: fixture.actorId,
     });
 
+    expect(fixture.events.indexOf("target-discovery")).toBeLessThan(
+      fixture.events.findIndex((event) => event.startsWith("artifact-lock:")),
+    );
+    expect(fixture.events.findIndex((event) => event.startsWith("artifact-lock:")))
+      .toBeLessThan(fixture.events.indexOf("lock"));
     expect(fixture.events.indexOf("lock")).toBeLessThan(fixture.events.indexOf("declarations"));
     expect(fixture.transactionCount()).toBe(1);
     expect(result.dependencies.map(({ dependencyId, resolvedVersion }) => [dependencyId, resolvedVersion])).toEqual([
@@ -358,6 +380,57 @@ describe("source-version dependency resolution", () => {
       sourceArtifactVersionId: privateSource.sourceVersion.id,
       actorId: privateSource.actorId,
     })).resolves.toMatchObject({ dependencies: [{ resolvedVersion: "1.0.0" }] });
+  });
+
+  it("allows an explicitly delegated canWrite actor to resolve the source version", async () => {
+    const target = makeArtifact("delegated-target", "target-owner");
+    const fixture = makeFixture({
+      sourceOwnerId: "source-owner",
+      actorId: "delegate",
+      sourceVisibility: "private",
+      artifacts: [target],
+      declarations: [makeDependency("delegated-dep", "source-version", target.id, "^1.0.0")],
+      versions: [makeVersion("delegated-v1", target.id, "1.0.0")],
+      access: {
+        canRead: async (actor, artifact) => actor === artifact.ownerId || artifact.visibility === "public",
+        canWrite: async (actor, artifact) => actor === "delegate" && artifact.id === "source-artifact",
+      },
+    });
+
+    const result = await fixture.service.execute({
+      sourceArtifactVersionId: fixture.sourceVersion.id,
+      actorId: fixture.actorId,
+    });
+
+    expect(result.initiatorUserId).toBe("delegate");
+    expect(result.dependencies).toMatchObject([{ dependencyId: "delegated-dep", resolvedVersion: "1.0.0" }]);
+    expect(fixture.runRows).toHaveLength(1);
+    expect(fixture.resolutionRows).toHaveLength(1);
+  });
+
+  it("aborts if the authoritative dependency target set differs from lock discovery", async () => {
+    const discoveredTarget = makeArtifact("discovered-target", "target-owner");
+    const laterTarget = makeArtifact("later-target", "target-owner");
+    const declarations = [makeDependency("discovered-dep", "source-version", discoveredTarget.id, "^1.0.0")];
+    const fixture = makeFixture({
+      sourceVisibility: "private",
+      artifacts: [discoveredTarget, laterTarget],
+      declarations,
+      versions: [
+        makeVersion("discovered-v1", discoveredTarget.id, "1.0.0"),
+        makeVersion("later-v1", laterTarget.id, "1.0.0"),
+      ],
+      afterTargetDiscovery: () => declarations.push(
+        makeDependency("later-dep", "source-version", laterTarget.id, "^1.0.0"),
+      ),
+    });
+
+    await expect(fixture.service.execute({
+      sourceArtifactVersionId: fixture.sourceVersion.id,
+      actorId: fixture.actorId,
+    })).rejects.toMatchObject({ code: "DEPENDENCY_RESOLUTION_FAILED" });
+    expect(fixture.runRows).toEqual([]);
+    expect(fixture.resolutionRows).toEqual([]);
   });
 
   it("rejects tombstoned sources and unauthenticated callers before creating a run", async () => {

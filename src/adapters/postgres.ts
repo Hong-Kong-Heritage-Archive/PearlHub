@@ -21,7 +21,9 @@ import type {
   DiscoveryReindexLock,
   LineageRepository,
   ProvenanceRepository,
+  ResolutionArtifactLockRepository,
   ResolutionSourceVersionLock,
+  DependencyTargetDiscovery,
   TransactionManager,
   UserIdentity,
   UserIdentityRepository,
@@ -106,12 +108,22 @@ function versionFromRow(row: VersionRow): ArtifactVersion {
   });
 }
 
-export class PostgresArtifactRepository implements ArtifactRepository {
+export class PostgresArtifactRepository implements ArtifactRepository, ResolutionArtifactLockRepository {
   constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
 
   async findById(id: string): Promise<Artifact | null> {
     const result = await this.db.query<ArtifactRow>("SELECT id,owner_id,name,slug,visibility,status,created_at,updated_at FROM artifacts WHERE id = $1", [id]);
     return result.rows[0] ? artifactFromRow(result.rows[0]) : null;
+  }
+
+  async lockArtifactsForResolution(artifactIds: string[]): Promise<Artifact[]> {
+    const orderedIds = [...new Set(artifactIds)].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+    if (orderedIds.length === 0) return [];
+    const result = await this.db.query<ArtifactRow>(
+      "SELECT id,owner_id,name,slug,visibility,status,created_at,updated_at FROM artifacts WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+      [orderedIds],
+    );
+    return result.rows.map(artifactFromRow);
   }
 
   async findByIds(ids: string[]): Promise<Artifact[]> {
@@ -499,8 +511,15 @@ export class PostgresProvenanceRepository implements ProvenanceRepository {
   }
 }
 
-export class PostgresDependencyRepository implements DependencyRepository, DependencyResolutionRunRepository {
+export class PostgresDependencyRepository implements DependencyRepository, DependencyResolutionRunRepository, DependencyTargetDiscovery {
   constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
+  async findTargetArtifactIdsForVersion(versionId: string): Promise<string[]> {
+    const result = await this.db.query<{ target_artifact_id: string }>(
+      "SELECT DISTINCT target_artifact_id FROM dependencies WHERE artifact_version_id=$1 ORDER BY target_artifact_id",
+      [versionId],
+    );
+    return result.rows.map((row) => row.target_artifact_id);
+  }
   async findForVersion(versionId: string): Promise<Dependency[]> {
     const result = await this.db.query<{ id: string; artifact_version_id: string; target_artifact_id: string; declared_range: string; created_at: Date }>("SELECT id,artifact_version_id,target_artifact_id,declared_range,created_at FROM dependencies WHERE artifact_version_id=$1 ORDER BY created_at,id", [versionId]);
     return result.rows.map((row) => Dependency.create({ id: row.id, artifactVersionId: row.artifact_version_id, targetArtifactId: row.target_artifact_id, declaredRange: row.declared_range, createdAt: row.created_at }));

@@ -18,7 +18,7 @@ import { createHttpApp } from "../../src/http/app.js";
 import { ListArtifactsService } from "../../src/application/discovery.js";
 import { createPostgresRuntime } from "../../src/runtime.js";
 import type { CompatibilityReport, Provenance } from "../../src/domain/records.js";
-import type { ResolutionSourceVersionLock } from "../../src/ports/repositories.js";
+import type { ResolutionArtifactLockRepository, ResolutionSourceVersionLock } from "../../src/ports/repositories.js";
 
 function requiredTestDatabaseUrl(): string {
   const value = process.env.TEST_DATABASE_URL;
@@ -67,6 +67,7 @@ async function cancelBackendQuery(pool: Pool, pid: number): Promise<boolean> {
 }
 
 type OperationOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
+type SourceResolutionResult = Awaited<ReturnType<ResolveSourceVersionDependenciesService["execute"]>>;
 
 function createDeferred<T>(): {
   promise: Promise<T>;
@@ -834,6 +835,172 @@ describe("PostgreSQL persistence hardening", () => {
     return id;
   }
 
+  async function createResolutionFixture(sourceVisibility = "public") {
+    const sourceArtifactId = await createArtifact(owners[0]!, randomUUID(), sourceVisibility);
+    const targetArtifactId = await createArtifact(owners[1]!, randomUUID(), "public");
+    const sourceVersionId = await createVersion(sourceArtifactId);
+    const targetVersionId = await createVersion(targetArtifactId, "1.2.0");
+    const dependencyId = randomUUID();
+    await new PostgresDependencyRepository(pool!).create(Dependency.create({
+      id: dependencyId,
+      artifactVersionId: sourceVersionId,
+      targetArtifactId,
+      declaredRange: "^1.0.0",
+      createdAt: new Date(),
+    }));
+    return { sourceArtifactId, targetArtifactId, sourceVersionId, targetVersionId, dependencyId };
+  }
+
+  function startSourceVersionResolution(
+    sourceVersionId: string,
+    actorId: string,
+    afterSourceVersionLock?: () => Promise<void>,
+  ) {
+    const transactions = new PostgresTransactionManager(pool!);
+    const artifacts = new PostgresArtifactRepository(transactions.database);
+    const versions = new PostgresArtifactVersionRepository(transactions.database);
+    const dependencies = new PostgresDependencyRepository(transactions.database);
+    let publishBackendPid: (pid: number) => void = () => {};
+    const artifactLocks: ResolutionArtifactLockRepository = {
+      lockArtifactsForResolution: async (artifactIds) => {
+        const result = await transactions.database.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        const pid = result.rows[0]?.pid;
+        if (pid === undefined) throw new Error("Could not identify the resolver transaction backend.");
+        publishBackendPid(pid);
+        return artifacts.lockArtifactsForResolution(artifactIds);
+      },
+    };
+    const sourceVersionLock: ResolutionSourceVersionLock = {
+      lockSourceVersionForResolution: async (id) => {
+        const locked = await versions.lockSourceVersionForResolution(id);
+        await afterSourceVersionLock?.();
+        return locked;
+      },
+    };
+    const access = {
+      canRead: async (actor: string, artifact: Artifact) => actor === artifact.ownerId || artifact.visibility === "public",
+      canWrite: async (actor: string, artifact: Artifact) => actor === artifact.ownerId,
+    };
+    const service = new ResolveSourceVersionDependenciesService(
+      artifacts,
+      versions,
+      artifactLocks,
+      sourceVersionLock,
+      dependencies,
+      dependencies,
+      dependencies,
+      access,
+      transactions,
+    );
+    return startOperationWithBackendPid((publishPid) => {
+      publishBackendPid = publishPid;
+      return service.execute({ sourceArtifactVersionId: sourceVersionId, actorId });
+    });
+  }
+
+  async function beginArtifactStateChange(
+    artifactId: string,
+    change: "visibility" | "tombstone",
+  ): Promise<{ client: PoolClient; pid: number; outcome: Promise<OperationOutcome<unknown>> }> {
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      const pidResult = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const pid = pidResult.rows[0]?.pid;
+      if (pid === undefined) throw new Error("Could not identify the Artifact mutation backend.");
+      const command = change === "visibility"
+        ? client.query("UPDATE artifacts SET visibility='private',updated_at=now() WHERE id=$1", [artifactId])
+        : client.query("SELECT tombstone_artifact($1,$2,$3)", [artifactId, randomUUID(), new Date()]);
+      return { client, pid, outcome: captureOutcome(command) };
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } finally {
+        client.release();
+      }
+      throw error;
+    }
+  }
+
+  async function resolveBeforeArtifactStateChange(
+    fixture: Awaited<ReturnType<typeof createResolutionFixture>>,
+    artifactId: string,
+    change: "visibility" | "tombstone",
+  ) {
+    const artifactLocksAcquired = createDeferred<void>();
+    const allowResolutionToContinue = createDeferred<void>();
+    const resolution = startSourceVersionResolution(
+      fixture.sourceVersionId,
+      owners[0]!,
+      async () => {
+        artifactLocksAcquired.resolve();
+        await allowResolutionToContinue.promise;
+      },
+    );
+    let mutation: Awaited<ReturnType<typeof beginArtifactStateChange>> | undefined;
+    let mutationOpen = false;
+    try {
+      const resolverPid = await resolution.backendPid;
+      await Promise.race([
+        artifactLocksAcquired.promise,
+        resolution.outcome.then((outcome) => {
+          if (!outcome.ok) throw outcome.error;
+          throw new Error("Resolution completed before its Artifact locks could be observed.");
+        }),
+      ]);
+      mutation = await beginArtifactStateChange(artifactId, change);
+      mutationOpen = true;
+      await waitForTransactionBlocker(pool!, mutation.pid, resolverPid);
+      allowResolutionToContinue.resolve();
+
+      const resolutionOutcome = await resolution.outcome;
+      if (!resolutionOutcome.ok) throw resolutionOutcome.error;
+      const mutationOutcome = await mutation.outcome;
+      if (!mutationOutcome.ok) throw mutationOutcome.error;
+      await mutation.client.query("COMMIT");
+      mutationOpen = false;
+      mutation.client.release();
+      return resolutionOutcome.value;
+    } finally {
+      allowResolutionToContinue.resolve();
+      if (mutation && mutationOpen) {
+        await cleanupClientAndSettle(mutation.client, [mutation.outcome, resolution.outcome]);
+      } else {
+        await resolution.outcome;
+      }
+    }
+  }
+
+  async function resolveAfterArtifactStateChange(
+    fixture: Awaited<ReturnType<typeof createResolutionFixture>>,
+    artifactId: string,
+    change: "visibility" | "tombstone",
+  ): Promise<OperationOutcome<SourceResolutionResult>> {
+    const mutation = await beginArtifactStateChange(artifactId, change);
+    let mutationOpen = true;
+    let resolution: ReturnType<typeof startSourceVersionResolution> | undefined;
+    try {
+      const mutationOutcome = await mutation.outcome;
+      if (!mutationOutcome.ok) throw mutationOutcome.error;
+      resolution = startSourceVersionResolution(fixture.sourceVersionId, owners[0]!);
+      const resolverPid = await resolution.backendPid;
+      await waitForTransactionBlocker(pool!, resolverPid, mutation.pid);
+      await mutation.client.query("COMMIT");
+      mutationOpen = false;
+      mutation.client.release();
+      return await resolution.outcome;
+    } finally {
+      if (mutationOpen) {
+        await cleanupClientAndSettle(
+          mutation.client,
+          [mutation.outcome, ...(resolution ? [resolution.outcome] : [])],
+        );
+      } else if (resolution) {
+        await resolution.outcome;
+      }
+    }
+  }
+
   async function createCompleteResolutionRun(
     sourceVersionId: string,
     onBackendPid: (pid: number) => void,
@@ -1033,7 +1200,9 @@ describe("PostgreSQL persistence hardening", () => {
     const service = new ResolveSourceVersionDependenciesService(
       artifacts,
       versions,
+      artifacts,
       sourceLock,
+      dependencies,
       dependencies,
       dependencies,
       {
@@ -1072,6 +1241,138 @@ describe("PostgreSQL persistence hardening", () => {
         blocker.release();
       }
     }
+  });
+
+  it("serializes target visibility changes with dependency resolution in both lock orders", async () => {
+    const resolverFirst = await createResolutionFixture("public");
+    const committedResolution = await resolveBeforeArtifactStateChange(
+      resolverFirst,
+      resolverFirst.targetArtifactId,
+      "visibility",
+    );
+    expect(committedResolution.dependencies).toMatchObject([
+      { targetArtifactId: resolverFirst.targetArtifactId, resolvedVersion: "1.2.0" },
+    ]);
+    expect((await new PostgresDependencyRepository(pool!).findRunsForVersion(resolverFirst.sourceVersionId)))
+      .toHaveLength(1);
+    expect((await pool!.query<{ visibility: string }>(
+      "SELECT visibility FROM artifacts WHERE id=$1",
+      [resolverFirst.targetArtifactId],
+    )).rows[0]?.visibility).toBe("private");
+
+    const mutationFirst = await createResolutionFixture("public");
+    const outcome = await resolveAfterArtifactStateChange(
+      mutationFirst,
+      mutationFirst.targetArtifactId,
+      "visibility",
+    );
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: { code: "DEPENDENCY_RESOLUTION_FAILED", message: "A dependency could not be resolved." },
+    });
+    const repository = new PostgresDependencyRepository(pool!);
+    expect(await repository.findRunsForVersion(mutationFirst.sourceVersionId)).toEqual([]);
+    expect(await repository.findResolutions(mutationFirst.dependencyId)).toEqual([]);
+    expect((await pool!.query<{ visibility: string }>(
+      "SELECT visibility FROM artifacts WHERE id=$1",
+      [mutationFirst.targetArtifactId],
+    )).rows[0]?.visibility).toBe("private");
+  });
+
+  it("serializes target tombstones with dependency resolution in both lock orders", async () => {
+    const resolverFirst = await createResolutionFixture("public");
+    const committedResolution = await resolveBeforeArtifactStateChange(
+      resolverFirst,
+      resolverFirst.targetArtifactId,
+      "tombstone",
+    );
+    expect(committedResolution.dependencies).toMatchObject([
+      { targetArtifactId: resolverFirst.targetArtifactId, resolvedVersion: "1.2.0" },
+    ]);
+    expect((await new PostgresDependencyRepository(pool!).findRunsForVersion(resolverFirst.sourceVersionId)))
+      .toHaveLength(1);
+    expect((await pool!.query<{ status: string }>(
+      "SELECT status FROM artifacts WHERE id=$1",
+      [resolverFirst.targetArtifactId],
+    )).rows[0]?.status).toBe("tombstone");
+
+    const mutationFirst = await createResolutionFixture("public");
+    const outcome = await resolveAfterArtifactStateChange(
+      mutationFirst,
+      mutationFirst.targetArtifactId,
+      "tombstone",
+    );
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: { code: "DEPENDENCY_RESOLUTION_FAILED", message: "A dependency could not be resolved." },
+    });
+    const repository = new PostgresDependencyRepository(pool!);
+    expect(await repository.findRunsForVersion(mutationFirst.sourceVersionId)).toEqual([]);
+    expect(await repository.findResolutions(mutationFirst.dependencyId)).toEqual([]);
+    expect((await pool!.query<{ status: string }>(
+      "SELECT status FROM artifacts WHERE id=$1",
+      [mutationFirst.targetArtifactId],
+    )).rows[0]?.status).toBe("tombstone");
+  });
+
+  it("serializes source tombstones with dependency resolution and snapshots committed runs", async () => {
+    const resolverFirst = await createResolutionFixture("private");
+    const committedResolution = await resolveBeforeArtifactStateChange(
+      resolverFirst,
+      resolverFirst.sourceArtifactId,
+      "tombstone",
+    );
+    const snapshotResult = await pool!.query<{
+      snapshot: {
+        format_version: number;
+        dependency_resolution_runs: Array<{
+          id: string;
+          initiator_user_id: string;
+          manifest_version: number;
+          policy_version: string;
+          manifest_hash: string;
+          items: Array<{
+            dependency_id: string;
+            resolved_artifact_version_id: string;
+            run_id: string;
+          }>;
+        }>;
+      };
+    }>(
+      "SELECT snapshot FROM tombstone_snapshots WHERE artifact_id=$1 ORDER BY snapshot_number DESC LIMIT 1",
+      [resolverFirst.sourceArtifactId],
+    );
+    expect(snapshotResult.rows[0]?.snapshot).toMatchObject({
+      format_version: 2,
+      dependency_resolution_runs: [{
+        id: committedResolution.runId,
+        initiator_user_id: owners[0],
+        manifest_version: 1,
+        policy_version: "semver-highest-v1",
+        manifest_hash: committedResolution.manifestHash,
+        items: [{
+          dependency_id: resolverFirst.dependencyId,
+          resolved_artifact_version_id: resolverFirst.targetVersionId,
+          run_id: committedResolution.runId,
+        }],
+      }],
+    });
+
+    const mutationFirst = await createResolutionFixture("private");
+    const outcome = await resolveAfterArtifactStateChange(
+      mutationFirst,
+      mutationFirst.sourceArtifactId,
+      "tombstone",
+    );
+    expect(outcome).toMatchObject({ ok: false, error: { code: "ARTIFACT_GONE" } });
+    const repository = new PostgresDependencyRepository(pool!);
+    expect(await repository.findRunsForVersion(mutationFirst.sourceVersionId)).toEqual([]);
+    expect(await repository.findResolutions(mutationFirst.dependencyId)).toEqual([]);
+    const emptySnapshot = await pool!.query<{ snapshot: { dependency_resolution_runs: unknown[] } }>(
+      "SELECT snapshot FROM tombstone_snapshots WHERE artifact_id=$1 ORDER BY snapshot_number DESC LIMIT 1",
+      [mutationFirst.sourceArtifactId],
+    );
+    expect(emptySnapshot.rows[0]?.snapshot.dependency_resolution_runs).toEqual([]);
   });
 
   it("fails selection without persisting a run or any items", async () => {
