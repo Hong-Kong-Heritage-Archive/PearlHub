@@ -90,6 +90,41 @@ function captureOutcome<T>(promise: Promise<T>): Promise<OperationOutcome<T>> {
   );
 }
 
+async function waitForWithin<T>(operation: Promise<T>, description: string, timeoutMs = 5000): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${description} timed out after ${timeoutMs} ms.`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function waitForOperationOrTransactionBlocker<T>(
+  pool: Pool,
+  waitingPid: number,
+  blockerPid: number,
+  operation: Promise<OperationOutcome<T>>,
+): Promise<{ kind: "completed"; outcome: OperationOutcome<T> } | { kind: "blocked" }> {
+  let outcome: OperationOutcome<T> | undefined;
+  void operation.then((result) => { outcome = result; });
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (outcome) return { kind: "completed", outcome };
+    const result = await pool.query<{ blocked: boolean }>(
+      "SELECT $2::integer = ANY(pg_blocking_pids($1::integer)) AS blocked",
+      [waitingPid, blockerPid],
+    );
+    if (result.rows[0]?.blocked) return { kind: "blocked" };
+    await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 10));
+  }
+  throw new Error(`Operation did not complete or block on backend ${blockerPid} within 5 seconds.`);
+}
+
 function startOperationWithBackendPid<T>(
   operation: (publishPid: (pid: number) => void) => Promise<T>,
 ): { backendPid: Promise<number>; outcome: Promise<OperationOutcome<T>> } {
@@ -855,6 +890,7 @@ describe("PostgreSQL persistence hardening", () => {
     sourceVersionId: string,
     actorId: string,
     afterSourceVersionLock?: () => Promise<void>,
+    afterArtifactLocks?: () => Promise<void>,
   ) {
     const transactions = new PostgresTransactionManager(pool!);
     const artifacts = new PostgresArtifactRepository(transactions.database);
@@ -867,7 +903,9 @@ describe("PostgreSQL persistence hardening", () => {
         const pid = result.rows[0]?.pid;
         if (pid === undefined) throw new Error("Could not identify the resolver transaction backend.");
         publishBackendPid(pid);
-        return artifacts.lockArtifactsForResolution(artifactIds);
+        const lockedArtifacts = await artifacts.lockArtifactsForResolution(artifactIds);
+        await afterArtifactLocks?.();
+        return lockedArtifacts;
       },
     };
     const sourceVersionLock: ResolutionSourceVersionLock = {
@@ -1240,6 +1278,163 @@ describe("PostgreSQL persistence hardening", () => {
         if (operation) await operation.outcome;
         blocker.release();
       }
+    }
+  });
+
+  it("allows a dependency insert FK check while resolution holds Artifact locks", async () => {
+    const fixture = await createResolutionFixture("private");
+    const insertedDependencyId = randomUUID();
+    const artifactLocksAcquired = createDeferred<void>();
+    const allowResolutionToContinue = createDeferred<void>();
+    const resolution = startSourceVersionResolution(
+      fixture.sourceVersionId,
+      owners[0]!,
+      undefined,
+      async () => {
+        artifactLocksAcquired.resolve();
+        await allowResolutionToContinue.promise;
+      },
+    );
+    let writer: PoolClient | undefined;
+    let writerOpen = false;
+    let writerPid: number | undefined;
+    let insertOutcome: Promise<OperationOutcome<void>> | undefined;
+
+    try {
+      const resolverPid = await waitForWithin(resolution.backendPid, "Resolver backend identification");
+      await waitForWithin(artifactLocksAcquired.promise, "Resolver Artifact locks");
+
+      writer = await pool!.connect();
+      await writer.query("BEGIN");
+      writerOpen = true;
+      const writerPidResult = await writer.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      writerPid = writerPidResult.rows[0]?.pid;
+      if (writerPid === undefined) throw new Error("Could not identify the dependency writer backend.");
+
+      const dependency = Dependency.create({
+        id: insertedDependencyId,
+        artifactVersionId: fixture.sourceVersionId,
+        targetArtifactId: fixture.targetArtifactId,
+        declaredRange: "^1.0.0",
+        createdAt: new Date(),
+      });
+      insertOutcome = captureOutcome(new PostgresDependencyRepository(writer).create(dependency));
+      const insertState = await waitForOperationOrTransactionBlocker(
+        pool!,
+        writerPid,
+        resolverPid,
+        insertOutcome,
+      );
+      if (insertState.kind === "blocked") {
+        const cancelled = await cancelBackendQuery(pool!, writerPid);
+        if (!cancelled) throw new Error("Could not cancel the blocked dependency insert.");
+        await insertOutcome;
+        await writer.query("ROLLBACK");
+        writerOpen = false;
+        writer.release();
+        allowResolutionToContinue.resolve();
+        await resolution.outcome;
+        throw new Error("Dependency INSERT blocked on the resolver's Artifact lock.");
+      }
+      if (!insertState.outcome.ok) throw insertState.outcome.error;
+
+      await writer.query("COMMIT");
+      writerOpen = false;
+      writer.release();
+      allowResolutionToContinue.resolve();
+
+      const resolutionOutcome = await waitForWithin(resolution.outcome, "Dependency resolution");
+      expect(resolutionOutcome.ok).toBe(true);
+      if (!resolutionOutcome.ok) throw resolutionOutcome.error;
+      expect(resolutionOutcome.value.dependencies.map(({ dependencyId }) => dependencyId).sort())
+        .toEqual([fixture.dependencyId, insertedDependencyId].sort());
+      expect(resolutionOutcome.value.dependencies.every(({ targetArtifactId }) => targetArtifactId === fixture.targetArtifactId))
+        .toBe(true);
+
+      const repository = new PostgresDependencyRepository(pool!);
+      const declarations = await repository.findForVersion(fixture.sourceVersionId);
+      expect(declarations.map(({ id }) => id).sort()).toEqual([fixture.dependencyId, insertedDependencyId].sort());
+      const runs = await repository.findRunsForVersion(fixture.sourceVersionId);
+      expect(runs).toHaveLength(1);
+      const items = await repository.findResolutionsForRun(runs[0]!.id);
+      expect(items).toHaveLength(2);
+      expect(items.map(({ dependencyId }) => dependencyId).sort()).toEqual([fixture.dependencyId, insertedDependencyId].sort());
+      expect(items.every(({ resolvedArtifactVersionId }) => resolvedArtifactVersionId === fixture.targetVersionId)).toBe(true);
+    } finally {
+      if (writer && writerOpen) {
+        if (writerPid !== undefined) await cancelBackendQuery(pool!, writerPid);
+        if (insertOutcome) await insertOutcome;
+        await cleanupClientAndSettle(writer, []);
+      }
+      allowResolutionToContinue.resolve();
+      await resolution.outcome;
+    }
+  });
+
+  it("waits for the dependency source-version lock after acquiring compatible Artifact locks", async () => {
+    const fixture = await createResolutionFixture("private");
+    const insertedDependencyId = randomUUID();
+    const artifactLocksAcquired = createDeferred<void>();
+    const writer = await pool!.connect();
+    let writerOpen = false;
+    let writerReleased = false;
+    let resolution: ReturnType<typeof startSourceVersionResolution> | undefined;
+    try {
+      await writer.query("BEGIN");
+      writerOpen = true;
+      const writerPidResult = await writer.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      const writerPid = writerPidResult.rows[0]?.pid;
+      if (writerPid === undefined) throw new Error("Could not identify the dependency writer backend.");
+
+      const dependency = Dependency.create({
+        id: insertedDependencyId,
+        artifactVersionId: fixture.sourceVersionId,
+        targetArtifactId: fixture.targetArtifactId,
+        declaredRange: "^1.0.0",
+        createdAt: new Date(),
+      });
+      const insertOutcome = await waitForWithin(
+        captureOutcome(new PostgresDependencyRepository(writer).create(dependency)),
+        "Dependency INSERT and foreign-key check",
+      );
+      if (!insertOutcome.ok) throw insertOutcome.error;
+
+      resolution = startSourceVersionResolution(
+        fixture.sourceVersionId,
+        owners[0]!,
+        undefined,
+        async () => { artifactLocksAcquired.resolve(); },
+      );
+      const resolverPid = await waitForWithin(resolution.backendPid, "Resolver backend identification");
+      await waitForWithin(artifactLocksAcquired.promise, "Resolver Artifact locks while FK KEY SHARE is held");
+      await waitForTransactionBlocker(pool!, resolverPid, writerPid);
+
+      await writer.query("COMMIT");
+      writerOpen = false;
+      writer.release();
+      writerReleased = true;
+
+      const resolutionOutcome = await waitForWithin(resolution.outcome, "Dependency resolution after writer commit");
+      expect(resolutionOutcome.ok).toBe(true);
+      if (!resolutionOutcome.ok) throw resolutionOutcome.error;
+      expect(resolutionOutcome.value.dependencies.map(({ dependencyId }) => dependencyId).sort())
+        .toEqual([fixture.dependencyId, insertedDependencyId].sort());
+      expect(resolutionOutcome.value.dependencies.every(({ targetArtifactId }) => targetArtifactId === fixture.targetArtifactId))
+        .toBe(true);
+
+      const repository = new PostgresDependencyRepository(pool!);
+      const declarations = await repository.findForVersion(fixture.sourceVersionId);
+      expect(declarations.map(({ id }) => id).sort()).toEqual([fixture.dependencyId, insertedDependencyId].sort());
+      const runs = await repository.findRunsForVersion(fixture.sourceVersionId);
+      expect(runs).toHaveLength(1);
+      const items = await repository.findResolutionsForRun(runs[0]!.id);
+      expect(items).toHaveLength(2);
+      expect(items.map(({ dependencyId }) => dependencyId).sort()).toEqual([fixture.dependencyId, insertedDependencyId].sort());
+      expect(items.every(({ resolvedArtifactVersionId }) => resolvedArtifactVersionId === fixture.targetVersionId)).toBe(true);
+    } finally {
+      if (writerOpen) await cleanupClientAndSettle(writer, []);
+      else if (!writerReleased) writer.release();
+      if (resolution) await resolution.outcome;
     }
   });
 

@@ -120,7 +120,7 @@ export class PostgresArtifactRepository implements ArtifactRepository, Resolutio
     const orderedIds = [...new Set(artifactIds)].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
     if (orderedIds.length === 0) return [];
     const result = await this.db.query<ArtifactRow>(
-      "SELECT id,owner_id,name,slug,visibility,status,created_at,updated_at FROM artifacts WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+      "SELECT id,owner_id,name,slug,visibility,status,created_at,updated_at FROM artifacts WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE",
       [orderedIds],
     );
     return result.rows.map(artifactFromRow);
