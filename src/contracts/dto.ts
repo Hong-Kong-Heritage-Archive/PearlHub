@@ -92,6 +92,7 @@ export interface CompatibilityReportResponse extends Omit<CompatibilityReportReq
   id: string;
   targetArtifactVersionId: string | null;
   createdAt: string;
+  availability: "available" | "redacted";
 }
 
 export interface ApiErrorResponse {
@@ -166,7 +167,9 @@ export function toArtifactResponse(artifact: {
   };
 }
 
-export function toCompatibilityReportResponse(report: CompatibilityReport): CompatibilityReportResponse {
+export function toCompatibilityReportResponse(
+  report: CompatibilityReport & { availability: "available" | "redacted" },
+): CompatibilityReportResponse {
   return {
     id: report.id,
     artifactVersionId: report.artifactVersionId,
@@ -174,6 +177,7 @@ export function toCompatibilityReportResponse(report: CompatibilityReport): Comp
     status: report.status,
     report: report.report,
     createdAt: report.createdAt.toISOString(),
+    availability: report.availability,
   };
 }
 

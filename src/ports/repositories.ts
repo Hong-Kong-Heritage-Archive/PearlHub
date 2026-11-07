@@ -116,7 +116,12 @@ export interface ArtifactContentStore {
 }
 
 export interface TransactionManager {
-  run<T>(work: () => Promise<T>): Promise<T>;
+  run<T>(work: () => Promise<T>, options?: TransactionOptions): Promise<T>;
+}
+
+export interface TransactionOptions {
+  isolationLevel?: "read committed" | "repeatable read";
+  readOnly?: boolean;
 }
 
 export interface IdGenerator {

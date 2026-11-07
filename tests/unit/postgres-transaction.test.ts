@@ -47,6 +47,36 @@ describe("PostgresTransactionManager lifecycle", () => {
     expect(fixture.releases).toEqual([undefined]);
   });
 
+  it("runs read-only work in one REPEATABLE READ transaction on the checked-out client", async () => {
+    const fixture = createPool();
+    const transactions = new PostgresTransactionManager(fixture.pool);
+
+    await transactions.run(async () => { await transactions.database.query("SELECT inside"); }, {
+      isolationLevel: "repeatable read",
+      readOnly: true,
+    });
+
+    expect(fixture.queries).toEqual([
+      "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+      "SELECT inside",
+      "COMMIT",
+    ]);
+    expect(fixture.poolQueryCount).toBe(0);
+    expect(fixture.checkoutCount).toBe(1);
+    expect(fixture.releases).toEqual([undefined]);
+  });
+
+  it("rejects a read-only transaction without REPEATABLE READ before checkout", async () => {
+    const fixture = createPool();
+
+    await expect(new PostgresTransactionManager(fixture.pool).run(async () => undefined, {
+      readOnly: true,
+    })).rejects.toThrow("Read-only transactions require REPEATABLE READ isolation.");
+
+    expect(fixture.checkoutCount).toBe(0);
+    expect(fixture.queries).toEqual([]);
+  });
+
   it("rejects nested runs before checking out another client", async () => {
     const fixture = createPool();
     const transactions = new PostgresTransactionManager(fixture.pool);

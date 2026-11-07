@@ -92,6 +92,7 @@ const artifactVersionDependenciesResponseSchema = z.object({
   dependencies: z.array(z.object({
     targetArtifactId: z.string(),
     declaredRange: z.string(),
+    resolutionState: z.enum(["none", "available", "redacted"]),
     resolutions: z.array(z.object({
       version: z.string(),
       resolvedAt: z.string().datetime(),
@@ -105,6 +106,7 @@ const compatibilityReportResponseSchema = z.object({
   status: z.string(),
   report: z.record(z.string(), z.unknown()),
   createdAt: z.string().datetime(),
+  availability: z.enum(["available", "redacted"]),
 }).strict().openapi("CompatibilityReport");
 
 const artifactLineageEntrySchema = z.object({
@@ -713,6 +715,7 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
       dependencies: result.dependencies.map((dependency) => ({
         targetArtifactId: dependency.targetArtifactId,
         declaredRange: dependency.declaredRange,
+        resolutionState: dependency.resolutionState,
         resolutions: dependency.resolutions.map((resolution) => ({
           version: resolution.version,
           resolvedAt: resolution.resolvedAt.toISOString(),

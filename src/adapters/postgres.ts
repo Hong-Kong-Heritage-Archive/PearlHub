@@ -25,6 +25,7 @@ import type {
   ResolutionSourceVersionLock,
   DependencyTargetDiscovery,
   TransactionManager,
+  TransactionOptions,
   UserIdentity,
   UserIdentityRepository,
 } from "../ports/repositories.js";
@@ -602,15 +603,26 @@ export class PostgresTransactionManager implements TransactionManager {
     return client ? client.query<Row>(text, values) : this.pool.query<Row>(text, values);
   }
 
-  async run<T>(work: () => Promise<T>): Promise<T> {
+  async run<T>(
+    work: () => Promise<T>,
+    options: TransactionOptions = {},
+  ): Promise<T> {
     // Nested runs reject before checkout; repository work must use the outer transaction.
     if (this.currentClient.getStore()) throw new Error("Nested transactions are not supported.");
+    if (options.readOnly && options.isolationLevel !== "repeatable read") {
+      throw new Error("Read-only transactions require REPEATABLE READ isolation.");
+    }
 
     const client = await this.pool.connect();
     let discardClient: Error | boolean | undefined;
     try {
       try {
-        await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+        const beginStatement = options.readOnly
+          ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+          : options.isolationLevel === "repeatable read"
+            ? "BEGIN ISOLATION LEVEL REPEATABLE READ"
+            : "BEGIN ISOLATION LEVEL READ COMMITTED";
+        await client.query(beginStatement);
       } catch (error) {
         discardClient = error instanceof Error ? error : true;
         throw error;

@@ -12,6 +12,7 @@ import type {
   DependencyRepository,
   DraftRepository,
   TransactionManager,
+  TransactionOptions,
 } from "../../src/ports/repositories.js";
 
 const now = new Date("2026-04-01T12:00:00.000Z");
@@ -94,6 +95,14 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
 
   it("returns declarations, resolutions, and reports only for the exact readable Version", async () => {
     const artifact = artifactFixture("public");
+    let targetArtifact = Artifact.create({
+      id: "target-artifact",
+      ownerId: "target-owner",
+      name: "Target Pearl",
+      slug: "target-pearl",
+      visibility: "public",
+      createdAt: now,
+    });
     const sourceV1 = ArtifactVersion.create({
       id: "source-v1", artifactId: artifact.id, version: "1.0.0", contentHash: "hash-1",
       contentLocation: "loc-1", createdAt: now, publishedAt: now,
@@ -140,19 +149,28 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
     const report: CompatibilityReport = {
       id: "report-1",
       artifactVersionId: sourceV1.id,
-      targetArtifactVersionId: null,
+      targetArtifactVersionId: resolved.id,
       status: "compatible",
       report: { details: { warning: null } },
       createdAt: now,
     };
-    const findReports = vi.fn(async (versionId: string) => versionId === sourceV1.id ? [report] : []);
+    const reportWithoutTarget: CompatibilityReport = {
+      id: "report-without-target",
+      artifactVersionId: sourceV1.id,
+      targetArtifactVersionId: null,
+      status: "compatible",
+      report: { targetDerived: "must-not-leak" },
+      createdAt: now,
+    };
+    let storedReports = [report];
+    const findReports = vi.fn(async (versionId: string) => versionId === sourceV1.id ? storedReports : []);
     const compatibilityReports: CompatibilityReportRepository = {
       create: async () => {},
       findForArtifactVersion: findReports,
     };
     const artifacts: ArtifactRepository = {
-      findById: async () => artifact,
-      findByIds: async () => [],
+      findById: async (id) => id === artifact.id ? artifact : id === targetArtifact.id ? targetArtifact : null,
+      findByIds: async (ids) => ids.flatMap((id) => id === targetArtifact.id ? [targetArtifact] : []),
       findTombstoneSnapshotArtifact: async () => null,
       findByOwnerAndSlug: async () => null,
       create: async () => {},
@@ -175,14 +193,23 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       isReady: async () => true,
       setReady: async () => {},
     };
+    const transactionOptions: Array<TransactionOptions | undefined> = [];
     const service = new DraftWorkflowService(
       drafts,
       artifacts,
       versions,
       dependencies,
-      { canRead: async () => true, canWrite: async () => true },
+      {
+        canRead: async (actorId, value) => value.visibility === "public" || value.ownerId === actorId,
+        canWrite: async () => true,
+      },
       discovery,
-      { run: async (work) => work() },
+      {
+        run: async (work, options) => {
+          transactionOptions.push(options);
+          return work();
+        },
+      },
       undefined,
       undefined,
       undefined,
@@ -197,10 +224,12 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
         dependencies: [{
           targetArtifactId: "target-artifact",
           declaredRange: "^3.0.0",
+          resolutionState: "available",
           resolutions: [{ version: "3.2.1", resolvedAt: now }],
         }, {
           targetArtifactId: "other-target",
           declaredRange: "~1.0.0",
+          resolutionState: "none",
           resolutions: [],
         }],
       });
@@ -214,7 +243,7 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       actorId: null,
       artifactId: artifact.id,
       version: "1.0.0",
-    })).resolves.toEqual([report]);
+    })).resolves.toEqual([{ ...report, availability: "available" }]);
     await expect(service.getVersionCompatibilityReports({
       actorId: null,
       artifactId: artifact.id,
@@ -222,6 +251,113 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
     })).resolves.toEqual([]);
     expect(findReports).toHaveBeenNthCalledWith(1, sourceV1.id);
     expect(findReports).toHaveBeenNthCalledWith(2, sourceV2.id);
+    expect(transactionOptions.length).toBeGreaterThan(0);
+    expect(transactionOptions.every((options) =>
+      options?.isolationLevel === "repeatable read" && options.readOnly === true,
+    )).toBe(true);
+
+    targetArtifact = Artifact.create({
+      id: "target-artifact",
+      ownerId: "target-owner",
+      name: "Target Pearl",
+      slug: "target-pearl",
+      visibility: "private",
+      createdAt: now,
+    });
+    await expect(service.getVersionDependencies({
+      actorId: null,
+      artifactId: artifact.id,
+      version: "1.0.0",
+    })).resolves.toMatchObject({
+      dependencies: expect.arrayContaining([{
+        targetArtifactId: "target-artifact",
+        declaredRange: "^3.0.0",
+        resolutionState: "redacted",
+        resolutions: [],
+      }]),
+    });
+    await expect(service.getVersionDependencies({
+      actorId: "target-owner",
+      artifactId: artifact.id,
+      version: "1.0.0",
+    })).resolves.toMatchObject({
+      dependencies: expect.arrayContaining([expect.objectContaining({
+        resolutionState: "available",
+        resolutions: expect.arrayContaining([expect.objectContaining({ version: "3.2.1" })]),
+      })]),
+    });
+    await expect(service.getVersionCompatibilityReports({
+      actorId: null,
+      artifactId: artifact.id,
+      version: "1.0.0",
+    })).resolves.toMatchObject([{
+      availability: "redacted",
+      targetArtifactVersionId: null,
+      status: "unavailable",
+      report: {},
+    }]);
+    await expect(service.getVersionCompatibilityReports({
+      actorId: "target-owner",
+      artifactId: artifact.id,
+      version: "1.0.0",
+    })).resolves.toMatchObject([{
+      availability: "available",
+      targetArtifactVersionId: resolved.id,
+      status: "compatible",
+      report: { details: { warning: null } },
+    }]);
+
+    targetArtifact = Artifact.create({
+      id: "target-artifact",
+      ownerId: "target-owner",
+      name: "Target Pearl",
+      slug: "target-pearl",
+      visibility: "unlisted",
+      createdAt: now,
+    });
+    await expect(service.getVersionDependencies({
+      actorId: "owner",
+      artifactId: artifact.id,
+      version: "1.0.0",
+    })).resolves.toMatchObject({
+      dependencies: expect.arrayContaining([
+        expect.objectContaining({ resolutionState: "redacted", resolutions: [] }),
+      ]),
+    });
+
+    targetArtifact = targetArtifact.tombstone(now);
+    await expect(service.getVersionDependencies({
+      actorId: "target-owner",
+      artifactId: artifact.id,
+      version: "1.0.0",
+    })).resolves.toMatchObject({
+      dependencies: expect.arrayContaining([
+        expect.objectContaining({ resolutionState: "redacted", resolutions: [] }),
+      ]),
+    });
+    await expect(service.getVersionCompatibilityReports({
+      actorId: "target-owner",
+      artifactId: artifact.id,
+      version: "1.0.0",
+    })).resolves.toMatchObject([{
+      availability: "redacted",
+      targetArtifactVersionId: null,
+      status: "unavailable",
+      report: {},
+    }]);
+
+    storedReports = [reportWithoutTarget];
+    await expect(service.getVersionCompatibilityReports({
+      actorId: "target-owner",
+      artifactId: artifact.id,
+      version: "1.0.0",
+    })).resolves.toMatchObject([{
+      id: "report-without-target",
+      targetArtifactVersionId: null,
+      status: "unavailable",
+      report: {},
+      availability: "redacted",
+    }]);
   });
 
   it("does not expose private dependencies to anonymous callers or substitute a missing Version", async () => {

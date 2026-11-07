@@ -1,19 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DraftWorkflowService } from "../../src/application/services.js";
-import type { CompatibilityReport } from "../../src/domain/records.js";
+import type { CompatibilityReportRead } from "../../src/application/services.js";
 import { DomainError } from "../../src/domain/errors.js";
 import { createHttpApp } from "../../src/http/app.js";
 import { DevelopmentOnlyFakeAuthenticator } from "../../src/http/testing/development-fake-authenticator.js";
 
 const artifactId = "compatibility-artifact";
 const version = "1.2.3";
-const reports: CompatibilityReport[] = [{
+const reports: CompatibilityReportRead[] = [{
   id: "report-1",
   artifactVersionId: "source-version-id",
   targetArtifactVersionId: null,
-  status: "future-compatible-status",
-  report: { checks: [{ name: "schema", result: null, details: { compatible: true } }] },
+  status: "unavailable",
+  report: {},
   createdAt: new Date("2026-05-02T00:00:00.000Z"),
+  availability: "redacted",
 }];
 const authenticator = new DevelopmentOnlyFakeAuthenticator("report-owner", "owner-token", [
   { userId: "other-user", token: "other-token" },
@@ -30,7 +31,7 @@ function makeApp(
 }
 
 describe("GET /api/v1/artifacts/{artifactId}/versions/{version}/compatibility", () => {
-  it("returns persisted reports with nested JSON and null values unchanged", async () => {
+  it("returns the explicit redacted report representation", async () => {
     const getReports = vi.fn(async () => reports);
     const app = makeApp(getReports);
 
@@ -40,9 +41,10 @@ describe("GET /api/v1/artifacts/{artifactId}/versions/{version}/compatibility", 
       id: "report-1",
       artifactVersionId: "source-version-id",
       targetArtifactVersionId: null,
-      status: "future-compatible-status",
-      report: { checks: [{ name: "schema", result: null, details: { compatible: true } }] },
+      status: "unavailable",
+      report: {},
       createdAt: "2026-05-02T00:00:00.000Z",
+      availability: "redacted",
     }]);
     expect(getReports).toHaveBeenLastCalledWith({
       actorId: null,

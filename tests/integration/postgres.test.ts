@@ -3496,7 +3496,7 @@ describe("PostgreSQL persistence hardening", () => {
 
   it("updates owner visibility and reads exact-Version dependency resolution history without creating Versions", async () => {
     const sourceId = await createArtifact(owners[0], randomUUID(), "private");
-    const targetId = await createArtifact(owners[1], randomUUID(), "private");
+    const targetId = await createArtifact(owners[1], randomUUID(), "public");
     const targetVersionId = await createVersion(targetId, "3.2.1");
     const sourceVersionId = await createVersion(sourceId, "1.0.0", randomUUID(), {
       instructions: "source content",
@@ -3526,11 +3526,21 @@ describe("PostgreSQL persistence hardening", () => {
       resolvedAt: new Date("2026-06-01T00:00:00.000Z"),
     });
     await createVersion(targetId, "3.3.0");
+    const compatibilityReports = new PostgresCompatibilityReportRepository(pool!);
+    await compatibilityReports.create({
+      id: randomUUID(),
+      artifactVersionId: sourceVersionId,
+      targetArtifactVersionId: targetVersionId,
+      status: "compatible",
+      report: { targetDetails: { release: "3.2.1" } },
+      createdAt: new Date("2026-06-01T00:00:00.000Z"),
+    });
 
     const runtime = await createPostgresRuntime({
       databaseUrl,
       pool: pool!,
       authenticator: new DevelopmentOnlyFakeAuthenticator(owners[0]!, "phase-six-owner-token", [
+        { userId: owners[1]!, token: "phase-six-target-owner-token" },
         { userId: owners[2]!, token: "phase-six-other-token" },
       ]),
       contentStore: new MemoryArtifactContentStore(),
@@ -3563,6 +3573,15 @@ describe("PostgreSQL persistence hardening", () => {
         headers: otherOwnerHeaders,
       });
       expect(forbiddenRead.status).toBe(403);
+      const sourceOwnerRead = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/dependencies`, {
+        headers: ownerHeaders,
+      });
+      expect(await sourceOwnerRead.json()).toMatchObject({
+        dependencies: [{
+          resolutionState: "available",
+          resolutions: [{ version: "3.2.1" }],
+        }],
+      });
 
       const updated = await runtime.app.request(`/api/v1/artifacts/${sourceId}`, {
         method: "PATCH",
@@ -3583,9 +3602,91 @@ describe("PostgreSQL persistence hardening", () => {
         dependencies: [{
           targetArtifactId: targetId,
           declaredRange: "^3.0.0",
+          resolutionState: "available",
           resolutions: [{ version: "3.2.1", resolvedAt: "2026-06-01T00:00:00.000Z" }],
         }],
       });
+      const availableCompatibility = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/compatibility`);
+      expect(await availableCompatibility.json()).toMatchObject([{
+        targetArtifactVersionId: targetVersionId,
+        status: "compatible",
+        report: { targetDetails: { release: "3.2.1" } },
+        availability: "available",
+      }]);
+      const targetOwnerHeaders = { authorization: "Bearer phase-six-target-owner-token", "content-type": "application/json" };
+      const privateTransitionClient = await pool!.connect();
+      try {
+        await privateTransitionClient.query("BEGIN");
+        await privateTransitionClient.query("UPDATE artifacts SET visibility='private' WHERE id=$1", [targetId]);
+        await privateTransitionClient.query("COMMIT");
+
+        const privateTargetRead = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/dependencies`);
+        expect(await privateTargetRead.json()).toMatchObject({
+          dependencies: [{ resolutionState: "redacted", resolutions: [] }],
+        });
+        const privateTargetCompatibility = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/compatibility`);
+        expect(await privateTargetCompatibility.json()).toMatchObject([{
+          targetArtifactVersionId: null,
+          status: "unavailable",
+          report: {},
+          availability: "redacted",
+        }]);
+        const privateTargetOwnerRead = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/dependencies`, {
+          headers: targetOwnerHeaders,
+        });
+        expect(await privateTargetOwnerRead.json()).toMatchObject({
+          dependencies: [{ resolutionState: "available", resolutions: [{ version: "3.2.1" }] }],
+        });
+      } finally {
+        privateTransitionClient.release();
+      }
+
+      const unlistedTransitionClient = await pool!.connect();
+      try {
+        await unlistedTransitionClient.query("BEGIN");
+        await unlistedTransitionClient.query("UPDATE artifacts SET visibility='unlisted' WHERE id=$1", [targetId]);
+        await unlistedTransitionClient.query("COMMIT");
+
+        const unlistedTargetRead = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/dependencies`);
+        expect(await unlistedTargetRead.json()).toMatchObject({
+          dependencies: [{ resolutionState: "redacted", resolutions: [] }],
+        });
+        const unlistedTargetOwnerRead = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/dependencies`, {
+          headers: targetOwnerHeaders,
+        });
+        expect(await unlistedTargetOwnerRead.json()).toMatchObject({
+          dependencies: [{ resolutionState: "available", resolutions: [{ version: "3.2.1" }] }],
+        });
+      } finally {
+        unlistedTransitionClient.release();
+      }
+
+      const tombstoneGuardClient = await pool!.connect();
+      try {
+        const tombstoned = await runtime.app.request(`/api/v1/artifacts/${targetId}`, {
+          method: "DELETE",
+          headers: targetOwnerHeaders,
+        });
+        expect(tombstoned.status).toBe(204);
+        const targetOwnerTombstoneRead = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/dependencies`, {
+          headers: targetOwnerHeaders,
+        });
+        expect(await targetOwnerTombstoneRead.json()).toMatchObject({
+          dependencies: [{ resolutionState: "redacted", resolutions: [] }],
+        });
+        const tombstonedCompatibility = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/compatibility`, {
+          headers: targetOwnerHeaders,
+        });
+        expect(await tombstonedCompatibility.json()).toMatchObject([{
+          targetArtifactVersionId: null,
+          status: "unavailable",
+          report: {},
+          availability: "redacted",
+        }]);
+      } finally {
+        tombstoneGuardClient.release();
+      }
+
       const exactSecondVersion = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/2.0.0/dependencies`);
       expect(await exactSecondVersion.json()).toEqual({ artifactId: sourceId, version: "2.0.0", dependencies: [] });
       expect(await pool!.query("SELECT id,resolved_artifact_version_id FROM dependency_resolutions WHERE dependency_id=$1", [dependencyId])).toMatchObject({

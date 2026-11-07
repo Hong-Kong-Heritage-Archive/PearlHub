@@ -46,6 +46,7 @@ export interface ArtifactReadService {
 export interface ArtifactVersionDependency {
   targetArtifactId: string;
   declaredRange: string;
+  resolutionState: "none" | "available" | "redacted";
   resolutions: Array<{ version: string; resolvedAt: Date }>;
 }
 
@@ -53,6 +54,10 @@ export interface ArtifactVersionDependencies {
   artifactId: string;
   version: string;
   dependencies: ArtifactVersionDependency[];
+}
+
+export interface CompatibilityReportRead extends CompatibilityReport {
+  availability: "available" | "redacted";
 }
 
 export interface DraftWorkflow {
@@ -284,47 +289,103 @@ export class DraftWorkflowService implements DraftWorkflow, ArtifactReadService 
   }
 
   async getVersionDependencies(input: { actorId: string | null; artifactId: string; version: string }): Promise<ArtifactVersionDependencies> {
-    const artifact = await this.readableArtifactForDetail(input.actorId, input.artifactId);
-    const version = await this.versions.findByArtifactAndVersion(artifact.id, input.version);
-    if (!version) throw new DomainError("VERSION_NOT_FOUND", "Artifact Version was not found.");
+    return this.transactions.run(async () => {
+      const artifact = await this.readableArtifactForDetail(input.actorId, input.artifactId);
+      const version = await this.versions.findByArtifactAndVersion(artifact.id, input.version);
+      if (!version) throw new DomainError("VERSION_NOT_FOUND", "Artifact Version was not found.");
 
-    const dependencies = await this.dependencies.findForVersion(version.id);
-    const recordedDependencies = await Promise.all(dependencies.map(async (dependency) => {
-      if (dependency.artifactVersionId !== version.id) {
-        throw new Error("Dependency repository returned a declaration for a different Artifact Version.");
-      }
-      const resolutions = await this.dependencies.findResolutions(dependency.id);
-      const recordedResolutions = await Promise.all(resolutions.map(async (resolution) => {
-        if (resolution.dependencyId !== dependency.id) {
-          throw new Error("Dependency repository returned a resolution for a different dependency.");
+      const dependencies = await this.dependencies.findForVersion(version.id);
+      const targets = new Map((await this.artifacts.findByIds(
+        [...new Set(dependencies.map((dependency) => dependency.targetArtifactId))],
+      )).map((target) => [target.id, target]));
+      const recordedDependencies = await Promise.all(dependencies.map(async (dependency): Promise<ArtifactVersionDependency> => {
+        if (dependency.artifactVersionId !== version.id) {
+          throw new Error("Dependency repository returned a declaration for a different Artifact Version.");
         }
-        const resolvedVersion = await this.versions.findById(resolution.resolvedArtifactVersionId);
-        if (!resolvedVersion || resolvedVersion.artifactId !== dependency.targetArtifactId) {
-          throw new Error("Persisted dependency resolution does not identify a version of its declared target Artifact.");
+        const resolutions = await this.dependencies.findResolutions(dependency.id);
+        if (resolutions.length === 0) {
+          return {
+            targetArtifactId: dependency.targetArtifactId,
+            declaredRange: dependency.declaredRange,
+            resolutionState: "none",
+            resolutions: [],
+          };
         }
-        return { version: resolvedVersion.version, resolvedAt: resolution.resolvedAt };
+        const target = targets.get(dependency.targetArtifactId);
+        if (!target) {
+          throw new Error("Persisted dependency resolution target Artifact was not found.");
+        }
+        if (!await this.isReadableLineageArtifact(input.actorId, target)) {
+          return {
+            targetArtifactId: dependency.targetArtifactId,
+            declaredRange: dependency.declaredRange,
+            resolutionState: "redacted",
+            resolutions: [],
+          };
+        }
+        const resolvedVersions = await Promise.all(resolutions.map(async (resolution) => {
+          if (resolution.dependencyId !== dependency.id) {
+            throw new Error("Dependency repository returned a resolution for a different dependency.");
+          }
+          const resolvedVersion = await this.versions.findById(resolution.resolvedArtifactVersionId);
+          if (!resolvedVersion || resolvedVersion.artifactId !== dependency.targetArtifactId) {
+            throw new Error("Persisted dependency resolution does not identify a version of its declared target Artifact.");
+          }
+          return { version: resolvedVersion.version, resolvedAt: resolution.resolvedAt };
+        }));
+        return {
+          targetArtifactId: dependency.targetArtifactId,
+          declaredRange: dependency.declaredRange,
+          resolutionState: "available",
+          resolutions: resolvedVersions,
+        };
       }));
-      return {
-        targetArtifactId: dependency.targetArtifactId,
-        declaredRange: dependency.declaredRange,
-        resolutions: recordedResolutions,
-      };
-    }));
 
-    return { artifactId: artifact.id, version: version.version, dependencies: recordedDependencies };
+      return { artifactId: artifact.id, version: version.version, dependencies: recordedDependencies };
+    }, { isolationLevel: "repeatable read", readOnly: true });
   }
 
-  async getVersionCompatibilityReports(input: { actorId: string | null; artifactId: string; version: string }): Promise<CompatibilityReport[]> {
-    const artifact = await this.readableArtifactForDetail(input.actorId, input.artifactId);
-    const version = await this.versions.findByArtifactAndVersion(artifact.id, input.version);
-    if (!version) throw new DomainError("VERSION_NOT_FOUND", "Artifact Version was not found.");
-    if (!this.compatibilityReports) throw new Error("Compatibility report reads are not configured.");
+  async getVersionCompatibilityReports(input: { actorId: string | null; artifactId: string; version: string }): Promise<CompatibilityReportRead[]> {
+    return this.transactions.run(async () => {
+      const artifact = await this.readableArtifactForDetail(input.actorId, input.artifactId);
+      const version = await this.versions.findByArtifactAndVersion(artifact.id, input.version);
+      if (!version) throw new DomainError("VERSION_NOT_FOUND", "Artifact Version was not found.");
+      if (!this.compatibilityReports) throw new Error("Compatibility report reads are not configured.");
 
-    const reports = await this.compatibilityReports.findForArtifactVersion(version.id);
-    if (reports.some((report) => report.artifactVersionId !== version.id)) {
-      throw new Error("Compatibility report repository returned a report for a different Artifact Version.");
-    }
-    return reports;
+      const reports = await this.compatibilityReports.findForArtifactVersion(version.id);
+      if (reports.some((report) => report.artifactVersionId !== version.id)) {
+        throw new Error("Compatibility report repository returned a report for a different Artifact Version.");
+      }
+      return Promise.all(reports.map(async (report): Promise<CompatibilityReportRead> => {
+        if (report.targetArtifactVersionId === null) {
+          return {
+            ...report,
+            targetArtifactVersionId: null,
+            status: "unavailable",
+            report: {},
+            availability: "redacted",
+          };
+        }
+        const targetVersion = await this.versions.findById(report.targetArtifactVersionId);
+        if (!targetVersion) {
+          throw new Error("Compatibility report references a missing target Artifact Version.");
+        }
+        const targetArtifact = await this.artifacts.findById(targetVersion.artifactId);
+        if (!targetArtifact || targetArtifact.id !== targetVersion.artifactId) {
+          throw new Error("Compatibility report target Artifact was not found.");
+        }
+        if (!await this.isReadableLineageArtifact(input.actorId, targetArtifact)) {
+          return {
+            ...report,
+            targetArtifactVersionId: null,
+            status: "unavailable",
+            report: {},
+            availability: "redacted",
+          };
+        }
+        return { ...report, availability: "available" };
+      }));
+    }, { isolationLevel: "repeatable read", readOnly: true });
   }
 
   async getArtifact(input: { actorId: string | null; artifactId: string }): Promise<Artifact> {

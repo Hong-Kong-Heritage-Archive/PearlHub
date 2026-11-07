@@ -958,8 +958,10 @@ paths:
       operationId: getArtifactVersionDependencies
       description: >-
         Returns declarations and persisted resolution history for exactly the
-        requested Artifact Version. The path requires a UUID and strict SemVer
-        2.x version. This read does not resolve dependencies or mutate data.
+        requested Artifact Version. History is redacted when its target is not
+        currently readable; tombstoned targets are always redacted. The path
+        requires a UUID and strict SemVer 2.x version. This read does not
+        resolve dependencies or mutate data.
       security:
         - {}
         - BearerAuth: []
@@ -980,7 +982,7 @@ paths:
             description: Exact SemVer 2.x version.
       responses:
         "200":
-          description: Recorded declarations and persisted resolution history, or an empty dependency list.
+          description: Declarations with explicit none, available, or redacted resolution state; or an empty dependency list.
           content:
             application/json:
               schema:
@@ -1021,8 +1023,10 @@ paths:
       summary: Read compatibility reports for a published version
       description: >-
         Returns persisted compatibility reports for exactly the requested
-        source Artifact Version. This read does not recompute compatibility
-        or mutate data.
+        source Artifact Version. Target IDs and report payloads are redacted
+        when the target is not currently readable; tombstoned targets are
+        always redacted. This read does not recompute compatibility or mutate
+        data.
       operationId: getArtifactVersionCompatibilityReports
       security:
         - {}
@@ -1042,7 +1046,7 @@ paths:
             minLength: 1
       responses:
         "200":
-          description: Persisted compatibility reports ordered by creation time and report ID, or an empty array.
+          description: Compatibility reports ordered by creation time and report ID, with unreadable target data redacted, or an empty array.
           content:
             application/json:
               schema:
@@ -1485,18 +1489,24 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [targetArtifactId, declaredRange, resolutions]
+            required: [targetArtifactId, declaredRange, resolutionState, resolutions]
             properties:
               targetArtifactId:
                 type: string
                 description: Target identifier as declared; no target Artifact metadata is returned.
               declaredRange:
                 type: string
+              resolutionState:
+                type: string
+                enum: [none, available, redacted]
+                description: >-
+                  Whether history is absent, currently readable, or redacted
+                  because the resolved target is not currently readable.
               resolutions:
                 type: array
                 description: >-
-                  Persisted resolution history for this declaration. Empty if
-                  no resolution has been stored; no resolution is computed by
+                  Persisted resolution history for this declaration. Empty
+                  when state is none or redacted; no resolution is computed by
                   this read operation.
                 items:
                   type: object
@@ -1512,7 +1522,7 @@ components:
     CompatibilityReport:
       type: object
       additionalProperties: false
-      required: [id, artifactVersionId, targetArtifactVersionId, status, report, createdAt]
+      required: [id, artifactVersionId, targetArtifactVersionId, status, report, createdAt, availability]
       properties:
         id:
           type: string
@@ -1523,7 +1533,7 @@ components:
           readOnly: true
         targetArtifactVersionId:
           type: [string, "null"]
-          description: Optional target Artifact Version associated with this report.
+          description: Target Artifact Version when available; null when redacted or absent.
           readOnly: true
         status:
           type: string
@@ -1537,6 +1547,13 @@ components:
         createdAt:
           type: string
           format: date-time
+          readOnly: true
+        availability:
+          type: string
+          enum: [available, redacted]
+          description: >-
+            Whether the target and report payload are currently readable.
+            Redacted reports use status unavailable and an empty report object.
           readOnly: true
     ArtifactLineageEntry:
       type: object

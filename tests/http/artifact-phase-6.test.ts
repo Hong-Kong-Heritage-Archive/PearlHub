@@ -26,6 +26,7 @@ function makeApp(
     dependencies: [{
       targetArtifactId: "private-target-id",
       declaredRange: "^2.0.0",
+      resolutionState: "available",
       resolutions: [{ version: "2.1.3", resolvedAt: new Date("2026-05-02T00:00:00.000Z") }],
     }],
   }),
@@ -149,6 +150,7 @@ describe("GET /api/v1/artifacts/{artifactId}/versions/{version}/dependencies", (
       dependencies: [{
         targetArtifactId: "private-target-id",
         declaredRange: "^2.0.0",
+        resolutionState: "available" as const,
         resolutions: [{ version: "2.1.3", resolvedAt: new Date("2026-05-02T00:00:00.000Z") }],
       }],
     }));
@@ -162,6 +164,7 @@ describe("GET /api/v1/artifacts/{artifactId}/versions/{version}/dependencies", (
       dependencies: [{
         targetArtifactId: "private-target-id",
         declaredRange: "^2.0.0",
+        resolutionState: "available",
         resolutions: [{ version: "2.1.3", resolvedAt: "2026-05-02T00:00:00.000Z" }],
       }],
     });

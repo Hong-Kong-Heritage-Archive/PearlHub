@@ -204,6 +204,14 @@ describe("canonical OpenAPI contract", () => {
       .toContain("SemVer 2.x");
     expect(dependencySchema?.required?.slice().sort()).toEqual(["artifactId", "dependencies", "version"]);
     expect(dependencySchema?.properties?.dependencies?.type).toBe("array");
+    const dependencyItemSchema = dependencySchema?.properties?.dependencies?.items;
+    expect(dependencyItemSchema?.required?.slice().sort()).toEqual([
+      "declaredRange",
+      "resolutionState",
+      "resolutions",
+      "targetArtifactId",
+    ]);
+    expect(dependencyItemSchema?.properties?.resolutionState?.enum).toEqual(["none", "available", "redacted"]);
 
     expect(compatibility?.operationId).toBe("getArtifactVersionCompatibilityReports");
     expect(compatibility?.security).toEqual([{}, { BearerAuth: [] }]);
@@ -214,6 +222,7 @@ describe("canonical OpenAPI contract", () => {
     expect(compatibilityResponse?.type).toBe("array");
     expect(compatibilityReportSchema?.required?.slice().sort()).toEqual([
       "artifactVersionId",
+      "availability",
       "createdAt",
       "id",
       "report",
@@ -222,6 +231,7 @@ describe("canonical OpenAPI contract", () => {
     ]);
     expect(compatibilityReportSchema?.properties?.status?.enum).toBeUndefined();
     expect(compatibilityReportSchema?.properties?.targetArtifactVersionId?.type).toEqual(["string", "null"]);
+    expect(compatibilityReportSchema?.properties?.availability?.enum).toEqual(["available", "redacted"]);
 
     const runtimeResponse = await createRuntimeApp().request("/openapi.json");
     const runtime = parse(await runtimeResponse.text()) as OpenApiDocument;
