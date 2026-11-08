@@ -46,6 +46,12 @@ content reads and work-copy creation.
 
 ## Implemented Phase 6 behavior
 
+P2E-B.1.1, P2EB-AUD-02, and P2EB-AUD-02.1 are Accepted. The `/api/v1`
+response-shape breaking change is explicitly approved. The
+[P2EB-AUD-02.1 read-only implementation audit](../audit/p2eb-aud-02-1-read-only-implementation-audit.md)
+is the authoritative source for the evidence and final PASS verdict; no
+findings remain open for this acceptance.
+
 `PATCH /artifacts/{artifactId}` requires bearer authentication and Artifact
 ownership. Its strict partial request currently accepts only `visibility` with
 the values `private`, `unlisted`, and `public`; empty requests and unknown or

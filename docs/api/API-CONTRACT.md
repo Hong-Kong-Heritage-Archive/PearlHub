@@ -30,6 +30,12 @@ to an authorized source reader, while inaccessible historical resolution
 details and target-derived compatibility data are withheld as described below.
 Tombstoned targets are redacted even for their owners.
 
+**Acceptance status:** P2E-B.1.1, P2EB-AUD-02, and P2EB-AUD-02.1 are Accepted;
+the `/api/v1` response-shape breaking change is explicitly approved. The
+[P2EB-AUD-02.1 read-only implementation audit](../audit/p2eb-aud-02-1-read-only-implementation-audit.md)
+is the authoritative source for audit evidence and findings (final verdict:
+PASS; no outstanding findings from this acceptance).
+
 ---
 
 ## 2.3.1 — API Contract Principles
