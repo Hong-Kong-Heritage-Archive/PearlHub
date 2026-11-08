@@ -55,18 +55,46 @@ discovery and subsequent access checks. Tombstoned Artifacts remain immutable.
 
 `GET /artifacts/{artifactId}/versions/{version}/dependencies` returns the
 declarations persisted for the exact path Version, with target Artifact ID and
-declared SemVer range. It also returns `resolutions: []` when no resolution is
-stored, or the persisted resolution history (`version` SemVer and `resolvedAt`)
-when present. Resolution history is associated through the dependency row and
-its source Version. The GET does not resolve ranges, select a newer Version,
-recompute compatibility, or write data; it does not expose target Artifact
-metadata. Existing Artifact/Version visibility rules apply.
+declared SemVer range. Its required `resolutionState` is `none` when no
+resolution was stored, `available` when all persisted history is currently
+readable, or `redacted` when history exists but the target Artifact is not
+currently readable. `resolutions` is empty for `none` and `redacted`; otherwise
+it contains the persisted history (`version` SemVer and `resolvedAt`). An empty
+`resolutions` array with `redacted` does not mean that no resolution occurred.
+Declarations remain visible to an authorized source reader in all three states.
+
+Resolution history is associated through the dependency row and its source
+Version. The GET does not resolve ranges, select a newer Version, recompute
+compatibility, or write data; it does not expose target Artifact metadata.
+Historical resolution is returned only while the target Artifact is active and
+readable by the caller. Tombstoned targets are always redacted, including for
+their owner.
+
+`GET /artifacts/{artifactId}/versions/{version}/compatibility` returns reports
+associated with the exact source Version. Each report has `availability` of
+`available` or `redacted`. Redacted reports retain report identity and source
+association, but return a null `targetArtifactVersionId`, status `unavailable`,
+and an empty `report` object; this also applies to reports without a target
+Version ID. For available reports, `status` and `report` are persisted; for a
+redacted report, `unavailable` is synthesized and `availability` distinguishes
+that redaction from a persisted status with the same value. This response shape
+prevents target-derived report data from remaining visible after access is
+revoked.
+
+Both read paths evaluate source and target authorization in a read-only
+REPEATABLE READ transaction. The required `resolutionState` and `availability`
+fields are supported parts of the response contract. Their addition is an
+explicitly approved breaking change under the existing `/api/v1` path; strict
+clients validating the previous response schemas must update. The API path
+remains `/api/v1` by approval.
 
 ## Not implemented
 
 Direct Version creation; Fork, Import, dependency resolution, and compatibility
 report creation remain outside this slice. Compatibility-report reads return
-stored reports only; they do not recalculate compatibility or write data.
+stored report data only when its target is currently readable; otherwise they
+return the documented redacted representation. They do not recalculate
+compatibility or write data.
 Published versions have no update or delete operation.
 
 ## API error shape

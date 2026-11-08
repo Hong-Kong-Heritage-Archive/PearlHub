@@ -48,7 +48,7 @@ interface OpenApiOperation {
 
 interface OpenApiDocument {
   openapi: string;
-  info: { title: string; version: string };
+  info: { title: string; version: string; description?: string };
   paths: Record<string, { get?: OpenApiOperation; post?: OpenApiOperation; put?: OpenApiOperation; patch?: OpenApiOperation; delete?: OpenApiOperation }>;
   components: {
     schemas: Record<string, OpenApiSchema>;
@@ -205,6 +205,7 @@ describe("canonical OpenAPI contract", () => {
     expect(dependencySchema?.required?.slice().sort()).toEqual(["artifactId", "dependencies", "version"]);
     expect(dependencySchema?.properties?.dependencies?.type).toBe("array");
     const dependencyItemSchema = dependencySchema?.properties?.dependencies?.items;
+    expect(dependencyItemSchema?.additionalProperties).toBe(false);
     expect(dependencyItemSchema?.required?.slice().sort()).toEqual([
       "declaredRange",
       "resolutionState",
@@ -212,6 +213,9 @@ describe("canonical OpenAPI contract", () => {
       "targetArtifactId",
     ]);
     expect(dependencyItemSchema?.properties?.resolutionState?.enum).toEqual(["none", "available", "redacted"]);
+    expect(dependencyItemSchema?.properties?.resolutionState?.description).toContain("Redacted is distinct from no history");
+    expect(dependencyItemSchema?.properties?.resolutions?.description).toContain("history exists but is withheld");
+    expect(canonicalDocument.info.description).toContain("explicitly approved breaking change under /api/v1");
 
     expect(compatibility?.operationId).toBe("getArtifactVersionCompatibilityReports");
     expect(compatibility?.security).toEqual([{}, { BearerAuth: [] }]);
@@ -229,9 +233,13 @@ describe("canonical OpenAPI contract", () => {
       "status",
       "targetArtifactVersionId",
     ]);
+    expect(compatibilityReportSchema?.additionalProperties).toBe(false);
     expect(compatibilityReportSchema?.properties?.status?.enum).toBeUndefined();
+    expect(compatibilityReportSchema?.properties?.status?.description).toContain("unavailable is synthesized");
+    expect(compatibilityReportSchema?.properties?.status?.description).toContain("persisted unavailable status");
     expect(compatibilityReportSchema?.properties?.targetArtifactVersionId?.type).toEqual(["string", "null"]);
     expect(compatibilityReportSchema?.properties?.availability?.enum).toEqual(["available", "redacted"]);
+    expect(compatibilityReportSchema?.properties?.availability?.description).toContain("Redaction is distinct");
 
     const runtimeResponse = await createRuntimeApp().request("/openapi.json");
     const runtime = parse(await runtimeResponse.text()) as OpenApiDocument;

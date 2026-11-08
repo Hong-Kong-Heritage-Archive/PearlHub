@@ -3497,7 +3497,11 @@ describe("PostgreSQL persistence hardening", () => {
   it("updates owner visibility and reads exact-Version dependency resolution history without creating Versions", async () => {
     const sourceId = await createArtifact(owners[0], randomUUID(), "private");
     const targetId = await createArtifact(owners[1], randomUUID(), "public");
-    const targetVersionId = await createVersion(targetId, "3.2.1");
+    const targetContentSnapshot = {
+      content: { instructions: "target content", tags: [], knowledgeFiles: [], dependencies: [] },
+      dependencies: [],
+    };
+    const targetVersionId = await createVersion(targetId, "3.2.1", randomUUID(), targetContentSnapshot);
     const sourceVersionId = await createVersion(sourceId, "1.0.0", randomUUID(), {
       instructions: "source content",
       tags: [],
@@ -3519,13 +3523,28 @@ describe("PostgreSQL persistence hardening", () => {
       declaredRange: "^3.0.0",
       createdAt: new Date(),
     }));
-    await dependencies.createResolution({
+    const resolutionRun = DependencyResolutionRun.create({
+      id: randomUUID(),
+      sourceArtifactVersionId: sourceVersionId,
+      createdAt: new Date("2026-06-01T00:00:00.000Z"),
+    });
+    const resolutionTransactions = new PostgresTransactionManager(pool!);
+    const transactionDependencies = new PostgresDependencyRepository(resolutionTransactions.database);
+    const resolution = {
       id: randomUUID(),
       dependencyId,
       resolvedArtifactVersionId: targetVersionId,
       resolvedAt: new Date("2026-06-01T00:00:00.000Z"),
+    };
+    await resolutionTransactions.run(async () => {
+      await transactionDependencies.createRun(resolutionRun);
+      await transactionDependencies.createResolutionForRun(resolutionRun.id, resolution);
     });
-    await createVersion(targetId, "3.3.0");
+    expect(await dependencies.findResolutionsForRun(resolutionRun.id)).toEqual([{
+      ...resolution,
+      runId: resolutionRun.id,
+    }]);
+    await createVersion(targetId, "3.3.0", randomUUID(), targetContentSnapshot);
     const compatibilityReports = new PostgresCompatibilityReportRepository(pool!);
     await compatibilityReports.create({
       id: randomUUID(),
@@ -3576,10 +3595,14 @@ describe("PostgreSQL persistence hardening", () => {
       const sourceOwnerRead = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/dependencies`, {
         headers: ownerHeaders,
       });
-      expect(await sourceOwnerRead.json()).toMatchObject({
+      expect(await sourceOwnerRead.json()).toEqual({
+        artifactId: sourceId,
+        version: "1.0.0",
         dependencies: [{
+          targetArtifactId: targetId,
+          declaredRange: "^3.0.0",
           resolutionState: "available",
-          resolutions: [{ version: "3.2.1" }],
+          resolutions: [{ version: "3.2.1", resolvedAt: "2026-06-01T00:00:00.000Z" }],
         }],
       });
 
@@ -3621,8 +3644,15 @@ describe("PostgreSQL persistence hardening", () => {
         await privateTransitionClient.query("COMMIT");
 
         const privateTargetRead = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/dependencies`);
-        expect(await privateTargetRead.json()).toMatchObject({
-          dependencies: [{ resolutionState: "redacted", resolutions: [] }],
+        expect(await privateTargetRead.json()).toEqual({
+          artifactId: sourceId,
+          version: "1.0.0",
+          dependencies: [{
+            targetArtifactId: targetId,
+            declaredRange: "^3.0.0",
+            resolutionState: "redacted",
+            resolutions: [],
+          }],
         });
         const privateTargetCompatibility = await runtime.app.request(`/api/v1/artifacts/${sourceId}/versions/1.0.0/compatibility`);
         expect(await privateTargetCompatibility.json()).toMatchObject([{

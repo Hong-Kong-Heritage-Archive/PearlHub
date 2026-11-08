@@ -6,7 +6,11 @@ info:
     PearlHub's API uses Artifact as its resource name. Pearl is the product
     concept. First publication creates the Artifact and immutable 0.1.0
     version atomically from an owner-authorized Draft. Drafts and published
-    snapshots are stored in PostgreSQL.
+    snapshots are stored in PostgreSQL. The required resolutionState and
+    availability response fields for Dependency and Compatibility reads are
+    an explicitly approved breaking change under /api/v1. Strict clients
+    validating the previous response schemas must update; the fields are
+    supported contract semantics, not optional implementation details.
 paths:
   /api/v1/me:
     get:
@@ -958,10 +962,16 @@ paths:
       operationId: getArtifactVersionDependencies
       description: >-
         Returns declarations and persisted resolution history for exactly the
-        requested Artifact Version. History is redacted when its target is not
-        currently readable; tombstoned targets are always redacted. The path
-        requires a UUID and strict SemVer 2.x version. This read does not
-        resolve dependencies or mutate data.
+        requested Artifact Version. Each declaration has required
+        resolutionState: none means no history exists, available means history
+        is currently readable, and redacted means history exists but is
+        withheld because its target is not currently readable. Redacted is not
+        equivalent to no history; declarations remain visible and resolutions
+        is empty in both states. Tombstoned targets are always redacted. This
+        required response field is part of an explicitly approved breaking
+        change to strict /api/v1 clients. The path requires a UUID and strict
+        SemVer 2.x version. This read does not resolve dependencies or mutate
+        data.
       security:
         - {}
         - BearerAuth: []
@@ -1023,10 +1033,14 @@ paths:
       summary: Read compatibility reports for a published version
       description: >-
         Returns persisted compatibility reports for exactly the requested
-        source Artifact Version. Target IDs and report payloads are redacted
-        when the target is not currently readable; tombstoned targets are
-        always redacted. This read does not recompute compatibility or mutate
-        data.
+        source Artifact Version. Required availability distinguishes readable
+        persisted report data from redaction. When redacted, the target ID is
+        null, report is empty, and status is the synthetic value unavailable;
+        this is distinct from an available persisted report whose status is
+        unavailable. Reports with no target Version ID are redacted as well.
+        Tombstoned targets are always redacted. This required response field is
+        part of an explicitly approved breaking change to strict /api/v1
+        clients. This read does not recompute compatibility or mutate data.
       operationId: getArtifactVersionCompatibilityReports
       security:
         - {}
@@ -1500,14 +1514,17 @@ components:
                 type: string
                 enum: [none, available, redacted]
                 description: >-
-                  Whether history is absent, currently readable, or redacted
-                  because the resolved target is not currently readable.
+                  none means no resolution history exists; available means
+                  persisted history is currently readable; redacted means
+                  history exists but is withheld because the target is not
+                  currently readable. Redacted is distinct from no history.
               resolutions:
                 type: array
                 description: >-
                   Persisted resolution history for this declaration. Empty
-                  when state is none or redacted; no resolution is computed by
-                  this read operation.
+                  when state is none or redacted; when redacted, history exists
+                  but is withheld. No resolution is computed by this read
+                  operation.
                 items:
                   type: object
                   additionalProperties: false
@@ -1537,12 +1554,19 @@ components:
           readOnly: true
         status:
           type: string
-          description: Persisted compatibility result; no status enum is imposed.
+          description: >-
+            Persisted compatibility status when availability is available.
+            When redacted, unavailable is synthesized; consult availability
+            to distinguish redaction from a persisted unavailable status. No
+            status enum is imposed on persisted values.
           readOnly: true
         report:
           type: object
           additionalProperties: true
-          description: Structured compatibility details persisted with the report.
+          description: >-
+            Structured compatibility details persisted with an available
+            report. Empty when availability is redacted; target-derived
+            details are not exposed.
           readOnly: true
         createdAt:
           type: string
@@ -1552,8 +1576,10 @@ components:
           type: string
           enum: [available, redacted]
           description: >-
-            Whether the target and report payload are currently readable.
-            Redacted reports use status unavailable and an empty report object.
+            Whether the persisted target and report payload are currently
+            readable. Redaction is distinct from a persisted status of
+            unavailable; redacted responses use a null target Version ID, a
+            synthetic unavailable status, and an empty report object.
           readOnly: true
     ArtifactLineageEntry:
       type: object

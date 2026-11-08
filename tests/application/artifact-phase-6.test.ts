@@ -115,9 +115,26 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       id: "target-v3", artifactId: "target-artifact", version: "3.2.1", contentHash: "target-hash",
       contentLocation: "target-loc", createdAt: now, publishedAt: now,
     });
+    const privateTargetArtifact = Artifact.create({
+      id: "private-target-artifact",
+      ownerId: "private-target-owner",
+      name: "Private Target",
+      slug: "private-target",
+      visibility: "private",
+      createdAt: now,
+    });
+    const privateResolved = ArtifactVersion.create({
+      id: "private-target-v4", artifactId: privateTargetArtifact.id, version: "4.1.0",
+      contentHash: "private-target-hash", contentLocation: "private-target-loc",
+      createdAt: now, publishedAt: now,
+    });
     const declaration = Dependency.create({
       id: "dependency-1", artifactVersionId: sourceV1.id, targetArtifactId: resolved.artifactId,
       declaredRange: "^3.0.0", createdAt: now,
+    });
+    const privateDeclaration = Dependency.create({
+      id: "dependency-private", artifactVersionId: sourceV1.id, targetArtifactId: privateTargetArtifact.id,
+      declaredRange: "^4.0.0", createdAt: now,
     });
     const unresolvedDeclaration = Dependency.create({
       id: "dependency-2", artifactVersionId: sourceV1.id, targetArtifactId: "other-target",
@@ -127,7 +144,7 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       id: "resolution-1", dependencyId: declaration.id, runId: null, resolvedArtifactVersionId: resolved.id, resolvedAt: now,
     };
     const versions: ArtifactVersionRepository = {
-      findById: async (id) => id === resolved.id ? resolved : null,
+      findById: async (id) => id === resolved.id ? resolved : id === privateResolved.id ? privateResolved : null,
       findByArtifactAndVersion: async (artifactId, version) =>
         artifactId === artifact.id && version === "1.0.0" ? sourceV1
           : artifactId === artifact.id && version === "2.0.0" ? sourceV2 : null,
@@ -136,8 +153,15 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       lockArtifactForWrite: async () => true,
       create: async () => {},
     };
-    const findForVersion = vi.fn(async (versionId: string) => versionId === sourceV1.id ? [declaration, unresolvedDeclaration] : []);
-    const findResolutions = vi.fn(async (dependencyId: string) => dependencyId === declaration.id ? [resolution] : []);
+    const privateResolution: DependencyResolution = {
+      id: "private-resolution", dependencyId: privateDeclaration.id, runId: null,
+      resolvedArtifactVersionId: privateResolved.id, resolvedAt: now,
+    };
+    const findForVersion = vi.fn(async (versionId: string) =>
+      versionId === sourceV1.id ? [declaration, privateDeclaration, unresolvedDeclaration] : []);
+    const findResolutions = vi.fn(async (dependencyId: string) =>
+      dependencyId === declaration.id ? [resolution]
+        : dependencyId === privateDeclaration.id ? [privateResolution] : []);
     const createResolution = vi.fn(async () => {});
     const dependencies: DependencyRepository = {
       findForVersion,
@@ -169,8 +193,11 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       findForArtifactVersion: findReports,
     };
     const artifacts: ArtifactRepository = {
-      findById: async (id) => id === artifact.id ? artifact : id === targetArtifact.id ? targetArtifact : null,
-      findByIds: async (ids) => ids.flatMap((id) => id === targetArtifact.id ? [targetArtifact] : []),
+      findById: async (id) => id === artifact.id ? artifact
+        : id === targetArtifact.id ? targetArtifact
+          : id === privateTargetArtifact.id ? privateTargetArtifact : null,
+      findByIds: async (ids) => ids.flatMap((id) => id === targetArtifact.id ? [targetArtifact]
+        : id === privateTargetArtifact.id ? [privateTargetArtifact] : []),
       findTombstoneSnapshotArtifact: async () => null,
       findByOwnerAndSlug: async () => null,
       create: async () => {},
@@ -227,6 +254,11 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
           resolutionState: "available",
           resolutions: [{ version: "3.2.1", resolvedAt: now }],
         }, {
+          targetArtifactId: "private-target-artifact",
+          declaredRange: "^4.0.0",
+          resolutionState: "redacted",
+          resolutions: [],
+        }, {
           targetArtifactId: "other-target",
           declaredRange: "~1.0.0",
           resolutionState: "none",
@@ -237,7 +269,7 @@ describe("Phase 6 Artifact metadata and dependency reads", () => {
       .resolves.toEqual({ artifactId: artifact.id, version: "2.0.0", dependencies: [] });
     expect(findForVersion).toHaveBeenNthCalledWith(1, sourceV1.id);
     expect(findForVersion).toHaveBeenNthCalledWith(2, sourceV2.id);
-    expect(findResolutions).toHaveBeenCalledTimes(2);
+    expect(findResolutions).toHaveBeenCalledTimes(3);
     expect(createResolution).not.toHaveBeenCalled();
     await expect(service.getVersionCompatibilityReports({
       actorId: null,

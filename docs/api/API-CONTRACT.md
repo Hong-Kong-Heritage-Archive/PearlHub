@@ -15,6 +15,21 @@ clients cannot provide `ownerId` in a write body.
 
 If implementation conflicts with a rule marked **FROZEN**, the implementation must be changed or the contract must be explicitly revised.
 
+## Approved `/api/v1` dependency and compatibility response change
+
+The P2EB-AUD-02 response update is an explicitly approved breaking change under
+the existing `/api/v1` path. It adds required `resolutionState` to dependency
+items and required `availability` to compatibility reports; these fields are
+part of the supported API contract. Strict clients validating the previous
+response schemas must update before consuming these responses. The path remains
+`/api/v1` by approval; this change does not add another endpoint or API version.
+
+Redaction is distinct from absent dependency history and from a persisted
+compatibility status of `unavailable`. Dependency declarations remain visible
+to an authorized source reader, while inaccessible historical resolution
+details and target-derived compatibility data are withheld as described below.
+Tombstoned targets are redacted even for their owners.
+
 ---
 
 ## 2.3.1 — API Contract Principles
@@ -181,14 +196,17 @@ the updated visibility.
 There is no Version PATCH or DELETE endpoint in v0.1.
 
 The dependency query returns declarations associated with exactly the requested
-published Version. It returns each target identifier and declared SemVer
-range, plus a `resolutions` array containing persisted resolved SemVer values
-and timestamps. The array is empty when no resolution is stored. The
-`dependency_resolutions` records are associated with their dependency rows,
-which in turn reference their exact source Artifact Version; resolution history
-is returned rather than selecting one arbitrarily. GET never resolves ranges,
-recomputes compatibility, or writes data, and it does not expose target
-Artifact metadata.
+published Version. Each item includes its target identifier, declared SemVer
+range, required `resolutionState`, and `resolutions` array. State `none` means
+no resolution history is stored; `available` means stored history is currently
+readable and includes its resolved SemVer values and timestamps; `redacted`
+means history exists but the target is not currently readable, so the
+declaration remains while `resolutions` is empty. Redacted history must not be
+interpreted as no resolution having occurred. The `dependency_resolutions`
+records are associated with their dependency rows, which in turn reference
+their exact source Artifact Version; resolution history is returned rather
+than selecting one arbitrarily. GET never resolves ranges, recomputes
+compatibility, or writes data, and it does not expose target Artifact metadata.
 
 ### Lineage / lifecycle endpoints
 
@@ -211,12 +229,18 @@ Artifact metadata.
 | GET | `/artifacts/{artifactId}/versions/{version}/dependencies` | Get exact-Version declarations and stored resolution history | Implemented |
 | GET | `/artifacts/{artifactId}/versions/{version}/compatibility` | Get persisted compatibility reports for the exact Version | Implemented |
 
-The compatibility endpoint returns an array of persisted reports for the
-requested source Artifact Version, ordered by creation time and report ID.
-Each item includes its source Version ID, optional target Version ID, free-form
-status, structured report JSON, and creation time. An empty array means no
-reports are stored. The read follows the Version's Artifact visibility rules
-and does not create reports or recompute compatibility.
+The compatibility endpoint returns an array of reports for the requested
+source Artifact Version, ordered by creation time and report ID. Each item
+includes its source Version ID, target Version ID (null when absent or
+redacted), free-form `status`, structured `report` JSON, creation time, and
+required `availability`. An empty array means no reports are stored. For
+`available` reports, `status` and `report` contain the persisted values. For
+`redacted` reports, `availability` is `redacted`, the target Version ID is
+null, `status` is the synthetic value `unavailable`, and `report` is an empty
+object. The `availability` field distinguishes this redaction from an ordinary
+persisted status of `unavailable`. Reports with no target Version ID are also
+redacted. The read follows the Version's Artifact visibility rules and does
+not create reports or recompute compatibility.
 
 ### Search
 
