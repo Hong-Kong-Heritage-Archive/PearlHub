@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useRef, useState, type FormEvent } from "react";
-import { createCloneDraft, createForkDraft, createWorkCopy, DraftRequestError, getPublishedVersion, tombstoneArtifact, type ArtifactVisibility, type PublishedVersion } from "../lib/drafts";
+import { createCloneDraft, createForkDraft, createWorkCopy, DraftRequestError, getPublishedVersion, getVersionCompatibilityReports, getVersionDependencies, tombstoneArtifact, type ArtifactVersionDependencies, type ArtifactVisibility, type CompatibilityReport, type PublishedVersion } from "../lib/drafts";
 
 export default function PublishedVersionView({ artifactId, version }: { artifactId: string; version: string }) {
   const router = useRouter();
@@ -13,8 +13,14 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
   const tombstonePending = useRef(false);
   const [token, setToken] = useState("");
   const [published, setPublished] = useState<PublishedVersion | null>(null);
+  const [versionDependencies, setVersionDependencies] = useState<ArtifactVersionDependencies | null>(null);
+  const [compatibilityReports, setCompatibilityReports] = useState<CompatibilityReport[] | null>(null);
+  const [dependenciesError, setDependenciesError] = useState<string | null>(null);
+  const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [dependenciesLoading, setDependenciesLoading] = useState(false);
+  const [compatibilityLoading, setCompatibilityLoading] = useState(false);
   const [confirmingTombstone, setConfirmingTombstone] = useState(false);
   const [tombstoning, setTombstoning] = useState(false);
   const [tombstoned, setTombstoned] = useState(false);
@@ -32,13 +38,35 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
   async function load() {
     setLoading(true);
     setError(null);
+    setVersionDependencies(null);
+    setCompatibilityReports(null);
+    setDependenciesError(null);
+    setCompatibilityError(null);
     setTombstoned(false);
     try {
       setPublished(await getPublishedVersion(artifactId, version, token));
+      setDependenciesLoading(true);
+      setCompatibilityLoading(true);
+      const [dependenciesResult, compatibilityResult] = await Promise.allSettled([
+        getVersionDependencies(artifactId, version, token),
+        getVersionCompatibilityReports(artifactId, version, token),
+      ]);
+      if (dependenciesResult.status === "fulfilled") {
+        setVersionDependencies(dependenciesResult.value);
+      } else {
+        setDependenciesError(getVersionReadError(dependenciesResult.reason, "dependency history"));
+      }
+      if (compatibilityResult.status === "fulfilled") {
+        setCompatibilityReports(compatibilityResult.value);
+      } else {
+        setCompatibilityError(getVersionReadError(compatibilityResult.reason, "compatibility reports"));
+      }
     } catch (caught: unknown) {
       setError(caught instanceof DraftRequestError ? caught.message : "Could not load this published version.");
     } finally {
       setLoading(false);
+      setDependenciesLoading(false);
+      setCompatibilityLoading(false);
     }
   }
 
@@ -179,6 +207,49 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
             {published.version.content.dependencies.length
               ? <ul>{published.version.content.dependencies.map((dependency) => <li key={`${dependency.targetArtifactId}:${dependency.declaredRange}`}>{dependency.targetArtifactId} {dependency.declaredRange}</li>)}</ul>
               : <p>No dependencies.</p>}
+            <section aria-labelledby="dependency-history-heading">
+              <h3 id="dependency-history-heading">Dependency resolution history</h3>
+              {dependenciesLoading && <p role="status">Loading dependency history…</p>}
+              {dependenciesError && <p className="create-error" role="alert">{dependenciesError}</p>}
+              {versionDependencies && (versionDependencies.dependencies.length
+                ? <ul>{versionDependencies.dependencies.map((dependency, index) => (
+                  <li key={`${dependency.targetArtifactId}:${dependency.declaredRange}:${index}`}>
+                    <p><strong>{dependency.targetArtifactId}</strong></p>
+                    <p>Declared range: <code>{dependency.declaredRange}</code></p>
+                    {dependency.resolutionState === "none" && <p>No resolution history exists for this declaration.</p>}
+                    {dependency.resolutionState === "redacted" && <p>Resolution history exists but is withheld because its targets are not currently readable.</p>}
+                    {dependency.resolutionState === "available" && (
+                      dependency.resolutions.length
+                        ? <div><p>Resolved versions:</p><ul>{dependency.resolutions.map((resolution, resolutionIndex) => (
+                          <li key={`${resolution.version}:${resolution.resolvedAt}:${resolutionIndex}`}>
+                            <code>{resolution.version}</code> — resolved {new Date(resolution.resolvedAt).toLocaleString()}
+                          </li>
+                        ))}</ul></div>
+                        : <p>No readable resolved versions are recorded.</p>
+                    )}
+                  </li>
+                ))}</ul>
+                : <p>No dependencies are declared for this version.</p>)}
+            </section>
+            <section aria-labelledby="compatibility-reports-heading">
+              <h3 id="compatibility-reports-heading">Compatibility reports</h3>
+              <p>Reports are community evidence for this exact Artifact Version, not a platform guarantee.</p>
+              {compatibilityLoading && <p role="status">Loading compatibility reports…</p>}
+              {compatibilityError && <p className="create-error" role="alert">{compatibilityError}</p>}
+              {compatibilityReports && (compatibilityReports.length
+                ? compatibilityReports.map((report) => report.availability === "redacted"
+                  ? <p key={report.id}>A compatibility report is withheld because its target is not currently readable. Target identifiers and report details are not available.</p>
+                  : <article className="knowledge-file" key={report.id}>
+                    <h4>Compatibility report</h4>
+                    <dl className="created-details">
+                      <div><dt>Status</dt><dd>{report.status}</dd></div>
+                      <div><dt>Target Version</dt><dd><code>{report.targetArtifactVersionId}</code></dd></div>
+                      <div><dt>Reported</dt><dd>{new Date(report.createdAt).toLocaleString()}</dd></div>
+                    </dl>
+                    <pre>{JSON.stringify(report.report, null, 2)}</pre>
+                  </article>)
+                : <p>No compatibility reports are available for this version.</p>)}
+            </section>
             <button className="secondary-button" type="button" onClick={workCopy} disabled={loading || tombstoning || forking || cloning}>Create work-copy from this version</button>
             <div className="artifact-delete-actions">
               <button className="secondary-button" type="button" onClick={() => { setCloneFormOpen((open) => !open); setForkFormOpen(false); }} disabled={loading || tombstoning || cloning || forking}>
@@ -257,4 +328,16 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
       </section>
     </main>
   );
+}
+
+function getVersionReadError(error: unknown, resource: string): string {
+  if (error instanceof DraftRequestError && error.status === 401) {
+    return `Authentication was rejected while loading ${resource}. Check the developer bearer token and retry.`;
+  }
+  if (error instanceof DraftRequestError && error.status === 403) {
+    return `You do not have permission to read ${resource}.`;
+  }
+  return error instanceof DraftRequestError
+    ? error.message
+    : `Could not load ${resource}. Please try again.`;
 }

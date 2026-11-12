@@ -46,6 +46,10 @@ describe("Fork and Import Thin UI", () => {
     const fetch = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       calls.push({ url, init });
+      if (url.pathname.endsWith("/dependencies")) {
+        return mockResponse({ artifactId: "source-artifact", version: "2.3.1", dependencies: [] });
+      }
+      if (url.pathname.endsWith("/compatibility")) return mockResponse([]);
       if (init.method === "GET") return mockResponse(publishedResponse);
       return mockResponse(draftResponse({
         name: "Fork Pearl",
@@ -60,6 +64,7 @@ describe("Fork and Import Thin UI", () => {
     fireEvent.change(screen.getByLabelText(/bearer token/i), { target: { value: "owner-token" } });
     fireEvent.click(screen.getByRole("button", { name: "Load published version" }));
     expect(await screen.findByRole("heading", { name: "Source Pearl — 2.3.1" })).toBeInTheDocument();
+    await screen.findByText("No compatibility reports are available for this version.");
     fireEvent.click(screen.getByRole("button", { name: "Fork this version" }));
     expect(screen.getByText("Fork source:")).toHaveTextContent("Source Pearl — version 2.3.1");
     fireEvent.change(screen.getByLabelText("New Artifact name"), { target: { value: "Fork Pearl" } });
@@ -67,9 +72,9 @@ describe("Fork and Import Thin UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create Fork Draft" }));
 
     await vi.waitFor(() => expect(routerPush).toHaveBeenCalledWith("/draft/draft-123"));
-    expect(calls[1]?.url.pathname).toBe("/api/v1/artifacts/source-artifact/fork");
-    expect(calls[1]?.init.method).toBe("POST");
-    expect(JSON.parse(String(calls[1]?.init.body))).toEqual({
+    const forkRequest = calls.find(({ url }) => url.pathname === "/api/v1/artifacts/source-artifact/fork");
+    expect(forkRequest?.init.method).toBe("POST");
+    expect(JSON.parse(String(forkRequest?.init.body))).toEqual({
       sourceVersion: "2.3.1", name: "Fork Pearl", slug: "fork-pearl", visibility: "private",
     });
     expect(routerPush).toHaveBeenCalledTimes(1);

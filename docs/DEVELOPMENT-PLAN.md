@@ -135,6 +135,7 @@ The `web/` directory contains a Next.js 16 App Router + TypeScript application w
 - Draft creation, editing, private preview and publication.
 - Knowledge-file and dependency editing in Drafts.
 - Published Version lists and immutable Version detail views.
+- Version-level dependency resolution history and compatibility reports, including explicit empty, error, authorization, and redaction states.
 - Fork and Clone actions.
 - Pasted Markdown/Skill and GitHub raw URL import.
 - GitHub provenance display in Draft editor.
@@ -148,7 +149,7 @@ Current limitations documented in `web/README.md`:
 
 - Authentication is a temporary development-only bearer-token input, not a production login flow.
 - Firebase Authentication is not integrated into the UI.
-- Dependency and compatibility API read paths have recently advanced; the UI must be audited and brought up to date with the latest response contract, including `resolutionState` and compatibility `availability` redaction states.
+- Production deployment and target-environment smoke testing are not evidenced; GCP project and resource access remain to be verified.
 - No complete user-facing Playground is documented as implemented.
 
 ### 3.3 Deployment and operations — local/CI foundations only
@@ -432,23 +433,21 @@ Every hand-off should state:
 
 **Backend:** Core content-management and discovery foundation is implemented; dependency resolution and compatibility read paths are now present. Continue with small, reviewed increments rather than restarting or regenerating the backend.
 
-**Frontend:** Existing Thin UI is functional for the initial content workflow. It must catch up with the latest dependency/compatibility read contract and replace the development-only bearer-token experience with Firebase Authentication.
+**Frontend:** Existing Thin UI now includes read-only Version dependency history and compatibility views aligned with the latest redaction contract. Firebase Authentication has not been integrated; the developer-only bearer-token experience remains.
 
 **Deployment:** Local PostgreSQL and CI are in place. Production GCP deployment is not yet evidenced. GCP + Firebase Authentication + Cloud SQL for PostgreSQL is the confirmed direction; resource access and provisioning must be verified.
 
 **Playground:** Not yet a complete user-facing capability. Implement after the current frontend/auth/deployment catch-up, using the same incremental feature loop.
 
-### Next increment — Frontend + Deployment catch-up
+### Next increment — Authentication and deployment readiness
 
-Recommended execution order within this increment:
+The initial dependency/compatibility UI slice is complete and locally verified. Continue with the remaining catch-up work:
 
-1. Audit the current OpenAPI contract against the existing UI; write a short gap list.
-2. Add the dependency and compatibility Version views, including the latest redaction states.
-3. Verify GCP project, Firebase and Cloud SQL access; record resource/IAM status.
-4. Implement Firebase Authentication end to end (frontend token acquisition + backend verification + internal identity mapping).
-5. Containerize and deploy the backend to Cloud Run with Cloud SQL connectivity.
-6. Deploy the frontend to the selected GCP hosting arrangement and configure API origin/CORS.
-7. Run end-to-end smoke tests and update this plan with actual deployed URLs/resource references (never secrets).
+1. Verify GCP project, Firebase and Cloud SQL access; record resource/IAM status and enabled sign-in providers.
+2. Implement Firebase Authentication end to end (frontend token acquisition + backend verification + internal identity mapping), preserving the production fail-closed guard until verified.
+3. Containerize and deploy the backend to Cloud Run with Cloud SQL connectivity after resource access is confirmed.
+4. Deploy the frontend to the selected GCP hosting arrangement and configure API origin/CORS.
+5. Run end-to-end smoke tests and update this plan with actual deployed URLs/resource references (never secrets).
 
 The ordering above is a practical dependency order for the catch-up work, not a return to backend-first development. UI/API contract work and deployment preparation should proceed in parallel wherever their interfaces are clear.
 
@@ -458,5 +457,6 @@ The ordering above is a practical dependency order for the catch-up work, not a 
 |---|---|---|
 | 2026-11-08 | `3d1fae68` | Backend dependency/compatibility read-path hardening accepted in code; CI build/unit, PostgreSQL integration and frontend checks all green. |
 | 2026-11-08 | This plan | Development strategy changed to incremental vertical slices; immediate priority is Frontend + Deployment catch-up. GCP + Firebase Auth + Cloud SQL direction confirmed; actual resource access/provisioning remains to be verified. |
+| 2026-11-10 | Working tree | Added Version-level dependency history and compatibility views with strict response validation and redaction handling. Frontend tests, lint, typecheck, production build, backend build, and focused OpenAPI/HTTP tests passed; production deployment remains unverified. |
 
 Update this log after each accepted vertical slice. Do not mark a task complete based only on code being present; record the relevant test and deployment evidence.

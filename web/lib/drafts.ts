@@ -74,6 +74,34 @@ export interface PublishedVersion {
   };
 }
 
+export interface ArtifactVersionDependencyResolution {
+  version: string;
+  resolvedAt: string;
+}
+
+export interface ArtifactVersionDependency {
+  targetArtifactId: string;
+  declaredRange: string;
+  resolutionState: "none" | "available" | "redacted";
+  resolutions: ArtifactVersionDependencyResolution[];
+}
+
+export interface ArtifactVersionDependencies {
+  artifactId: string;
+  version: string;
+  dependencies: ArtifactVersionDependency[];
+}
+
+export interface CompatibilityReport {
+  id: string;
+  artifactVersionId: string;
+  targetArtifactVersionId: string | null;
+  status: string;
+  report: Record<string, unknown>;
+  createdAt: string;
+  availability: "available" | "redacted";
+}
+
 export interface ArtifactMetadata {
   id: string;
   ownerId: string;
@@ -193,6 +221,34 @@ export async function getPublishedVersion(artifactId: string, version: string, t
   return readPublishedVersion(await request(`/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}`, "GET", undefined, token));
 }
 
+export async function getVersionDependencies(
+  artifactId: string,
+  version: string,
+  token?: string,
+): Promise<ArtifactVersionDependencies> {
+  const response = await request(
+    `/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/dependencies`,
+    "GET",
+    undefined,
+    token,
+  );
+  return readArtifactVersionDependencies(response);
+}
+
+export async function getVersionCompatibilityReports(
+  artifactId: string,
+  version: string,
+  token?: string,
+): Promise<CompatibilityReport[]> {
+  const response = await request(
+    `/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/compatibility`,
+    "GET",
+    undefined,
+    token,
+  );
+  return readCompatibilityReports(response);
+}
+
 export async function getArtifact(artifactId: string, token?: string, signal?: AbortSignal): Promise<ArtifactMetadata> {
   const response = await request(`/artifacts/${encodeURIComponent(artifactId)}`, "GET", undefined, token, signal);
   return readArtifactMetadata(response);
@@ -307,6 +363,32 @@ async function readPublishedVersion(response: Response): Promise<PublishedVersio
   return payload;
 }
 
+async function readArtifactVersionDependencies(response: Response): Promise<ArtifactVersionDependencies> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new DraftRequestError("The API returned an invalid dependency response.", response.status, "INVALID_RESPONSE");
+  }
+  if (!isArtifactVersionDependencies(payload)) {
+    throw new DraftRequestError("The API returned an unexpected dependency response.", response.status, "INVALID_RESPONSE");
+  }
+  return payload;
+}
+
+async function readCompatibilityReports(response: Response): Promise<CompatibilityReport[]> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new DraftRequestError("The API returned an invalid compatibility response.", response.status, "INVALID_RESPONSE");
+  }
+  if (!Array.isArray(payload) || !payload.every(isCompatibilityReport)) {
+    throw new DraftRequestError("The API returned an unexpected compatibility response.", response.status, "INVALID_RESPONSE");
+  }
+  return payload;
+}
+
 async function readArtifactMetadata(response: Response): Promise<ArtifactMetadata> {
   let payload: unknown;
   try {
@@ -375,6 +457,56 @@ function isPublishedVersion(value: unknown): value is PublishedVersion {
     && typeof value.version.publishedAt === "string" && isPublishedContent(value.version.content);
 }
 
+function isArtifactVersionDependencies(value: unknown): value is ArtifactVersionDependencies {
+  return isRecord(value)
+    && hasExactKeys(value, ["artifactId", "version", "dependencies"])
+    && typeof value.artifactId === "string"
+    && typeof value.version === "string"
+    && Array.isArray(value.dependencies)
+    && value.dependencies.every(isArtifactVersionDependency);
+}
+
+function isArtifactVersionDependency(value: unknown): value is ArtifactVersionDependency {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ["targetArtifactId", "declaredRange", "resolutionState", "resolutions"])
+    || typeof value.targetArtifactId !== "string"
+    || typeof value.declaredRange !== "string"
+    || (value.resolutionState !== "none" && value.resolutionState !== "available" && value.resolutionState !== "redacted")
+    || !Array.isArray(value.resolutions)
+    || !value.resolutions.every(isArtifactVersionDependencyResolution)
+  ) {
+    return false;
+  }
+  return value.resolutionState === "available" || value.resolutions.length === 0;
+}
+
+function isArtifactVersionDependencyResolution(value: unknown): value is ArtifactVersionDependencyResolution {
+  return isRecord(value)
+    && hasExactKeys(value, ["version", "resolvedAt"])
+    && typeof value.version === "string"
+    && isDateTime(value.resolvedAt);
+}
+
+function isCompatibilityReport(value: unknown): value is CompatibilityReport {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ["id", "artifactVersionId", "targetArtifactVersionId", "status", "report", "createdAt", "availability"])
+    || typeof value.id !== "string"
+    || typeof value.artifactVersionId !== "string"
+    || (typeof value.targetArtifactVersionId !== "string" && value.targetArtifactVersionId !== null)
+    || typeof value.status !== "string"
+    || !isRecord(value.report)
+    || !isDateTime(value.createdAt)
+  ) {
+    return false;
+  }
+  if (value.availability === "redacted") {
+    return value.targetArtifactVersionId === null
+      && value.status === "unavailable"
+      && Object.keys(value.report).length === 0;
+  }
+  return value.availability === "available" && typeof value.targetArtifactVersionId === "string";
+}
+
 function isArtifactMetadata(value: unknown): value is ArtifactMetadata {
   return isRecord(value)
     && typeof value.id === "string"
@@ -429,6 +561,17 @@ function isPublishedContent(value: unknown): value is PublishedContent {
 
 function isVisibility(value: unknown): value is ArtifactVisibility {
   return value === "private" || value === "unlisted" || value === "public";
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function isDateTime(value: unknown): value is string {
+  return typeof value === "string"
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    && Number.isFinite(Date.parse(value));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
