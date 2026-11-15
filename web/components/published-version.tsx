@@ -189,7 +189,7 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
         {published && (
           <article className="published-version">
             <h2>{published.artifact.name} — {published.version.version}</h2>
-            <p><Link href={`/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/playground`}>Open developer Playground for this Version</Link></p>
+            <p><Link href={`/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/playground`}>Test this Skill with an external AI provider</Link></p>
             <dl className="created-details">
               <div><dt>Artifact</dt><dd><Link href={`/artifacts/${encodeURIComponent(artifactId)}/versions`}>{published.artifact.slug} versions</Link></dd></div>
               <div><dt>Visibility</dt><dd>{published.artifact.visibility}</dd></div>

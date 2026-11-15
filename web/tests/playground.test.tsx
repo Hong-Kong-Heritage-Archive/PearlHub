@@ -2,49 +2,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Playground from "../components/playground";
 
-const gemini = vi.hoisted(() => {
-  class MockApiError extends Error {
-    constructor(readonly status: number, message: string) {
-      super(message);
-      this.name = "ApiError";
-    }
-  }
-  return {
-    generateContent: vi.fn(),
-    constructor: vi.fn(),
-    MockApiError,
-  };
-});
-
-vi.mock("@google/genai", () => ({
-  ApiError: gemini.MockApiError,
-  GoogleGenAI: class {
-    models = { generateContent: gemini.generateContent };
-
-    constructor(options: unknown) {
-      gemini.constructor(options);
-    }
-  },
-}));
-
-afterEach(() => {
-  cleanup();
-  vi.unstubAllEnvs();
-  vi.unstubAllGlobals();
-});
-
-beforeEach(() => {
-  gemini.generateContent.mockReset();
-  gemini.constructor.mockReset();
-  vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
-});
-
 const sourceVersion = makePublishedVersion({
   artifactId: "source-artifact",
   artifactName: "Source Pearl",
   versionId: "source-version",
   version: "1.0.0",
-  instructions: "Source Skill instructions",
+  instructions: "Source Skill instructions.\nAsk clarifying questions over multiple turns.",
   knowledgeFiles: [{ path: "source.md", content: "Source Knowledge content", contentHash: `sha256:${"d".repeat(64)}` }],
   dependencies: [{ targetArtifactId: "target-artifact", declaredRange: "^2.0.0" }],
 });
@@ -62,7 +25,7 @@ const targetVersion = makePublishedVersion({
 const manifest = {
   runId: "resolution-run",
   sourceArtifactVersionId: "source-version",
-  createdAt: "2026-11-12T00:00:00.000Z",
+  createdAt: "2026-11-15T00:00:00.000Z",
   manifestVersion: 1,
   resolverPolicyVersion: "semver-highest-v1",
   manifestHash: `sha256:${"a".repeat(64)}`,
@@ -73,7 +36,7 @@ const manifest = {
     resolvedArtifactVersionId: "target-version",
     resolvedVersion: "2.3.1",
     resolvedContentHash: targetVersion.version.contentHash,
-    resolvedAt: "2026-11-12T00:00:00.000Z",
+    resolvedAt: "2026-11-15T00:00:00.000Z",
   }],
 };
 
@@ -94,15 +57,15 @@ function makePublishedVersion(input: {
       slug: input.artifactId,
       visibility: "public",
       status: "active",
-      createdAt: "2026-11-12T00:00:00.000Z",
-      updatedAt: "2026-11-12T00:00:00.000Z",
+      createdAt: "2026-11-15T00:00:00.000Z",
+      updatedAt: "2026-11-15T00:00:00.000Z",
     },
     version: {
       id: input.versionId,
       artifactId: input.artifactId,
       version: input.version,
       contentHash: `sha256:${(input.artifactId === "target-artifact" ? "b" : "c").repeat(64)}`,
-      publishedAt: "2026-11-12T00:00:00.000Z",
+      publishedAt: "2026-11-15T00:00:00.000Z",
       content: {
         instructions: input.instructions,
         knowledgeFiles: input.knowledgeFiles,
@@ -115,20 +78,35 @@ function makePublishedVersion(input: {
 function stubPlaygroundApi(options: {
   historyState?: "none" | "available" | "redacted";
   resolveStatus?: number;
-  emptyInstructions?: boolean;
   sourceUnavailable?: boolean;
   targetUnavailable?: boolean;
+  largeInstructions?: boolean;
 } = {}) {
   const calls: Array<{ url: URL; init: RequestInit }> = [];
-  const source = options.emptyInstructions
-    ? { ...sourceVersion, version: { ...sourceVersion.version, content: { ...sourceVersion.version.content, instructions: "" } } }
+  const source = options.largeInstructions
+    ? {
+      ...sourceVersion,
+      version: {
+        ...sourceVersion.version,
+        content: {
+          ...sourceVersion.version.content,
+          instructions: "Large canonical Skill content. ".repeat(3_000),
+        },
+      },
+    }
     : sourceVersion;
   const fetch = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     calls.push({ url, init });
     if (url.pathname.endsWith("/dependency-resolutions")) {
       return options.resolveStatus
-        ? jsonResponse({ error: { code: options.resolveStatus === 403 ? "FORBIDDEN" : "DEPENDENCY_RESOLUTION_FAILED", message: "Request failed.", details: {} } }, options.resolveStatus)
+        ? jsonResponse({
+          error: {
+            code: options.resolveStatus === 403 ? "FORBIDDEN" : "DEPENDENCY_RESOLUTION_FAILED",
+            message: "Request failed.",
+            details: {},
+          },
+        }, options.resolveStatus)
         : jsonResponse(manifest);
     }
     if (url.pathname.endsWith("/dependencies")) {
@@ -163,134 +141,167 @@ function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
 }
 
-describe("Playground ThinUI", () => {
-  it("loads immutable content, resolves exact direct dependencies, and sends the key only to Gemini", async () => {
-    const { calls } = stubPlaygroundApi();
-    gemini.generateContent.mockResolvedValue({
-      text: "Gemini test response",
-      modelVersion: "gemini-3.8-flash",
-      usageMetadata: { promptTokenCount: 123, candidatesTokenCount: 45 },
-    });
-    render(<Playground artifactId="source-artifact" version="1.0.0" />);
+function setClipboard(writeText: ReturnType<typeof vi.fn>) {
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  return writeText;
+}
 
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Load source and resolve dependencies" }));
+let originalClipboard: PropertyDescriptor | undefined;
+let originalCreateObjectURL: PropertyDescriptor | undefined;
+let originalRevokeObjectURL: PropertyDescriptor | undefined;
 
-    expect(await screen.findByText("Dependency Knowledge content")).toBeInTheDocument();
-    expect(screen.getByText("Resolved Version:")).toBeInTheDocument();
-    expect(screen.getByText("2.3.1")).toBeInTheDocument();
-    expect(screen.getByText(/Manifest hash:/)).toHaveTextContent(manifest.manifestHash);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+  if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+  else Reflect.deleteProperty(navigator, "clipboard");
+  if (originalCreateObjectURL) Object.defineProperty(URL, "createObjectURL", originalCreateObjectURL);
+  else Reflect.deleteProperty(URL, "createObjectURL");
+  if (originalRevokeObjectURL) Object.defineProperty(URL, "revokeObjectURL", originalRevokeObjectURL);
+  else Reflect.deleteProperty(URL, "revokeObjectURL");
+});
 
-    fireEvent.change(screen.getByLabelText(/Gemini API key/), { target: { value: "user-gemini-secret" } });
-    fireEvent.change(screen.getByLabelText(/Test input/), { target: { value: "Test this Skill." } });
-    fireEvent.click(screen.getByRole("button", { name: "Run Skill test" }));
+beforeEach(() => {
+  originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  originalCreateObjectURL = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  originalRevokeObjectURL = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+  vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
+});
 
-    expect(await screen.findByText("Gemini test response")).toBeInTheDocument();
-    expect(gemini.constructor).toHaveBeenCalledWith({
-      apiKey: "user-gemini-secret",
-      httpOptions: { timeout: 90_000 },
-    });
-    expect(gemini.generateContent).toHaveBeenCalledWith(expect.objectContaining({
-      model: "gemini-3.8-flash",
-      contents: expect.stringContaining("Source Knowledge content"),
-    }));
-    const prompt = gemini.generateContent.mock.calls[0]?.[0].contents as string;
-    expect(prompt).toContain("Dependency Skill instructions");
-    expect(prompt).toContain("Dependency Knowledge content");
-    expect(prompt).toContain("Test this Skill.");
-    expect(prompt).not.toContain("user-gemini-secret");
-    expect(calls.map(({ url }) => url.pathname)).toContain(
-      "/api/v1/artifacts/source-artifact/versions/1.0.0/dependency-resolutions",
-    );
-    expect(calls.every(({ init }) =>
-      new Headers(init.headers).get("authorization") !== "Bearer user-gemini-secret"
-      && !String(init.body ?? "").includes("user-gemini-secret"))).toBe(true);
+async function startPreparing(options: Parameters<typeof stubPlaygroundApi>[0] = {}) {
+  const api = stubPlaygroundApi(options);
+  render(<Playground artifactId="source-artifact" version="1.0.0" />);
+  fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
+  fireEvent.click(screen.getByRole("button", { name: "Prepare Launch Package" }));
+  return api;
+}
+
+async function preparePackage(options: Parameters<typeof stubPlaygroundApi>[0] = {}) {
+  const api = await startPreparing(options);
+  const packageText = await screen.findByLabelText(/Complete Launch Package/) as HTMLTextAreaElement;
+  return { api, packageText };
+}
+
+describe("External AI Playground", () => {
+  it("prepares a complete version-pinned package and only opens providers after an explicit click", async () => {
+    const writeText = setClipboard(vi.fn().mockResolvedValue(undefined));
+    const { api, packageText } = await preparePackage();
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+
+    expect(packageText.value).toContain("Source Skill instructions.");
+    expect(packageText.value).toContain("Source Knowledge content");
+    expect(packageText.value).toContain("Dependency Skill instructions");
+    expect(packageText.value).toContain("Dependency Knowledge content");
+    expect(packageText.value).toContain('"declaredRange": "^2.0.0"');
+    expect(packageText.value).toContain('"resolvedVersion": "2.3.1"');
+    expect(packageText.value).toContain('"resolvedArtifactVersionId": "target-version"');
+    expect(packageText.value).toContain("Ask clarifying questions");
+    expect(screen.getByText("Knowledge files: 2")).toBeInTheDocument();
+    expect(screen.getByText("Direct dependencies: 1")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Gemini API key/)).not.toBeInTheDocument();
+    expect(open).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
+
+    const immutablePackage = packageText.value;
+    fireEvent.click(screen.getByRole("button", { name: "Launch in Gemini" }));
+    expect(open).toHaveBeenLastCalledWith("https://gemini.google.com/", "_blank", "noopener,noreferrer");
+    expect(writeText).toHaveBeenLastCalledWith(immutablePackage);
+    expect(await screen.findByText(/Launch Package copied/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Launch in ChatGPT" }));
+    await waitFor(() => expect(open).toHaveBeenLastCalledWith("https://chatgpt.com/", "_blank", "noopener,noreferrer"));
+    expect(writeText).toHaveBeenLastCalledWith(immutablePackage);
+    expect(api.calls.filter(({ url }) => url.pathname.endsWith("/dependency-resolutions"))).toHaveLength(1);
+    expect(api.calls.every(({ url, init }) =>
+      !url.search && !url.pathname.includes("gemini") && !url.pathname.includes("chatgpt")
+      && !String(init.body ?? "").includes("Source Skill instructions."))).toBe(true);
+    expect(screen.getByText(/does not create a Custom GPT/)).toBeInTheDocument();
     expect(window.localStorage.length).toBe(0);
     expect(window.sessionStorage.length).toBe(0);
-    expect(screen.getByText(/Prompt tokens:/)).toHaveTextContent("123");
-    expect(screen.getByText(/Response tokens:/)).toHaveTextContent("45");
   });
 
-  it("blocks execution when stored dependency history is redacted", async () => {
-    const { calls } = stubPlaygroundApi({ historyState: "redacted" });
-    render(<Playground artifactId="source-artifact" version="1.0.0" />);
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Load source and resolve dependencies" }));
+  it("keeps the complete package available for manual copy after clipboard denial", async () => {
+    const writeText = setClipboard(vi.fn().mockRejectedValue(new Error("clipboard permission denied")));
+    const { packageText } = await preparePackage();
+    vi.spyOn(window, "open").mockReturnValue(null);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/prior resolution history is currently redacted/);
-    expect(screen.getByText("Prior resolution state: redacted")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Launch in Gemini" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Clipboard access failed/);
+    expect(packageText.value).toContain("Source Knowledge content");
+
+    writeText.mockResolvedValueOnce(undefined);
+    fireEvent.click(screen.getByRole("button", { name: "Copy Launch Package" }));
+    expect(await screen.findByText(/Launch Package copied/)).toBeInTheDocument();
+    expect(writeText).toHaveBeenCalledTimes(2);
+  });
+
+  it("downloads oversized content without truncation and skips automatic clipboard transfer", async () => {
+    const writeText = setClipboard(vi.fn().mockResolvedValue(undefined));
+    const { packageText } = await preparePackage({ largeInstructions: true });
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    const createObjectURL = vi.fn().mockReturnValue("blob:launch-package");
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectURL });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectURL });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+
+    const warning = await screen.findByRole("alert");
+    expect(warning).toHaveTextContent(/exceeds the 65,536-byte clipboard threshold/);
+    expect(warning).toHaveTextContent(/automatic clipboard copy is skipped/i);
+    expect(warning).toHaveTextContent(/manually copy and paste the complete contents/i);
+    const originalPackage = packageText.value;
+    expect(originalPackage).toContain("Large canonical Skill content.");
+    expect(originalPackage).toContain('"manifestHash"');
+
+    fireEvent.click(screen.getByRole("button", { name: "Launch in ChatGPT" }));
+    expect(open).toHaveBeenCalledWith("https://chatgpt.com/", "_blank", "noopener,noreferrer");
+    expect(writeText).not.toHaveBeenCalled();
+    expect(await screen.findByText(/manually copy and paste its full contents/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Download Launch Package" }));
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+    expect(click).toHaveBeenCalled();
+    const blob = createObjectURL.mock.calls[0]?.[0] as Blob;
+    expect(await blob.text()).toBe(originalPackage);
+    expect(await screen.findByText(/download started/)).toBeInTheDocument();
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith("blob:launch-package"));
+  });
+
+  it("does not prepare a package when dependency history is redacted", async () => {
+    const api = await startPreparing({ historyState: "redacted" });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/access is redacted/);
+    expect(screen.queryByRole("heading", { name: "Launch Package ready" })).not.toBeInTheDocument();
+    expect(api.calls.some(({ url }) => url.pathname.endsWith("/dependency-resolutions"))).toBe(false);
     expect(screen.getByText("Prior resolved versions are withheld.")).toBeInTheDocument();
-    expect(calls.some(({ url }) => url.pathname.endsWith("/dependency-resolutions"))).toBe(false);
-    expect(screen.getByRole("button", { name: "Run Skill test" })).toBeDisabled();
+    expect(screen.queryByText("target-version")).not.toBeInTheDocument();
   });
 
-  it("does not display hidden target details when resolution is forbidden", async () => {
+  it("blocks failed or inaccessible dependencies without leaking resolved target details", async () => {
+    const api = await startPreparing({ targetUnavailable: true });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/source or a required Artifact Version is not currently available/);
+    expect(screen.queryByRole("heading", { name: "Launch Package ready" })).not.toBeInTheDocument();
+    expect(screen.queryByText("target-version")).not.toBeInTheDocument();
+    expect(api.calls.some(({ url }) => url.pathname.endsWith("/dependency-resolutions"))).toBe(true);
+  });
+
+  it("reports resolver authorization and resolution failures without preparing a package", async () => {
+    const forbidden = await startPreparing({ resolveStatus: 403 });
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Only the source Artifact owner/);
+    expect(screen.queryByRole("heading", { name: "Launch Package ready" })).not.toBeInTheDocument();
+
+    cleanup();
     stubPlaygroundApi({ resolveStatus: 400 });
     render(<Playground artifactId="source-artifact" version="1.0.0" />);
     fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Load source and resolve dependencies" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(/could not be resolved or is not currently readable/);
+    fireEvent.click(screen.getByRole("button", { name: "Prepare Launch Package" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/no Launch Package was prepared/i);
     expect(screen.queryByText("target-version")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Run Skill test" })).toBeDisabled();
-  });
-
-  it("shows owner-access failures without exposing dependency identities", async () => {
-    stubPlaygroundApi({ resolveStatus: 403 });
-    render(<Playground artifactId="source-artifact" version="1.0.0" />);
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "other-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Load source and resolve dependencies" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Only the source Artifact owner/);
-    expect(screen.queryByText("target-version")).not.toBeInTheDocument();
-  });
-
-  it("blocks unavailable source or dependency snapshots without exposing resolved target details", async () => {
-    stubPlaygroundApi({ sourceUnavailable: true });
-    render(<Playground artifactId="source-artifact" version="1.0.0" />);
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Load source and resolve dependencies" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/source or a required Artifact Version is not currently available/);
-
-    cleanup();
-    const { calls } = stubPlaygroundApi({ targetUnavailable: true });
-    render(<Playground artifactId="source-artifact" version="1.0.0" />);
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Load source and resolve dependencies" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/source or a required Artifact Version is not currently available/);
-    expect(screen.queryByText("target-version")).not.toBeInTheDocument();
-    expect(calls.some(({ url }) => url.pathname.endsWith("/dependency-resolutions"))).toBe(true);
-    expect(screen.getByRole("button", { name: "Run Skill test" })).toBeDisabled();
-  });
-
-  it("keeps a Gemini quota error generic and clears the key and result on request", async () => {
-    stubPlaygroundApi();
-    gemini.generateContent.mockRejectedValue(new gemini.MockApiError(429, "quota error user-gemini-secret"));
-    render(<Playground artifactId="source-artifact" version="1.0.0" />);
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Load source and resolve dependencies" }));
-    await screen.findByText("Dependency Knowledge content");
-    fireEvent.change(screen.getByLabelText(/Gemini API key/), { target: { value: "user-gemini-secret" } });
-    fireEvent.change(screen.getByLabelText(/Test input/), { target: { value: "Run." } });
-    fireEvent.click(screen.getByRole("button", { name: "Run Skill test" }));
-
-    const error = await screen.findByRole("alert");
-    expect(error).toHaveTextContent(/quota or rate limit/);
-    expect(error).not.toHaveTextContent("user-gemini-secret");
-    fireEvent.click(screen.getByRole("button", { name: "Clear Gemini API key" }));
-    expect(screen.getByLabelText(/Gemini API key/)).toHaveValue("");
-    expect(screen.getByRole("button", { name: "Run Skill test" })).toBeDisabled();
-  });
-
-  it("prevents running an Artifact Version with empty Skill instructions", async () => {
-    stubPlaygroundApi({ emptyInstructions: true });
-    render(<Playground artifactId="source-artifact" version="1.0.0" />);
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Load source and resolve dependencies" }));
-
-    expect(await screen.findByText(/empty Skill instructions/)).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText(/Gemini API key/), { target: { value: "user-gemini-secret" } });
-    fireEvent.change(screen.getByLabelText(/Test input/), { target: { value: "Run." } });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Run Skill test" })).toBeDisabled());
+    expect(forbidden.calls.some(({ url }) => url.pathname.endsWith("/dependency-resolutions"))).toBe(true);
   });
 });
