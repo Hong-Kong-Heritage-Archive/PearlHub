@@ -88,6 +88,7 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
         artifactReads: drafts,
         artifactVersionDependencies: drafts,
         artifactVersionCompatibilityReports: drafts,
+        resolveSourceVersionDependencies,
         drafts,
         deleteArtifact,
         updateArtifactMetadata,

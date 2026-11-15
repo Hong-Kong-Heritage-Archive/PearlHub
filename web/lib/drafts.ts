@@ -102,6 +102,26 @@ export interface CompatibilityReport {
   availability: "available" | "redacted";
 }
 
+export interface DependencyResolutionManifestEntry {
+  dependencyId: string;
+  targetArtifactId: string;
+  declaredRange: string;
+  resolvedArtifactVersionId: string;
+  resolvedVersion: string;
+  resolvedContentHash: string;
+  resolvedAt: string;
+}
+
+export interface DependencyResolutionRun {
+  runId: string;
+  sourceArtifactVersionId: string;
+  createdAt: string;
+  manifestVersion: number;
+  resolverPolicyVersion: string;
+  manifestHash: string;
+  dependencies: DependencyResolutionManifestEntry[];
+}
+
 export interface ArtifactMetadata {
   id: string;
   ownerId: string;
@@ -217,20 +237,33 @@ export async function listVersions(artifactId: string, token?: string): Promise<
   return payload;
 }
 
-export async function getPublishedVersion(artifactId: string, version: string, token?: string): Promise<PublishedVersion> {
-  return readPublishedVersion(await request(`/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}`, "GET", undefined, token));
+export async function getPublishedVersion(
+  artifactId: string,
+  version: string,
+  token?: string,
+  signal?: AbortSignal,
+): Promise<PublishedVersion> {
+  return readPublishedVersion(await request(
+    `/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}`,
+    "GET",
+    undefined,
+    token,
+    signal,
+  ));
 }
 
 export async function getVersionDependencies(
   artifactId: string,
   version: string,
   token?: string,
+  signal?: AbortSignal,
 ): Promise<ArtifactVersionDependencies> {
   const response = await request(
     `/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/dependencies`,
     "GET",
     undefined,
     token,
+    signal,
   );
   return readArtifactVersionDependencies(response);
 }
@@ -247,6 +280,22 @@ export async function getVersionCompatibilityReports(
     token,
   );
   return readCompatibilityReports(response);
+}
+
+export async function resolveVersionDependencies(
+  artifactId: string,
+  version: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<DependencyResolutionRun> {
+  const response = await request(
+    `/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/dependency-resolutions`,
+    "POST",
+    undefined,
+    token,
+    signal,
+  );
+  return readDependencyResolutionRun(response);
 }
 
 export async function getArtifact(artifactId: string, token?: string, signal?: AbortSignal): Promise<ArtifactMetadata> {
@@ -389,6 +438,19 @@ async function readCompatibilityReports(response: Response): Promise<Compatibili
   return payload;
 }
 
+async function readDependencyResolutionRun(response: Response): Promise<DependencyResolutionRun> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new DraftRequestError("The API returned an invalid dependency-resolution response.", response.status, "INVALID_RESPONSE");
+  }
+  if (!isDependencyResolutionRun(payload)) {
+    throw new DraftRequestError("The API returned an unexpected dependency-resolution response.", response.status, "INVALID_RESPONSE");
+  }
+  return payload;
+}
+
 async function readArtifactMetadata(response: Response): Promise<ArtifactMetadata> {
   let payload: unknown;
   try {
@@ -505,6 +567,50 @@ function isCompatibilityReport(value: unknown): value is CompatibilityReport {
       && Object.keys(value.report).length === 0;
   }
   return value.availability === "available" && typeof value.targetArtifactVersionId === "string";
+}
+
+function isDependencyResolutionRun(value: unknown): value is DependencyResolutionRun {
+  return isRecord(value)
+    && hasExactKeys(value, [
+      "runId",
+      "sourceArtifactVersionId",
+      "createdAt",
+      "manifestVersion",
+      "resolverPolicyVersion",
+      "manifestHash",
+      "dependencies",
+    ])
+    && typeof value.runId === "string"
+    && typeof value.sourceArtifactVersionId === "string"
+    && isDateTime(value.createdAt)
+    && Number.isInteger(value.manifestVersion)
+    && Number(value.manifestVersion) > 0
+    && typeof value.resolverPolicyVersion === "string"
+    && typeof value.manifestHash === "string"
+    && /^sha256:[0-9a-f]{64}$/.test(value.manifestHash)
+    && Array.isArray(value.dependencies)
+    && value.dependencies.every(isDependencyResolutionManifestEntry);
+}
+
+function isDependencyResolutionManifestEntry(value: unknown): value is DependencyResolutionManifestEntry {
+  return isRecord(value)
+    && hasExactKeys(value, [
+      "dependencyId",
+      "targetArtifactId",
+      "declaredRange",
+      "resolvedArtifactVersionId",
+      "resolvedVersion",
+      "resolvedContentHash",
+      "resolvedAt",
+    ])
+    && typeof value.dependencyId === "string"
+    && typeof value.targetArtifactId === "string"
+    && typeof value.declaredRange === "string"
+    && typeof value.resolvedArtifactVersionId === "string"
+    && typeof value.resolvedVersion === "string"
+    && typeof value.resolvedContentHash === "string"
+    && /^sha256:[0-9a-f]{64}$/.test(value.resolvedContentHash)
+    && isDateTime(value.resolvedAt);
 }
 
 function isArtifactMetadata(value: unknown): value is ArtifactMetadata {

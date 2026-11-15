@@ -1097,6 +1097,83 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /api/v1/artifacts/{artifactId}/versions/{version}/dependency-resolutions:
+    post:
+      tags: [Dependencies]
+      summary: Resolve direct dependencies for a published version
+      operationId: createArtifactVersionDependencyResolution
+      description: >-
+        Creates a persisted immutable resolution run for the exact published
+        source Version. Requires bearer authentication, source write access,
+        and current read access to every resolved target. Resolves only direct
+        declarations and does not return dependency content; clients may load
+        each exact resolved Version through the access-checked Version read
+        endpoint. The request has no body.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: version
+          in: path
+          required: true
+          description: Exact SemVer 2.x source Version.
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Newly persisted direct-dependency resolution manifest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DependencyResolutionRun"
+        "400":
+          description: Invalid source Version or a declared dependency could not be resolved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller cannot write to the source Artifact.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Source Artifact or Version was not found or is not visible.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Source Version content is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "410":
+          description: Source Artifact has been tombstoned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Unexpected internal error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /api/v1/artifacts/{artifactId}/versions/{version}/work-copy:
     post:
       tags: [Drafts]
@@ -1536,6 +1613,64 @@ components:
                     resolvedAt:
                       type: string
                       format: date-time
+    DependencyResolutionRun:
+      type: object
+      additionalProperties: false
+      required:
+        - runId
+        - sourceArtifactVersionId
+        - createdAt
+        - manifestVersion
+        - resolverPolicyVersion
+        - manifestHash
+        - dependencies
+      properties:
+        runId:
+          type: string
+        sourceArtifactVersionId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        manifestVersion:
+          type: integer
+          minimum: 1
+        resolverPolicyVersion:
+          type: string
+        manifestHash:
+          type: string
+          pattern: "^sha256:[0-9a-f]{64}$"
+        dependencies:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - dependencyId
+              - targetArtifactId
+              - declaredRange
+              - resolvedArtifactVersionId
+              - resolvedVersion
+              - resolvedContentHash
+              - resolvedAt
+            properties:
+              dependencyId:
+                type: string
+              targetArtifactId:
+                type: string
+              declaredRange:
+                type: string
+              resolvedArtifactVersionId:
+                type: string
+              resolvedVersion:
+                type: string
+                description: Exact SemVer selected for this resolution run.
+              resolvedContentHash:
+                type: string
+                description: Content hash recorded in the immutable resolution manifest.
+              resolvedAt:
+                type: string
+                format: date-time
     CompatibilityReport:
       type: object
       additionalProperties: false

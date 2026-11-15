@@ -177,6 +177,11 @@ describe("canonical OpenAPI contract", () => {
     const patchSchema = canonicalDocument.components.schemas.ArtifactMetadataPatch;
     const dependencies = canonicalDocument.paths["/api/v1/artifacts/{artifactId}/versions/{version}/dependencies"]?.get;
     const dependencySchema = canonicalDocument.components.schemas.ArtifactVersionDependencies;
+    const dependencyResolution = canonicalDocument.paths["/api/v1/artifacts/{artifactId}/versions/{version}/dependency-resolutions"]?.post;
+    const dependencyResolutionSchema = resolveSchema(
+      canonicalDocument,
+      dependencyResolution?.responses?.["200"]?.content?.["application/json"]?.schema,
+    );
     const compatibility = canonicalDocument.paths["/api/v1/artifacts/{artifactId}/versions/{version}/compatibility"]?.get;
     const compatibilityResponse = compatibility?.responses?.["200"]?.content?.["application/json"]?.schema;
     const compatibilityReportSchema = resolveSchema(canonicalDocument, compatibilityResponse?.items);
@@ -217,6 +222,23 @@ describe("canonical OpenAPI contract", () => {
     expect(dependencyItemSchema?.properties?.resolutions?.description).toContain("history exists but is withheld");
     expect(canonicalDocument.info.description).toContain("explicitly approved breaking change under /api/v1");
 
+    expect(dependencyResolution?.operationId).toBe("createArtifactVersionDependencyResolution");
+    expect(dependencyResolution?.security).toEqual([{ BearerAuth: [] }]);
+    expect(dependencyResolution?.requestBody).toBeUndefined();
+    expect(dependencyResolution?.responses).toHaveProperty("200");
+    expect(dependencyResolution?.responses).toHaveProperty("401");
+    expect(dependencyResolution?.responses).toHaveProperty("403");
+    expect(dependencyResolutionSchema?.additionalProperties).toBe(false);
+    expect(dependencyResolutionSchema?.required?.slice().sort()).toEqual([
+      "createdAt",
+      "dependencies",
+      "manifestHash",
+      "manifestVersion",
+      "resolverPolicyVersion",
+      "runId",
+      "sourceArtifactVersionId",
+    ]);
+
     expect(compatibility?.operationId).toBe("getArtifactVersionCompatibilityReports");
     expect(compatibility?.security).toEqual([{}, { BearerAuth: [] }]);
     expect(compatibility?.responses).toHaveProperty("200");
@@ -247,6 +269,7 @@ describe("canonical OpenAPI contract", () => {
       ["/api/v1/artifacts/{artifactId}", "patch"],
       ["/api/v1/artifacts/{artifactId}/versions/{version}/dependencies", "get"],
       ["/api/v1/artifacts/{artifactId}/versions/{version}/compatibility", "get"],
+      ["/api/v1/artifacts/{artifactId}/versions/{version}/dependency-resolutions", "post"],
     ] as const) {
       const canonical = canonicalDocument.paths[path]?.[method];
       const actual = runtime.paths[path]?.[method];

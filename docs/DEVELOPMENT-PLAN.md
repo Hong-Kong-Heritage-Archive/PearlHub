@@ -1,7 +1,7 @@
 # PearlHub Development Plan
 
 **Plan version:** 0.2  
-**Last reviewed:** 2026-11-08  
+**Last reviewed:** 2026-11-13
 **Repository:** [Hong-Kong-Heritage-Archive/PearlHub](https://github.com/Hong-Kong-Heritage-Archive/PearlHub)  
 **Planning approach:** Incremental / vertical-slice development
 
@@ -123,9 +123,10 @@ Current API routes include:
 - `GET /api/v1/artifacts/{artifactId}/versions/{version}`
 - `GET /api/v1/artifacts/{artifactId}/versions/{version}/dependencies`
 - `GET /api/v1/artifacts/{artifactId}/versions/{version}/compatibility`
+- `POST /api/v1/artifacts/{artifactId}/versions/{version}/dependency-resolutions`
 - `POST /api/v1/artifacts/{artifactId}/versions/{version}/work-copy`
 
-**Important boundary:** the dependency resolver exists in the backend application/runtime, but the current HTTP route list does not expose a dedicated user-triggered resolution endpoint. Do not assume that a complete Playground dependency workflow is already available.
+The authenticated bodyless dependency-resolution endpoint is the approved Playground boundary. It invokes the existing application service, persists a run and immutable manifest, and returns that manifest; the `GET` dependency history remains read-only.
 
 ### 3.2 Frontend — an existing Thin UI, not a blank project
 
@@ -142,6 +143,7 @@ The `web/` directory contains a Next.js 16 App Router + TypeScript application w
 - Owner visibility editing.
 - My Drafts and owner work-copy creation.
 - Artifact tombstone action.
+- Developer-only Playground for exact published Versions, with direct dependency resolution, access-checked pinned content loading, manifest/content integrity checks, and browser-side Gemini BYOK testing.
 - Loading, empty, validation, API error and retry states.
 - Frontend tests for implemented screens and workflows.
 
@@ -150,7 +152,7 @@ Current limitations documented in `web/README.md`:
 - Authentication is a temporary development-only bearer-token input, not a production login flow.
 - Firebase Authentication is not integrated into the UI.
 - Production deployment and target-environment smoke testing are not evidenced; GCP project and resource access remain to be verified.
-- No complete user-facing Playground is documented as implemented.
+- The Playground is a developer ThinUI, not the eventual end-user UI. Gemini keys are exposed to the browser and must not be used as a production secret-handling design.
 
 ### 3.3 Deployment and operations — local/CI foundations only
 
@@ -437,17 +439,25 @@ Every hand-off should state:
 
 **Deployment:** Local PostgreSQL and CI are in place. Production GCP deployment is not yet evidenced. GCP + Firebase Authentication + Cloud SQL for PostgreSQL is the confirmed direction; resource access and provisioning must be verified.
 
-**Playground:** Not yet a complete user-facing capability. Implement after the current frontend/auth/deployment catch-up, using the same incremental feature loop.
+**Playground:** Slice 2 implements a developer ThinUI for published-Version testing. It uses the approved resolution API, persists only the existing resolution run/manifest (no Playground run history), and calls Gemini from the browser with the user's in-memory key. The frontend build and local API tests do not establish production readiness or end-to-end Google connectivity.
 
 ### Next increment — Authentication and deployment readiness
 
-The initial dependency/compatibility UI slice is complete and locally verified. Continue with the remaining catch-up work:
+The dependency/compatibility UI and Playground slices are locally implemented. Continue with the remaining catch-up work:
 
 1. Verify GCP project, Firebase and Cloud SQL access; record resource/IAM status and enabled sign-in providers.
 2. Implement Firebase Authentication end to end (frontend token acquisition + backend verification + internal identity mapping), preserving the production fail-closed guard until verified.
 3. Containerize and deploy the backend to Cloud Run with Cloud SQL connectivity after resource access is confirmed.
 4. Deploy the frontend to the selected GCP hosting arrangement and configure API origin/CORS.
-5. Run end-to-end smoke tests and update this plan with actual deployed URLs/resource references (never secrets).
+5. Revisit Gemini key handling before production; use an approved server-side secret-handling design rather than exposing a user key in a public browser bundle.
+6. Run end-to-end smoke tests and update this plan with actual deployed URLs/resource references (never secrets).
+
+### Slice 2 implementation check-in
+
+- Base HEAD remains `9e49c9a756e9b2bf788c7e073c5730f816d3e6b6`; Slice 2 changes are intentionally uncommitted. No applied migration was edited and no schema change was needed.
+- Backend `npm run build` passed; `npm run test:unit` passed (180 tests). `npm run test:integration` and aggregate `npm test` are blocked by the unset `TEST_DATABASE_URL` required for a dedicated disposable PostgreSQL database.
+- Frontend `npm run lint`, `npm run typecheck`, `npm test` (60 tests), and `npm run build` passed. Next.js reports the existing root and `web/` lockfile workspace-root warning.
+- The new Gemini key flow is browser-only, memory-only, and covered by tests ensuring it is not sent to PearlHub or browser storage. The production SDK documentation warns against client-exposed keys; this ThinUI is not production-ready. Live browser-to-Gemini connectivity was not tested because no user key was supplied.
 
 The ordering above is a practical dependency order for the catch-up work, not a return to backend-first development. UI/API contract work and deployment preparation should proceed in parallel wherever their interfaces are clear.
 

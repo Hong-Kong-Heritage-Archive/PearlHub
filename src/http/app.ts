@@ -2,6 +2,7 @@ import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { cors } from "hono/cors";
 import type { ListArtifactsService } from "../application/discovery.js";
 import type { ArtifactReadService, DeleteArtifactService, DraftWorkflow, DraftWorkflowService, ImportDraftService, UpdateArtifactMetadataService } from "../application/services.js";
+import type { SourceVersionDependencyResolution } from "../application/source-version-dependency-resolution.js";
 import { parseArtifactDiscoveryQuery } from "../contracts/discovery.js";
 import { toArtifactDiscoveryResponse, toArtifactLineageResponse, toArtifactResponse, toCompatibilityReportResponse } from "../contracts/dto.js";
 import { DomainError } from "../domain/errors.js";
@@ -108,6 +109,23 @@ const compatibilityReportResponseSchema = z.object({
   createdAt: z.string().datetime(),
   availability: z.enum(["available", "redacted"]),
 }).strict().openapi("CompatibilityReport");
+const dependencyResolutionRunResponseSchema = z.object({
+  runId: z.string().min(1),
+  sourceArtifactVersionId: z.string().min(1),
+  createdAt: z.string().datetime(),
+  manifestVersion: z.number().int().positive(),
+  resolverPolicyVersion: z.string().min(1),
+  manifestHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  dependencies: z.array(z.object({
+    dependencyId: z.string().min(1),
+    targetArtifactId: z.string().min(1),
+    declaredRange: z.string(),
+    resolvedArtifactVersionId: z.string().min(1),
+    resolvedVersion: z.string().min(1),
+    resolvedContentHash: z.string().min(1),
+    resolvedAt: z.string().datetime(),
+  }).strict()),
+}).strict().openapi("DependencyResolutionRun");
 
 const artifactLineageEntrySchema = z.object({
   id: z.string(),
@@ -503,6 +521,26 @@ const getVersionCompatibilityReportsRoute = createRoute({
     500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
   },
 });
+const createVersionDependencyResolutionRoute = createRoute({
+  method: "post",
+  path: "/api/v1/artifacts/{artifactId}/versions/{version}/dependency-resolutions",
+  tags: ["Dependencies"],
+  summary: "Resolve direct dependencies for a published version",
+  description: "Creates a persisted immutable resolution run for the exact published source Version. Requires source write access and current read access to every resolved target. The request has no body.",
+  operationId: "createArtifactVersionDependencyResolution",
+  security: [{ BearerAuth: [] }],
+  request: { params: dependencyVersionParams },
+  responses: {
+    200: { description: "The newly persisted direct-dependency resolution manifest.", content: { "application/json": { schema: dependencyResolutionRunResponseSchema } } },
+    400: { description: "Invalid source Version or a declared dependency could not be resolved.", content: { "application/json": { schema: errorResponseSchema } } },
+    401: { description: "Authentication is required.", content: { "application/json": { schema: errorResponseSchema } } },
+    403: { description: "The caller cannot write to the source Artifact.", content: { "application/json": { schema: errorResponseSchema } } },
+    404: { description: "Source Artifact or Version was not found or is not visible.", content: { "application/json": { schema: errorResponseSchema } } },
+    409: { description: "Source Version content is unavailable.", content: { "application/json": { schema: errorResponseSchema } } },
+    410: { description: "Source Artifact has been tombstoned.", content: { "application/json": { schema: errorResponseSchema } } },
+    500: { description: "Unexpected internal error.", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
 const workCopyRoute = createRoute({
   method: "post", path: "/api/v1/artifacts/{artifactId}/versions/{version}/work-copy", tags: ["Drafts"], summary: "Create a Draft work-copy",
   security: [{ BearerAuth: [] }], request: { params: artifactVersionParams },
@@ -520,6 +558,7 @@ export interface HttpAppDependencies {
   artifactReads?: ArtifactReadService;
   artifactVersionDependencies?: Pick<DraftWorkflowService, "getVersionDependencies">;
   artifactVersionCompatibilityReports?: Pick<DraftWorkflowService, "getVersionCompatibilityReports">;
+  resolveSourceVersionDependencies?: Pick<SourceVersionDependencyResolution, "execute">;
   updateArtifactMetadata?: Pick<UpdateArtifactMetadataService, "execute">;
   drafts?: DraftWorkflow;
   deleteArtifact?: Pick<DeleteArtifactService, "execute">;
@@ -733,6 +772,39 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
       version,
     });
     return context.json(reports.map(toCompatibilityReportResponse), 200);
+  });
+  app.openapi(createVersionDependencyResolutionRoute, async (context) => {
+    if (!dependencies.drafts) throw new Error("Draft workflow is not configured.");
+    if (!dependencies.resolveSourceVersionDependencies) throw new Error("Artifact Version dependency resolution is not configured.");
+    const principal = await requirePrincipal(dependencies.authenticator, context.req.raw.headers);
+    const { artifactId, version } = context.req.valid("param");
+    parseSemVer(version);
+    const source = await dependencies.drafts.getPublishedVersion({
+      actorId: principal.userId,
+      artifactId,
+      version,
+    });
+    const result = await dependencies.resolveSourceVersionDependencies.execute({
+      actorId: principal.userId,
+      sourceArtifactVersionId: source.version.id,
+    });
+    return context.json({
+      runId: result.runId,
+      sourceArtifactVersionId: result.sourceArtifactVersionId,
+      createdAt: result.createdAt.toISOString(),
+      manifestVersion: result.manifestVersion,
+      resolverPolicyVersion: result.resolverPolicyVersion,
+      manifestHash: result.manifestHash,
+      dependencies: result.dependencies.map((dependency) => ({
+        dependencyId: dependency.dependencyId,
+        targetArtifactId: dependency.targetArtifactId,
+        declaredRange: dependency.declaredRange,
+        resolvedArtifactVersionId: dependency.resolvedArtifactVersionId,
+        resolvedVersion: dependency.resolvedVersion,
+        resolvedContentHash: dependency.resolvedContentHash,
+        resolvedAt: dependency.resolvedAt.toISOString(),
+      })),
+    }, 200);
   });
 
   app.onError((error, context) => {
