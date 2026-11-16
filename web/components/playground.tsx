@@ -12,11 +12,13 @@ import {
 } from "../lib/drafts";
 import {
   buildLaunchPackage,
+  buildProviderLaunchTarget,
   EXTERNAL_AI_PROVIDERS,
   LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES,
   launchPackageSizeInBytes,
   LaunchPackageError,
   makeLaunchPackageFilename,
+  PROVIDER_PREFILL_MAX_URL_BYTES,
   serializeLaunchPackageMarkdown,
   type ExternalAIProvider,
   type LaunchPackage,
@@ -106,20 +108,34 @@ export default function Playground({ artifactId, version }: { artifactId: string
     if (!prepared) return;
 
     const adapter = EXTERNAL_AI_PROVIDERS[provider];
-    window.open(adapter.entryPoint, "_blank", "noopener,noreferrer");
-    setHandoffMessage({
-      kind: "status",
-      text: prepared.sizeBytes > LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES
-        ? `${adapter.name} should open in a new tab. Automatic clipboard copy was skipped because this package is too large. Download it, then manually copy and paste its full contents, or try Copy Launch Package.`
-        : `${adapter.name} should open in a new tab. Copying the Launch Package now; paste it there and start the conversation.`,
-    });
+    const target = buildProviderLaunchTarget(provider, prepared.markdown);
+    const supportsPrefill = "prefillParameter" in adapter;
+    window.open(target.url, "_blank", "noopener,noreferrer");
 
-    if (prepared.sizeBytes <= LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES) {
-      void copyLaunchPackage();
+    if (prepared.sizeBytes > LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES) {
+      const prefillMessage = target.promptPrefilled
+        ? `${adapter.name} should open with the prompt prefilled; PearlHub does not submit it. `
+        : supportsPrefill
+          ? `${adapter.name} opened without prefill because the package exceeds PearlHub's ${PROVIDER_PREFILL_MAX_URL_BYTES.toLocaleString()}-byte URL limit. `
+          : `${adapter.name} should open in a new tab. `;
+      setHandoffMessage({
+        kind: "status",
+        text: `${prefillMessage}Automatic clipboard copy was skipped because the package exceeds the ${LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES.toLocaleString()}-byte clipboard threshold. Download it, then manually copy and paste its full contents, or try Copy Launch Package.`,
+      });
+      return;
     }
+
+    const copySuccessMessage = target.promptPrefilled
+      ? `${adapter.name} should open with the Launch Package prefilled. PearlHub does not submit it; the package is also copied as a fallback.`
+      : supportsPrefill
+        ? `${adapter.name} opened without prefill because the package exceeds PearlHub's ${PROVIDER_PREFILL_MAX_URL_BYTES.toLocaleString()}-byte URL limit. Launch Package copied; paste it into the new chat and start testing.`
+        : `${adapter.name} should open in a new tab. Launch Package copied; paste it into the provider chat and start testing.`;
+    void copyLaunchPackage(copySuccessMessage);
   }
 
-  async function copyLaunchPackage() {
+  async function copyLaunchPackage(
+    successMessage = "Launch Package copied. Switch to the provider tab, paste it into a regular conversation, and start testing. PearlHub does not submit it for you.",
+  ) {
     if (!prepared) return;
     try {
       if (typeof navigator.clipboard?.writeText !== "function") {
@@ -128,7 +144,7 @@ export default function Playground({ artifactId, version }: { artifactId: string
       await navigator.clipboard.writeText(prepared.markdown);
       setHandoffMessage({
         kind: "status",
-        text: "Launch Package copied. Switch to the provider tab, paste it into a regular conversation, and start testing. PearlHub does not submit it for you.",
+        text: successMessage,
       });
     } catch {
       setHandoffMessage({
@@ -259,6 +275,8 @@ export default function Playground({ artifactId, version }: { artifactId: string
             <div className="create-actions">
               <button className="primary-button" type="button" onClick={() => launchProvider("gemini")}>Launch in Gemini</button>
               <button className="primary-button" type="button" onClick={() => launchProvider("chatgpt")}>Launch in ChatGPT</button>
+              <button className="primary-button" type="button" onClick={() => launchProvider("claude")}>Launch in Claude</button>
+              <button className="primary-button" type="button" onClick={() => launchProvider("grok")}>Launch in Grok</button>
               <button className="secondary-button" type="button" onClick={() => void copyLaunchPackage()}>Copy Launch Package</button>
               <button className="secondary-button" type="button" onClick={downloadLaunchPackage}>Download Launch Package</button>
             </div>
@@ -266,6 +284,8 @@ export default function Playground({ artifactId, version }: { artifactId: string
               If a provider tab was blocked, open it directly:
               {" "}<a href={EXTERNAL_AI_PROVIDERS.gemini.entryPoint} target="_blank" rel="noopener noreferrer">Gemini</a>
               {" "}<a href={EXTERNAL_AI_PROVIDERS.chatgpt.entryPoint} target="_blank" rel="noopener noreferrer">ChatGPT</a>
+              {" "}<a href={EXTERNAL_AI_PROVIDERS.claude.entryPoint} target="_blank" rel="noopener noreferrer">Claude</a>
+              {" "}<a href={EXTERNAL_AI_PROVIDERS.grok.entryPoint} target="_blank" rel="noopener noreferrer">Grok</a>
             </p>
             {handoffMessage && (
               <p className={handoffMessage.kind === "error" ? "create-error" : "field-help"}
@@ -274,10 +294,10 @@ export default function Playground({ artifactId, version }: { artifactId: string
               </p>
             )}
             <p className="field-help">
-              Provider pages are opened without prompt parameters or automation. Switch to the provider tab, paste the package, and start the conversation. Gemini Gem setup is optional and must be done manually in Gemini; ChatGPT launch opens a regular chat and does not create a Custom GPT.
+              ChatGPT, Claude, and Grok use prompt-prefill URLs when the full URL is within PearlHub's {PROVIDER_PREFILL_MAX_URL_BYTES.toLocaleString()}-byte limit. Actual prefill depends on provider sign-in and input behavior. Larger URLs open a regular chat without prefill; the package is copied when it fits the clipboard threshold, otherwise download and manually paste it. Gemini opens without prefill. PearlHub never submits the prompt. Gemini Gem setup is optional and must be done manually; ChatGPT launch opens a regular chat and does not create a Custom GPT.
             </p>
             <p className="field-help">
-              Pasting shares all included Skill, Knowledge, and dependency content with that provider, which handles it under its own policies. Only share content you are authorized to send there.
+              Prefill URLs contain the complete Launch Package and send it to the external provider; the prompt may be visible in browser history or provider-side logs. Pasting also shares all included Skill, Knowledge, and dependency content with that provider, which handles it under its own policies. Only share content you are authorized to send there.
             </p>
             <label className="field" htmlFor="launch-package-content">
               <span>Complete Launch Package (manual copy fallback)</span>

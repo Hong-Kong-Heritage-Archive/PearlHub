@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildLaunchPackage,
+  buildProviderLaunchTarget,
   EXTERNAL_AI_PROVIDERS,
   LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES,
   launchPackageSizeInBytes,
   makeLaunchPackageFilename,
+  PROVIDER_PREFILL_MAX_URL_BYTES,
   serializeLaunchPackageMarkdown,
 } from "../lib/external-playground";
 import type {
@@ -194,9 +196,38 @@ describe("External AI Launch Package", () => {
     expect(makeLaunchPackageFilename(source)).toBe("source-artifact-1.0.0-launch-package.md");
   });
 
-  it("uses only the verified regular-chat provider entry points", () => {
+  it("builds encoded prefill URLs for ChatGPT, Claude, and Grok", () => {
     expect(EXTERNAL_AI_PROVIDERS.gemini.entryPoint).toBe("https://gemini.google.com/");
     expect(EXTERNAL_AI_PROVIDERS.chatgpt.entryPoint).toBe("https://chatgpt.com/");
     expect(Object.values(EXTERNAL_AI_PROVIDERS).every(({ entryPoint }) => new URL(entryPoint).search === "")).toBe(true);
+
+    const prompt = "Skill instructions & Knowledge\nKeep this exact: 雪";
+    for (const provider of ["chatgpt", "claude", "grok"] as const) {
+      const target = buildProviderLaunchTarget(provider, prompt);
+      const url = new URL(target.url);
+
+      expect(target.promptPrefilled).toBe(true);
+      expect(url.searchParams.get("q")).toBe(prompt);
+      expect(launchPackageSizeInBytes(target.url)).toBeLessThanOrEqual(PROVIDER_PREFILL_MAX_URL_BYTES);
+    }
+
+    expect(EXTERNAL_AI_PROVIDERS.claude.entryPoint).toBe("https://claude.ai/new");
+    expect(EXTERNAL_AI_PROVIDERS.grok.entryPoint).toBe("https://grok.com/");
+    expect(buildProviderLaunchTarget("gemini", prompt)).toEqual({
+      url: EXTERNAL_AI_PROVIDERS.gemini.entryPoint,
+      promptPrefilled: false,
+    });
+  });
+
+  it("opens without prefill when the complete provider URL exceeds the safe URL limit", () => {
+    const target = buildProviderLaunchTarget(
+      "chatgpt",
+      "x".repeat(PROVIDER_PREFILL_MAX_URL_BYTES),
+    );
+
+    expect(target).toEqual({
+      url: EXTERNAL_AI_PROVIDERS.chatgpt.entryPoint,
+      promptPrefilled: false,
+    });
   });
 });

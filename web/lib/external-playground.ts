@@ -5,15 +5,42 @@ import type {
 } from "./drafts";
 
 export const LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES = 64 * 1024;
+export const PROVIDER_PREFILL_MAX_URL_BYTES = 8 * 1024;
 const packageFormatVersion = 1;
 const textContentType = "text/plain; charset=utf-8";
 
 export const EXTERNAL_AI_PROVIDERS = {
   gemini: { id: "gemini", name: "Gemini", entryPoint: "https://gemini.google.com/" },
-  chatgpt: { id: "chatgpt", name: "ChatGPT", entryPoint: "https://chatgpt.com/" },
+  chatgpt: { id: "chatgpt", name: "ChatGPT", entryPoint: "https://chatgpt.com/", prefillParameter: "q" },
+  claude: { id: "claude", name: "Claude", entryPoint: "https://claude.ai/new", prefillParameter: "q" },
+  grok: { id: "grok", name: "Grok", entryPoint: "https://grok.com/", prefillParameter: "q" },
 } as const;
 
 export type ExternalAIProvider = keyof typeof EXTERNAL_AI_PROVIDERS;
+
+export interface ProviderLaunchTarget {
+  url: string;
+  promptPrefilled: boolean;
+}
+
+export function buildProviderLaunchTarget(
+  provider: ExternalAIProvider,
+  prompt: string,
+): ProviderLaunchTarget {
+  const adapter = EXTERNAL_AI_PROVIDERS[provider];
+  if (!("prefillParameter" in adapter)) {
+    return { url: adapter.entryPoint, promptPrefilled: false };
+  }
+
+  const url = new URL(adapter.entryPoint);
+  url.searchParams.set(adapter.prefillParameter, prompt);
+  const target = url.toString();
+  if (launchPackageSizeInBytes(target) > PROVIDER_PREFILL_MAX_URL_BYTES) {
+    return { url: adapter.entryPoint, promptPrefilled: false };
+  }
+
+  return { url: target, promptPrefilled: true };
+}
 
 export interface LaunchPackageKnowledgeFile {
   path: string;

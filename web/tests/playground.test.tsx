@@ -81,16 +81,19 @@ function stubPlaygroundApi(options: {
   sourceUnavailable?: boolean;
   targetUnavailable?: boolean;
   largeInstructions?: boolean;
+  longPrefillPrompt?: boolean;
 } = {}) {
   const calls: Array<{ url: URL; init: RequestInit }> = [];
-  const source = options.largeInstructions
+  const source = options.largeInstructions || options.longPrefillPrompt
     ? {
       ...sourceVersion,
       version: {
         ...sourceVersion.version,
         content: {
           ...sourceVersion.version.content,
-          instructions: "Large canonical Skill content. ".repeat(3_000),
+          instructions: options.largeInstructions
+            ? "Large canonical Skill content. ".repeat(3_000)
+            : "Prefill boundary content. ".repeat(500),
         },
       },
     }
@@ -214,13 +217,26 @@ describe("External AI Playground", () => {
     expect(await screen.findByText(/Launch Package copied/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Launch in ChatGPT" }));
-    await waitFor(() => expect(open).toHaveBeenLastCalledWith("https://chatgpt.com/", "_blank", "noopener,noreferrer"));
+    const chatGptUrl = new URL(String(open.mock.calls.at(-1)?.[0]));
+    expect(chatGptUrl.origin).toBe("https://chatgpt.com");
+    expect(chatGptUrl.searchParams.get("q")).toBe(immutablePackage);
+    for (const [provider, origin] of [
+      ["Claude", "https://claude.ai"],
+      ["Grok", "https://grok.com"],
+    ] as const) {
+      fireEvent.click(screen.getByRole("button", { name: `Launch in ${provider}` }));
+      const providerUrl = new URL(String(open.mock.calls.at(-1)?.[0]));
+      expect(providerUrl.origin).toBe(origin);
+      expect(providerUrl.searchParams.get("q")).toBe(immutablePackage);
+    }
+    await waitFor(() => expect(open).toHaveBeenCalledTimes(4));
     expect(writeText).toHaveBeenLastCalledWith(immutablePackage);
     expect(api.calls.filter(({ url }) => url.pathname.endsWith("/dependency-resolutions"))).toHaveLength(1);
     expect(api.calls.every(({ url, init }) =>
       !url.search && !url.pathname.includes("gemini") && !url.pathname.includes("chatgpt")
       && !String(init.body ?? "").includes("Source Skill instructions."))).toBe(true);
     expect(screen.getByText(/does not create a Custom GPT/)).toBeInTheDocument();
+    expect(screen.getByText(/Prefill URLs contain the complete Launch Package/)).toBeInTheDocument();
     expect(window.localStorage.length).toBe(0);
     expect(window.sessionStorage.length).toBe(0);
   });
@@ -262,6 +278,7 @@ describe("External AI Playground", () => {
     expect(open).toHaveBeenCalledWith("https://chatgpt.com/", "_blank", "noopener,noreferrer");
     expect(writeText).not.toHaveBeenCalled();
     expect(await screen.findByText(/manually copy and paste its full contents/i)).toBeInTheDocument();
+    expect(await screen.findByText(/opened without prefill because the package exceeds PearlHub's 8,192-byte URL limit/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Download Launch Package" }));
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
     expect(click).toHaveBeenCalled();
@@ -269,6 +286,19 @@ describe("External AI Playground", () => {
     expect(await blob.text()).toBe(originalPackage);
     expect(await screen.findByText(/download started/)).toBeInTheDocument();
     await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith("blob:launch-package"));
+  });
+
+  it("falls back to clipboard paste when the prefill URL is too long", async () => {
+    const writeText = setClipboard(vi.fn().mockResolvedValue(undefined));
+    const { packageText } = await preparePackage({ longPrefillPrompt: true });
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+
+    fireEvent.click(screen.getByRole("button", { name: "Launch in ChatGPT" }));
+
+    expect(open).toHaveBeenCalledWith("https://chatgpt.com/", "_blank", "noopener,noreferrer");
+    expect(writeText).toHaveBeenCalledWith(packageText.value);
+    expect(await screen.findByText(/opened without prefill because the package exceeds PearlHub's 8,192-byte URL limit/i)).toBeInTheDocument();
+    expect(packageText.value).toContain("Prefill boundary content.");
   });
 
   it("does not prepare a package when dependency history is redacted", async () => {

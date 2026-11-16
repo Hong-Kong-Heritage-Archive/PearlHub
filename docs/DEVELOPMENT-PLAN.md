@@ -439,7 +439,7 @@ Every hand-off should state:
 
 **Deployment:** Local PostgreSQL and CI are in place. Production GCP deployment is not yet evidenced. GCP + Firebase Authentication + Cloud SQL for PostgreSQL is the confirmed direction; resource access and provisioning must be verified.
 
-**Playground:** The developer ThinUI prepares an immutable, version-pinned Launch Package and hands it to Gemini or ChatGPT through an explicit open + copy/paste flow. No provider API key is collected, no provider conversation is hosted, and no new run-history persistence is introduced. Native provider UI and model context limits are outside PearlHub's control.
+**Playground:** The developer ThinUI prepares an immutable, version-pinned Launch Package and hands it to Gemini, ChatGPT, Claude or Grok through an explicit provider launch. ChatGPT, Claude and Grok receive `q` prompt URLs only when the complete URL is within PearlHub's conservative 8,192-byte limit; larger launches use the existing clipboard/manual-paste or download flow. No provider API key is collected, no provider conversation is hosted, and no new run-history persistence is introduced. Native provider UI and model context limits are outside PearlHub's control.
 
 ### Next increment — Authentication and deployment readiness
 
@@ -454,10 +454,10 @@ The dependency/compatibility UI and Playground slices are locally implemented. C
 
 ### External AI Playground refactor
 
-- The primary Playground now prepares one transient Launch Package from the selected immutable source Version and the exact persisted dependency-resolution run. It opens only the official regular chat entry points (`https://gemini.google.com/` and `https://chatgpt.com/`) on explicit user action; no prompt URL parameters, provider-site automation, direct model API, or provider credential collection are used.
+- The primary Playground prepares one transient Launch Package from the selected immutable source Version and the exact persisted dependency-resolution run. On explicit user action, Gemini opens without prefill; ChatGPT, Claude and Grok receive the package through their `q` prompt URL pattern when the complete URL is within the conservative 8,192-byte cap. A longer URL opens the regular provider page without prefill and falls back to clipboard or download/manual paste. PearlHub does not submit prompts, automate provider pages, call model APIs, or collect provider credentials. Prompt URLs contain the complete package, which may be visible in browser history or provider-side logs.
 - The package contains canonical Skill instructions, source and direct-dependency Knowledge, and a JSON provenance/resolution manifest. A 65,536-byte UTF-8 threshold controls automatic clipboard transfer; larger content remains intact and is available as a Markdown download. No archive dependency or database schema change was introduced.
-- Gemini Gem or ChatGPT Custom GPT setup is optional and user-managed in each provider's own UI; regular chat launch does not create or save those configurations.
-- Tests cover package integrity/snapshot behaviour, provider URLs, explicit launch, clipboard success/failure, large-package download, redacted/inaccessible dependency handling and resolver authorization.
+- Gemini Gem or ChatGPT Custom GPT setup is optional and user-managed in each provider's own UI; regular chat launch does not create or save those configurations. A signed-out browser check confirmed ChatGPT and Grok accept a harmless test prompt; Claude preserved the query through its sign-in redirect, but authenticated prefill behavior remains unverified.
+- Tests cover package integrity/snapshot behaviour, encoded provider prefill URLs and length fallback, explicit launch, clipboard success/failure, large-package download, redacted/inaccessible dependency handling and resolver authorization.
 - Validation from base HEAD `d89b6cebf42816605ad71911d5bbc2b3482f3391`: backend build and unit/contract/HTTP suite passed (180 tests); frontend lint, typecheck, full test suite (60 tests), and production build passed. PostgreSQL integration and aggregate backend tests require the unset `TEST_DATABASE_URL`; no database changes were made. The Next.js build retains the existing dual-lockfile workspace-root warning.
 
 The ordering above is a practical dependency order for the catch-up work, not a return to backend-first development. UI/API contract work and deployment preparation should proceed in parallel wherever their interfaces are clear.
@@ -470,5 +470,6 @@ The ordering above is a practical dependency order for the catch-up work, not a 
 | 2026-11-08 | This plan | Development strategy changed to incremental vertical slices; immediate priority is Frontend + Deployment catch-up. GCP + Firebase Auth + Cloud SQL direction confirmed; actual resource access/provisioning remains to be verified. |
 | 2026-11-10 | Working tree | Added Version-level dependency history and compatibility views with strict response validation and redaction handling. Frontend tests, lint, typecheck, production build, backend build, and focused OpenAPI/HTTP tests passed; production deployment remains unverified. |
 | 2026-11-15 | `d89b6ce` + working tree | Replaced the one-shot Gemini API Playground with an external-provider Launch Package flow. Backend build/unit tests and frontend lint/typecheck/tests/build pass; PostgreSQL integration remains blocked by missing `TEST_DATABASE_URL`. |
+| 2026-11-16 | Working tree | Added bounded prompt-prefill URLs for ChatGPT, Claude and Grok with clipboard/download fallback and URL-disclosure copy. Focused frontend tests (12), lint, typecheck and production build passed; the existing dual-lockfile workspace-root warning remains. No API or database changes. |
 
 Update this log after each accepted vertical slice. Do not mark a task complete based only on code being present; record the relevant test and deployment evidence.
