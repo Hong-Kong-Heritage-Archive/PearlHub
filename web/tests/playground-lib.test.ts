@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildLaunchPackage,
+  buildPromptPrefillTarget,
   buildProviderLaunchTarget,
   EXTERNAL_AI_PROVIDERS,
   LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES,
@@ -196,38 +197,121 @@ describe("External AI Launch Package", () => {
     expect(makeLaunchPackageFilename(source)).toBe("source-artifact-1.0.0-launch-package.md");
   });
 
-  it("builds encoded prefill URLs for ChatGPT, Claude, and Grok", () => {
+  it("enables only manually approved provider parameters and opens exact entry points", () => {
     expect(EXTERNAL_AI_PROVIDERS.gemini.entryPoint).toBe("https://gemini.google.com/");
     expect(EXTERNAL_AI_PROVIDERS.chatgpt.entryPoint).toBe("https://chatgpt.com/");
-    expect(Object.values(EXTERNAL_AI_PROVIDERS).every(({ entryPoint }) => new URL(entryPoint).search === "")).toBe(true);
+    expect(EXTERNAL_AI_PROVIDERS.claude.entryPoint).toBe("https://claude.ai/new");
+    expect(EXTERNAL_AI_PROVIDERS.grok.entryPoint).toBe("https://grok.com/");
+    expect(EXTERNAL_AI_PROVIDERS.chatgpt.prefillStatus).toBe("unverified");
+    expect(EXTERNAL_AI_PROVIDERS.chatgpt.prefillCandidate).toBe("prompt");
+    expect(EXTERNAL_AI_PROVIDERS.claude.prefillStatus).toBe("enabled");
+    expect(EXTERNAL_AI_PROVIDERS.claude.prefillParameter).toBe("q");
+    expect(EXTERNAL_AI_PROVIDERS.grok.prefillStatus).toBe("enabled");
+    expect(EXTERNAL_AI_PROVIDERS.grok.prefillParameter).toBe("q");
 
-    const prompt = "Skill instructions & Knowledge\nKeep this exact: 雪";
-    for (const provider of ["chatgpt", "claude", "grok"] as const) {
+    const prompt = "Complete Launch Package";
+    for (const provider of ["gemini", "chatgpt"] as const) {
+      const adapter = EXTERNAL_AI_PROVIDERS[provider];
+      expect("prefillParameter" in adapter).toBe(false);
+      const target = buildProviderLaunchTarget(provider, prompt);
+      expect(target).toEqual({ url: adapter.entryPoint, promptPrefilled: false });
+      expect(new URL(target.url).search).toBe("");
+    }
+
+    for (const provider of ["claude", "grok"] as const) {
       const target = buildProviderLaunchTarget(provider, prompt);
       const url = new URL(target.url);
 
       expect(target.promptPrefilled).toBe(true);
       expect(url.searchParams.get("q")).toBe(prompt);
+      expect([...url.searchParams.keys()]).toEqual(["q"]);
+    }
+  });
+
+  it("round-trips candidate prefill values with special characters through URL construction", () => {
+    const prompt = [
+      "PEARLHUB-PREFILL-QA-2026-11",
+      "Second line",
+      "香港 · 雪",
+      `Literal & ? # % " '`,
+      "```markdown",
+      "Harmless marker only",
+      "```",
+    ].join("\n");
+    const candidates = [
+      { entryPoint: EXTERNAL_AI_PROVIDERS.chatgpt.entryPoint, parameter: "prompt" },
+      { entryPoint: EXTERNAL_AI_PROVIDERS.claude.entryPoint, parameter: "q" },
+      { entryPoint: EXTERNAL_AI_PROVIDERS.grok.entryPoint, parameter: "q" },
+    ];
+
+    for (const { entryPoint, parameter } of candidates) {
+      const target = buildPromptPrefillTarget(entryPoint, parameter, prompt);
+      const url = new URL(target.url);
+
+      expect(target.promptPrefilled).toBe(true);
+      expect(url.searchParams.get(parameter)).toBe(prompt);
+      expect([...url.searchParams.keys()]).toEqual([parameter]);
       expect(launchPackageSizeInBytes(target.url)).toBeLessThanOrEqual(PROVIDER_PREFILL_MAX_URL_BYTES);
     }
+  });
 
-    expect(EXTERNAL_AI_PROVIDERS.claude.entryPoint).toBe("https://claude.ai/new");
-    expect(EXTERNAL_AI_PROVIDERS.grok.entryPoint).toBe("https://grok.com/");
-    expect(buildProviderLaunchTarget("gemini", prompt)).toEqual({
-      url: EXTERNAL_AI_PROVIDERS.gemini.entryPoint,
+  it("checks UTF-8 bytes for the full URL and falls back without prompt content when over limit", () => {
+    const entryPoint = EXTERNAL_AI_PROVIDERS.chatgpt.entryPoint;
+    const prompt = "香港".repeat(1_000);
+    const attemptedUrl = new URL(entryPoint);
+    attemptedUrl.searchParams.set("prompt", prompt);
+
+    expect(launchPackageSizeInBytes(attemptedUrl.toString())).toBeGreaterThan(PROVIDER_PREFILL_MAX_URL_BYTES);
+    expect(prompt.length).toBeLessThan(PROVIDER_PREFILL_MAX_URL_BYTES);
+
+    expect(buildPromptPrefillTarget(entryPoint, "prompt", prompt)).toEqual({
+      url: entryPoint,
       promptPrefilled: false,
     });
   });
 
-  it("opens without prefill when the complete provider URL exceeds the safe URL limit", () => {
-    const target = buildProviderLaunchTarget(
-      "chatgpt",
-      "x".repeat(PROVIDER_PREFILL_MAX_URL_BYTES),
+  it("keeps a serialized Launch Package just under the URL limit and falls back just over it", () => {
+    const entryPoint = EXTERNAL_AI_PROVIDERS.chatgpt.entryPoint;
+    const packageForInstructions = (instructions: string) => serializeLaunchPackageMarkdown(
+      buildLaunchPackage(
+        {
+          ...source,
+          version: {
+            ...source.version,
+            content: { ...source.version.content, instructions },
+          },
+        },
+        resolutionRun,
+        [{ manifest: dependencyManifest, published: dependencyVersion }],
+      ),
     );
 
-    expect(target).toEqual({
-      url: EXTERNAL_AI_PROVIDERS.chatgpt.entryPoint,
-      promptPrefilled: false,
-    });
+    let low = 0;
+    let high = PROVIDER_PREFILL_MAX_URL_BYTES;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      const target = buildPromptPrefillTarget(
+        entryPoint,
+        "prompt",
+        packageForInstructions("x".repeat(middle)),
+      );
+      if (target.promptPrefilled) low = middle;
+      else high = middle - 1;
+    }
+
+    const withinLimit = buildPromptPrefillTarget(
+      entryPoint,
+      "prompt",
+      packageForInstructions("x".repeat(low)),
+    );
+    const overLimit = buildPromptPrefillTarget(
+      entryPoint,
+      "prompt",
+      packageForInstructions("x".repeat(low + 1)),
+    );
+
+    expect(withinLimit.promptPrefilled).toBe(true);
+    expect(launchPackageSizeInBytes(withinLimit.url)).toBeLessThanOrEqual(PROVIDER_PREFILL_MAX_URL_BYTES);
+    expect(overLimit).toEqual({ url: entryPoint, promptPrefilled: false });
   });
 });

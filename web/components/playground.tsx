@@ -21,6 +21,7 @@ import {
   PROVIDER_PREFILL_MAX_URL_BYTES,
   serializeLaunchPackageMarkdown,
   type ExternalAIProvider,
+  type ExternalAIProviderConfig,
   type LaunchPackage,
 } from "../lib/external-playground";
 
@@ -107,17 +108,17 @@ export default function Playground({ artifactId, version }: { artifactId: string
   function launchProvider(provider: ExternalAIProvider) {
     if (!prepared) return;
 
-    const adapter = EXTERNAL_AI_PROVIDERS[provider];
+    const adapter: ExternalAIProviderConfig = EXTERNAL_AI_PROVIDERS[provider];
     const target = buildProviderLaunchTarget(provider, prepared.markdown);
-    const supportsPrefill = "prefillParameter" in adapter;
+    const supportsPrefill = Boolean(adapter.prefillParameter);
     window.open(target.url, "_blank", "noopener,noreferrer");
 
     if (prepared.sizeBytes > LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES) {
       const prefillMessage = target.promptPrefilled
-        ? `${adapter.name} should open with the prompt prefilled; PearlHub does not submit it. `
+        ? `Opened ${adapter.name} in a new tab with a prompt-prefill link. Whether the provider keeps the text depends on its current sign-in and chat behavior; check the composer before continuing. PearlHub does not send the prompt. `
         : supportsPrefill
-          ? `${adapter.name} opened without prefill because the package exceeds PearlHub's ${PROVIDER_PREFILL_MAX_URL_BYTES.toLocaleString()}-byte URL limit. `
-          : `${adapter.name} should open in a new tab. `;
+          ? `Opened ${adapter.name} without prompt prefill because the URL exceeds PearlHub's ${PROVIDER_PREFILL_MAX_URL_BYTES.toLocaleString()}-byte limit. `
+          : `Opened ${adapter.name} without prompt prefill. `;
       setHandoffMessage({
         kind: "status",
         text: `${prefillMessage}Automatic clipboard copy was skipped because the package exceeds the ${LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES.toLocaleString()}-byte clipboard threshold. Download it, then manually copy and paste its full contents, or try Copy Launch Package.`,
@@ -126,10 +127,10 @@ export default function Playground({ artifactId, version }: { artifactId: string
     }
 
     const copySuccessMessage = target.promptPrefilled
-      ? `${adapter.name} should open with the Launch Package prefilled. PearlHub does not submit it; the package is also copied as a fallback.`
+      ? `Opened ${adapter.name} in a new tab with a prompt-prefill link. Whether the provider keeps the text depends on its current sign-in and chat behavior. Check the composer before continuing; PearlHub does not send the prompt. The Launch Package was also copied as a fallback.`
       : supportsPrefill
-        ? `${adapter.name} opened without prefill because the package exceeds PearlHub's ${PROVIDER_PREFILL_MAX_URL_BYTES.toLocaleString()}-byte URL limit. Launch Package copied; paste it into the new chat and start testing.`
-        : `${adapter.name} should open in a new tab. Launch Package copied; paste it into the provider chat and start testing.`;
+        ? `Opened ${adapter.name} without prompt prefill because the URL exceeds PearlHub's ${PROVIDER_PREFILL_MAX_URL_BYTES.toLocaleString()}-byte limit. The Launch Package has been copied; paste it into the new conversation to start testing.`
+        : `Opened ${adapter.name} in a new tab without prompt prefill. The Launch Package has been copied; paste it into a new conversation to start testing.`;
     void copyLaunchPackage(copySuccessMessage);
   }
 
@@ -176,6 +177,15 @@ export default function Playground({ artifactId, version }: { artifactId: string
   }
 
   const largePackage = prepared !== null && prepared.sizeBytes > LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES;
+  const providerConfigs: ExternalAIProviderConfig[] = Object.values(EXTERNAL_AI_PROVIDERS);
+  const unverifiedPrefillProviders = providerConfigs
+    .filter(({ prefillStatus }) => prefillStatus === "unverified")
+    .map(({ name, prefillCandidate }) => prefillCandidate ? `${name} (${prefillCandidate})` : name)
+    .join(", ");
+  const enabledPrefillProviders = providerConfigs
+    .filter(({ prefillStatus }) => prefillStatus === "enabled")
+    .map(({ name, prefillParameter }) => prefillParameter ? `${name} (${prefillParameter})` : name)
+    .join(", ");
 
   return (
     <main className="page-shell">
@@ -294,10 +304,10 @@ export default function Playground({ artifactId, version }: { artifactId: string
               </p>
             )}
             <p className="field-help">
-              ChatGPT, Claude, and Grok use prompt-prefill URLs when the full URL is within PearlHub's {PROVIDER_PREFILL_MAX_URL_BYTES.toLocaleString()}-byte limit. Actual prefill depends on provider sign-in and input behavior. Larger URLs open a regular chat without prefill; the package is copied when it fits the clipboard threshold, otherwise download and manually paste it. Gemini opens without prefill. PearlHub never submits the prompt. Gemini Gem setup is optional and must be done manually; ChatGPT launch opens a regular chat and does not create a Custom GPT.
+              Prompt-prefill links are enabled for {enabledPrefillProviders} as best-effort provider behavior; check the composer before continuing because sign-in redirects may discard URL parameters. Prefill remains disabled for {unverifiedPrefillProviders} pending manual QA. Gemini has no prefill. The Launch Package is copied when it fits the clipboard threshold, otherwise download and manually paste it. PearlHub never sends the prompt. Gemini Gem setup is optional and must be done manually; ChatGPT launch opens a regular chat and does not create a Custom GPT.
             </p>
             <p className="field-help">
-              Prefill URLs contain the complete Launch Package and send it to the external provider; the prompt may be visible in browser history or provider-side logs. Pasting also shares all included Skill, Knowledge, and dependency content with that provider, which handles it under its own policies. Only share content you are authorized to send there.
+              A prefill URL contains the complete Launch Package, is sent to the external provider, and may be visible in browser history or provider-side logs. If you prefer not to put package content in a URL, open the provider's plain entry point and use Copy or Download instead. Pasting also shares all included Skill, Knowledge, and dependency content with that provider, which handles it under its own policies. Only share content you are authorized to send there.
             </p>
             <label className="field" htmlFor="launch-package-content">
               <span>Complete Launch Package (manual copy fallback)</span>

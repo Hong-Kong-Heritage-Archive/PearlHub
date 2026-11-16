@@ -9,12 +9,44 @@ export const PROVIDER_PREFILL_MAX_URL_BYTES = 8 * 1024;
 const packageFormatVersion = 1;
 const textContentType = "text/plain; charset=utf-8";
 
+export interface ExternalAIProviderConfig {
+  id: string;
+  name: string;
+  entryPoint: string;
+  prefillStatus: "not-offered" | "unverified" | "enabled";
+  prefillCandidate?: string;
+  prefillParameter?: string;
+}
+
 export const EXTERNAL_AI_PROVIDERS = {
-  gemini: { id: "gemini", name: "Gemini", entryPoint: "https://gemini.google.com/" },
-  chatgpt: { id: "chatgpt", name: "ChatGPT", entryPoint: "https://chatgpt.com/", prefillParameter: "q" },
-  claude: { id: "claude", name: "Claude", entryPoint: "https://claude.ai/new", prefillParameter: "q" },
-  grok: { id: "grok", name: "Grok", entryPoint: "https://grok.com/", prefillParameter: "q" },
-} as const;
+  gemini: {
+    id: "gemini",
+    name: "Gemini",
+    entryPoint: "https://gemini.google.com/",
+    prefillStatus: "not-offered",
+  },
+  chatgpt: {
+    id: "chatgpt",
+    name: "ChatGPT",
+    entryPoint: "https://chatgpt.com/",
+    prefillStatus: "unverified",
+    prefillCandidate: "prompt",
+  },
+  claude: {
+    id: "claude",
+    name: "Claude",
+    entryPoint: "https://claude.ai/new",
+    prefillStatus: "enabled",
+    prefillParameter: "q",
+  },
+  grok: {
+    id: "grok",
+    name: "Grok",
+    entryPoint: "https://grok.com/",
+    prefillStatus: "enabled",
+    prefillParameter: "q",
+  },
+} as const satisfies Record<"gemini" | "chatgpt" | "claude" | "grok", ExternalAIProviderConfig>;
 
 export type ExternalAIProvider = keyof typeof EXTERNAL_AI_PROVIDERS;
 
@@ -27,16 +59,24 @@ export function buildProviderLaunchTarget(
   provider: ExternalAIProvider,
   prompt: string,
 ): ProviderLaunchTarget {
-  const adapter = EXTERNAL_AI_PROVIDERS[provider];
-  if (!("prefillParameter" in adapter)) {
+  const adapter: ExternalAIProviderConfig = EXTERNAL_AI_PROVIDERS[provider];
+  if (!adapter.prefillParameter) {
     return { url: adapter.entryPoint, promptPrefilled: false };
   }
 
-  const url = new URL(adapter.entryPoint);
-  url.searchParams.set(adapter.prefillParameter, prompt);
+  return buildPromptPrefillTarget(adapter.entryPoint, adapter.prefillParameter, prompt);
+}
+
+export function buildPromptPrefillTarget(
+  entryPoint: string,
+  parameter: string,
+  prompt: string,
+): ProviderLaunchTarget {
+  const url = new URL(entryPoint);
+  url.searchParams.set(parameter, prompt);
   const target = url.toString();
   if (launchPackageSizeInBytes(target) > PROVIDER_PREFILL_MAX_URL_BYTES) {
-    return { url: adapter.entryPoint, promptPrefilled: false };
+    return { url: entryPoint, promptPrefilled: false };
   }
 
   return { url: target, promptPrefilled: true };
