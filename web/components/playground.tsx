@@ -1,56 +1,56 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getPublishedVersion,
   getVersionDependencies,
   resolveVersionDependencies,
   DraftRequestError,
   type ArtifactVersionDependencies,
-  type DependencyResolutionRun,
   type PublishedVersion,
 } from "../lib/drafts";
 import {
-  assemblePlaygroundPrompt,
-  assertManifestMatchesDeclarations,
-  assertResolvedContentMatchesManifest,
-  GeminiRequestError,
-  PLAYGROUND_GEMINI_MODEL,
-  PlaygroundContentError,
-  runGeminiTest,
-  type GeminiRunResult,
-  type ResolvedDependencyContent,
-} from "../lib/playground";
+  buildLaunchPackage,
+  buildProviderLaunchTarget,
+  EXTERNAL_AI_PROVIDERS,
+  LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES,
+  launchPackageSizeInBytes,
+  LaunchPackageError,
+  makeLaunchPackageFilename,
+  PROVIDER_PREFILL_MAX_URL_BYTES,
+  serializeLaunchPackageMarkdown,
+  type ExternalAIProvider,
+  type ExternalAIProviderConfig,
+  type LaunchPackage,
+} from "../lib/external-playground";
 
-interface PlaygroundExecution {
-  sourceVersion: string;
-  run: DependencyResolutionRun;
-  result: GeminiRunResult;
+interface PreparedLaunch {
+  launchPackage: LaunchPackage;
+  markdown: string;
+  sizeBytes: number;
+}
+
+interface HandoffMessage {
+  kind: "status" | "error";
+  text: string;
 }
 
 export default function Playground({ artifactId, version }: { artifactId: string; version: string }) {
   const requestId = useRef(0);
-  const apiKeyRef = useRef("");
   const [token, setToken] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [userInput, setUserInput] = useState("");
   const [source, setSource] = useState<PublishedVersion | null>(null);
   const [dependencyHistory, setDependencyHistory] = useState<ArtifactVersionDependencies | null>(null);
-  const [resolutionRun, setResolutionRun] = useState<DependencyResolutionRun | null>(null);
-  const [resolvedDependencies, setResolvedDependencies] = useState<ResolvedDependencyContent[]>([]);
+  const [prepared, setPrepared] = useState<PreparedLaunch | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [runError, setRunError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [execution, setExecution] = useState<PlaygroundExecution | null>(null);
+  const [handoffMessage, setHandoffMessage] = useState<HandoffMessage | null>(null);
 
   useEffect(() => () => {
     requestId.current += 1;
-    apiKeyRef.current = "";
   }, []);
 
-  async function loadSource() {
+  async function prepareLaunchPackage() {
     if (!token.trim()) {
       setLoadError("Enter the source Artifact owner's developer bearer token to resolve dependencies.");
       return;
@@ -61,12 +61,10 @@ export default function Playground({ artifactId, version }: { artifactId: string
     const timeout = setTimeout(() => controller.abort(), 60_000);
     setLoading(true);
     setLoadError(null);
-    setRunError(null);
+    setHandoffMessage(null);
     setSource(null);
     setDependencyHistory(null);
-    setResolutionRun(null);
-    setResolvedDependencies([]);
-    setExecution(null);
+    setPrepared(null);
 
     try {
       const [published, history] = await Promise.all([
@@ -78,30 +76,26 @@ export default function Playground({ artifactId, version }: { artifactId: string
       setDependencyHistory(history);
 
       if (history.dependencies.some((dependency) => dependency.resolutionState === "redacted")) {
-        setLoadError("Some prior resolution history is currently redacted. Dependency resolution is blocked until every declared target is readable.");
+        setLoadError("Dependency resolution is unavailable because prior dependency access is redacted. No Launch Package was prepared.");
         return;
       }
 
-      const run = await resolveVersionDependencies(artifactId, version, token, controller.signal);
+      const resolution = await resolveVersionDependencies(artifactId, version, token, controller.signal);
       if (currentRequestId !== requestId.current) return;
-      if (run.sourceArtifactVersionId !== published.version.id) {
-        throw new PlaygroundContentError("The resolution run does not belong to the selected source Version.");
-      }
-      assertManifestMatchesDeclarations(published, run.dependencies);
-
-      const dependencies = await Promise.all(run.dependencies.map(async (manifest) => {
-        const target = await getPublishedVersion(
+      const resolvedDependencies = await Promise.all(resolution.dependencies.map(async (manifest) => ({
+        manifest,
+        published: await getPublishedVersion(
           manifest.targetArtifactId,
           manifest.resolvedVersion,
           token,
           controller.signal,
-        );
-        assertResolvedContentMatchesManifest(manifest, target);
-        return { manifest, published: target };
-      }));
+        ),
+      })));
       if (currentRequestId !== requestId.current) return;
-      setResolutionRun(run);
-      setResolvedDependencies(dependencies);
+
+      const launchPackage = buildLaunchPackage(published, resolution, resolvedDependencies);
+      const markdown = serializeLaunchPackageMarkdown(launchPackage);
+      setPrepared({ launchPackage, markdown, sizeBytes: launchPackageSizeInBytes(markdown) });
     } catch (error: unknown) {
       if (currentRequestId !== requestId.current) return;
       setLoadError(describeLoadError(error, controller.signal.aborted));
@@ -111,42 +105,87 @@ export default function Playground({ artifactId, version }: { artifactId: string
     }
   }
 
-  async function runTest(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!source || !resolutionRun || !apiKeyRef.current.trim()) {
-      setRunError("Load a complete source and dependency manifest, then enter your Gemini API key.");
+  function launchProvider(provider: ExternalAIProvider) {
+    if (!prepared) return;
+
+    const adapter: ExternalAIProviderConfig = EXTERNAL_AI_PROVIDERS[provider];
+    const target = buildProviderLaunchTarget(provider, prepared.markdown);
+    const supportsPrefill = Boolean(adapter.prefillParameter);
+    window.open(target.url, "_blank", "noopener,noreferrer");
+
+    if (prepared.sizeBytes > LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES) {
+      const prefillMessage = target.promptPrefilled
+        ? `Opened ${adapter.name} in a new tab with a prompt-prefill link. Whether the provider keeps the text depends on its current sign-in and chat behavior; check the composer before continuing. PearlHub does not send the prompt. `
+        : supportsPrefill
+          ? `Opened ${adapter.name} without prompt prefill because the URL exceeds PearlHub's ${PROVIDER_PREFILL_MAX_URL_BYTES.toLocaleString()}-byte limit. `
+          : `Opened ${adapter.name} without prompt prefill. `;
+      setHandoffMessage({
+        kind: "status",
+        text: `${prefillMessage}Automatic clipboard copy was skipped because the package exceeds the ${LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES.toLocaleString()}-byte clipboard threshold. Download it, then manually copy and paste its full contents, or try Copy Launch Package.`,
+      });
       return;
     }
-    let prompt: string;
+
+    const copySuccessMessage = target.promptPrefilled
+      ? `Opened ${adapter.name} in a new tab with a prompt-prefill link. Whether the provider keeps the text depends on its current sign-in and chat behavior. Check the composer before continuing; PearlHub does not send the prompt. The Launch Package was also copied as a fallback.`
+      : supportsPrefill
+        ? `Opened ${adapter.name} without prompt prefill because the URL exceeds PearlHub's ${PROVIDER_PREFILL_MAX_URL_BYTES.toLocaleString()}-byte limit. The Launch Package has been copied; paste it into the new conversation to start testing.`
+        : `Opened ${adapter.name} in a new tab without prompt prefill. The Launch Package has been copied; paste it into a new conversation to start testing.`;
+    void copyLaunchPackage(copySuccessMessage);
+  }
+
+  async function copyLaunchPackage(
+    successMessage = "Launch Package copied. Switch to the provider tab, paste it into a regular conversation, and start testing. PearlHub does not submit it for you.",
+  ) {
+    if (!prepared) return;
     try {
-      prompt = assemblePlaygroundPrompt(source, resolvedDependencies, userInput);
-    } catch (error: unknown) {
-      setRunError(error instanceof PlaygroundContentError ? error.message : "The Skill content cannot be tested.");
-      return;
-    }
-    setRunning(true);
-    setRunError(null);
-    setExecution(null);
-    try {
-      const result = await runGeminiTest(apiKeyRef.current, prompt);
-      setExecution({ sourceVersion: source.version.version, run: resolutionRun, result });
-    } catch (error: unknown) {
-      setRunError(error instanceof GeminiRequestError ? error.message : "Gemini could not complete this test.");
-    } finally {
-      setRunning(false);
+      if (typeof navigator.clipboard?.writeText !== "function") {
+        throw new Error("Clipboard access is unavailable in this browser.");
+      }
+      await navigator.clipboard.writeText(prepared.markdown);
+      setHandoffMessage({
+        kind: "status",
+        text: successMessage,
+      });
+    } catch {
+      setHandoffMessage({
+        kind: "error",
+        text: "Clipboard access failed. The complete Launch Package remains visible below for manual selection and copying.",
+      });
     }
   }
 
-  function updateApiKey(value: string) {
-    apiKeyRef.current = value;
-    setApiKey(value);
-    setExecution(null);
-    setRunError(null);
+  function downloadLaunchPackage() {
+    if (!prepared || !source) return;
+    let objectUrl: string | null = null;
+    try {
+      objectUrl = URL.createObjectURL(new Blob([prepared.markdown], { type: "text/markdown;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = makeLaunchPackageFilename(source);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => {
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+      }, 0);
+      setHandoffMessage({ kind: "status", text: "Launch Package download started. Confirm the file in your browser's download list." });
+    } catch {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setHandoffMessage({ kind: "error", text: "The Launch Package download could not be started. Use Copy Launch Package or manually copy the visible package." });
+    }
   }
 
-  function clearApiKey() {
-    updateApiKey("");
-  }
+  const largePackage = prepared !== null && prepared.sizeBytes > LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES;
+  const providerConfigs: ExternalAIProviderConfig[] = Object.values(EXTERNAL_AI_PROVIDERS);
+  const unverifiedPrefillProviders = providerConfigs
+    .filter(({ prefillStatus }) => prefillStatus === "unverified")
+    .map(({ name, prefillCandidate }) => prefillCandidate ? `${name} (${prefillCandidate})` : name)
+    .join(", ");
+  const enabledPrefillProviders = providerConfigs
+    .filter(({ prefillStatus }) => prefillStatus === "enabled")
+    .map(({ name, prefillParameter }) => prefillParameter ? `${name} (${prefillParameter})` : name)
+    .join(", ");
 
   return (
     <main className="page-shell">
@@ -159,12 +198,12 @@ export default function Playground({ artifactId, version }: { artifactId: string
       </header>
       <section className="intro">
         <p className="eyebrow">DEVELOPER THIN UI</p>
-        <h1>Playground</h1>
-        <p className="intro-copy">A controlled prompt-and-context test harness. It does not execute scripts, tools, or external actions from Pearl content.</p>
+        <h1>External AI Playground</h1>
+        <p className="intro-copy">Prepare a portable, version-pinned Launch Package and continue testing in the selected provider's own conversation experience. PearlHub does not submit prompts, automate provider pages, or execute Skill code.</p>
       </section>
 
       <section className="create-panel">
-        <h2>Source Version</h2>
+        <h2>Selected Artifact Version</h2>
         <p>Artifact ID: <code>{artifactId}</code></p>
         <p>Exact Version: <code>{version}</code></p>
         <label className="field" htmlFor="playground-token">
@@ -176,32 +215,29 @@ export default function Playground({ artifactId, version }: { artifactId: string
             value={token}
             onChange={(event) => setToken(event.target.value)}
           />
-          <span className="field-help">Dependency resolution requires source write access. This token remains in page memory and is sent only to PearlHub.</span>
+          <span className="field-help">Used only with PearlHub's access-checked API to load this Version and resolve its direct dependencies. It is not included in the Launch Package.</span>
         </label>
-        <button className="primary-button" type="button" onClick={() => void loadSource()} disabled={loading}>
-          {loading ? "Loading source and resolving…" : "Load source and resolve dependencies"}
+        <button className="primary-button" type="button" onClick={() => void prepareLaunchPackage()} disabled={loading}>
+          {loading ? "Preparing Launch Package…" : "Prepare Launch Package"}
         </button>
+        <p role="status" aria-live="polite">
+          {loading ? "Preparing the version-pinned Launch Package."
+            : prepared ? "Launch Package ready."
+              : "No complete Launch Package is prepared."}
+        </p>
         {loadError && <p className="create-error" role="alert">{loadError}</p>}
 
         {source && (
           <article className="published-version">
             <h2>{source.artifact.name} ({source.artifact.slug}) — {source.version.version}</h2>
-            <h3>Source Skill instructions</h3>
-            {source.version.content.instructions.trim()
-              ? <pre>{source.version.content.instructions}</pre>
-              : <p role="alert">This Artifact Version has empty Skill instructions. Running is disabled.</p>}
-
-            <h3>Source Knowledge files</h3>
+            <p>Selected Skill: <strong>{source.artifact.name}</strong> (this Artifact Version uses the current single-instructions Skill representation).</p>
+            <h3>Canonical Skill instructions</h3>
+            <pre>{source.version.content.instructions || "Skill instructions are empty; a Launch Package cannot be prepared."}</pre>
+            <h3>Source Knowledge files ({source.version.content.knowledgeFiles.length})</h3>
             {source.version.content.knowledgeFiles.length
-              ? source.version.content.knowledgeFiles.map((file) => (
-                <section className="knowledge-file" key={file.path}>
-                  <h4>{file.path}</h4>
-                  <pre>{file.content}</pre>
-                </section>
-              ))
+              ? <ul>{source.version.content.knowledgeFiles.map((file) => <li key={file.path}>{file.path}</li>)}</ul>
               : <p>No source Knowledge files.</p>}
-
-            <h3>Direct dependency declarations</h3>
+            <h3>Direct dependency declarations ({source.version.content.dependencies.length})</h3>
             {source.version.content.dependencies.length
               ? <ul>{source.version.content.dependencies.map((dependency, index) => {
                 const history = dependencyHistory?.dependencies.find((entry) =>
@@ -220,80 +256,69 @@ export default function Playground({ artifactId, version }: { artifactId: string
           </article>
         )}
 
-        {resolutionRun && (
-          <section aria-labelledby="resolved-manifest-heading">
-            <h2 id="resolved-manifest-heading">Resolved dependency manifest</h2>
-            <p>Run: <code>{resolutionRun.runId}</code></p>
-            <p>Manifest hash: <code>{resolutionRun.manifestHash}</code></p>
-            <p>Resolver policy: <code>{resolutionRun.resolverPolicyVersion}</code></p>
-            {resolutionRun.dependencies.length
-              ? <ol>{resolvedDependencies.map(({ manifest, published: dependency }) => (
-                <li key={manifest.dependencyId}>
-                  <p>Declared range: <code>{manifest.declaredRange}</code></p>
-                  <p>Resolved Version: <code>{manifest.resolvedVersion}</code></p>
-                  <p>Resolved Version ID: <code>{manifest.resolvedArtifactVersionId}</code></p>
-                  <p>Resolved content hash: <code>{manifest.resolvedContentHash}</code></p>
-                  <h3>Dependency Skill instructions</h3>
-                  <pre>{dependency.version.content.instructions}</pre>
-                  <h4>Dependency Knowledge files</h4>
-                  {dependency.version.content.knowledgeFiles.length
-                    ? dependency.version.content.knowledgeFiles.map((file) => (
-                      <section className="knowledge-file" key={file.path}>
-                        <h5>{file.path}</h5>
-                        <pre>{file.content}</pre>
-                      </section>
-                    ))
-                    : <p>No dependency Knowledge files.</p>}
+        {prepared && (
+          <section aria-labelledby="launch-package-heading">
+            <h2 id="launch-package-heading">Launch Package ready</h2>
+            <p>Skill: <strong>{prepared.launchPackage.manifest.source.skillName}</strong></p>
+            <p>Knowledge files: {prepared.launchPackage.knowledgeFiles.length
+              + prepared.launchPackage.dependencies.reduce((count, dependency) => count + dependency.knowledgeFiles.length, 0)}</p>
+            <p>Direct dependencies: {prepared.launchPackage.manifest.resolution.dependencies.length}</p>
+            <p>Resolution run: <code>{prepared.launchPackage.manifest.resolution.runId}</code></p>
+            <p>Manifest hash: <code>{prepared.launchPackage.manifest.resolution.manifestHash}</code></p>
+            {prepared.launchPackage.manifest.resolution.dependencies.length
+              ? <ol>{prepared.launchPackage.manifest.resolution.dependencies.map((dependency) => (
+                <li key={dependency.dependencyId}>
+                  <p>Declared range: <code>{dependency.declaredRange}</code></p>
+                  <p>Resolved Artifact Version ID: <code>{dependency.resolvedArtifactVersionId}</code></p>
+                  <p>Exact resolved version: <code>{dependency.resolvedVersion}</code></p>
                 </li>
               ))}</ol>
-              : <p>No direct dependencies; the immutable empty manifest is ready.</p>}
-          </section>
-        )}
+              : <p>No dependencies are declared; the exact empty resolution manifest is included.</p>}
+            <p>Launch Package size: {prepared.sizeBytes.toLocaleString()} bytes.</p>
+            {largePackage && (
+              <p className="field-error" role="alert">
+                This package exceeds the {LAUNCH_PACKAGE_CLIPBOARD_MAX_BYTES.toLocaleString()}-byte clipboard threshold, so automatic clipboard copy is skipped. Download it, then manually copy and paste the complete contents into the provider chat, or try Copy Launch Package. Nothing is truncated.
+              </p>
+            )}
 
-        <form className="create-form" onSubmit={(event) => void runTest(event)}>
-          <h2>Test configuration</h2>
-          <label className="field" htmlFor="playground-api-key">
-            <span>Gemini API key</span>
-            <input
-              id="playground-api-key"
-              type="password"
-              autoComplete="off"
-              value={apiKey}
-              onChange={(event) => updateApiKey(event.target.value)}
-            />
-            <span className="field-help">Your key stays in this page's memory and is sent directly from this browser to Google. PearlHub does not receive or store it. Browser extensions and compromised devices may still access it. Clear it when finished.</span>
-          </label>
-          {apiKey && <button className="secondary-button" type="button" onClick={clearApiKey}>Clear Gemini API key</button>}
-          <label className="field" htmlFor="playground-model">
-            <span>Verified Gemini model</span>
-            <input id="playground-model" value={PLAYGROUND_GEMINI_MODEL} readOnly />
-          </label>
-          <label className="field" htmlFor="playground-input">
-            <span>Test input</span>
-            <textarea id="playground-input" rows={5} value={userInput} onChange={(event) => { setUserInput(event.target.value); setExecution(null); }} />
-          </label>
-          {!apiKey.trim() && <p className="field-help">A Gemini API key is required to run the test.</p>}
-          {runError && <p className="create-error" role="alert">{runError}</p>}
-          <button
-            className="primary-button"
-            type="submit"
-            disabled={running || loading || !source || !resolutionRun || !apiKey.trim()
-              || !userInput.trim() || !source.version.content.instructions.trim()}
-          >
-            {running ? "Testing with Gemini…" : "Run Skill test"}
-          </button>
-        </form>
-
-        {execution && (
-          <section className="create-success" aria-labelledby="playground-result-heading">
-            <h2 id="playground-result-heading">Gemini response</h2>
-            <p>Source Version: <code>{execution.sourceVersion}</code></p>
-            <p>Resolution run: <code>{execution.run.runId}</code></p>
-            <p>Manifest hash: <code>{execution.run.manifestHash}</code></p>
-            <pre>{execution.result.text}</pre>
-            <p>Model version: {execution.result.modelVersion ?? "Not returned"}</p>
-            <p>Prompt tokens: {execution.result.promptTokenCount ?? "Not returned"}</p>
-            <p>Response tokens: {execution.result.responseTokenCount ?? "Not returned"}</p>
+            <h3>Choose an external provider</h3>
+            <div className="create-actions">
+              <button className="primary-button" type="button" onClick={() => launchProvider("gemini")}>Launch in Gemini</button>
+              <button className="primary-button" type="button" onClick={() => launchProvider("chatgpt")}>Launch in ChatGPT</button>
+              <button className="primary-button" type="button" onClick={() => launchProvider("claude")}>Launch in Claude</button>
+              <button className="primary-button" type="button" onClick={() => launchProvider("grok")}>Launch in Grok</button>
+              <button className="secondary-button" type="button" onClick={() => void copyLaunchPackage()}>Copy Launch Package</button>
+              <button className="secondary-button" type="button" onClick={downloadLaunchPackage}>Download Launch Package</button>
+            </div>
+            <p>
+              If a provider tab was blocked, open it directly:
+              {" "}<a href={EXTERNAL_AI_PROVIDERS.gemini.entryPoint} target="_blank" rel="noopener noreferrer">Gemini</a>
+              {" "}<a href={EXTERNAL_AI_PROVIDERS.chatgpt.entryPoint} target="_blank" rel="noopener noreferrer">ChatGPT</a>
+              {" "}<a href={EXTERNAL_AI_PROVIDERS.claude.entryPoint} target="_blank" rel="noopener noreferrer">Claude</a>
+              {" "}<a href={EXTERNAL_AI_PROVIDERS.grok.entryPoint} target="_blank" rel="noopener noreferrer">Grok</a>
+            </p>
+            {handoffMessage && (
+              <p className={handoffMessage.kind === "error" ? "create-error" : "field-help"}
+                role={handoffMessage.kind === "error" ? "alert" : "status"}>
+                {handoffMessage.text}
+              </p>
+            )}
+            <p className="field-help">
+              Prompt-prefill links are enabled for {enabledPrefillProviders} as best-effort provider behavior; check the composer before continuing because sign-in redirects may discard URL parameters. Prefill remains disabled for {unverifiedPrefillProviders} pending manual QA. Gemini has no prefill. The Launch Package is copied when it fits the clipboard threshold, otherwise download and manually paste it. PearlHub never sends the prompt. Gemini Gem setup is optional and must be done manually; ChatGPT launch opens a regular chat and does not create a Custom GPT.
+            </p>
+            <p className="field-help">
+              A prefill URL contains the complete Launch Package, is sent to the external provider, and may be visible in browser history or provider-side logs. If you prefer not to put package content in a URL, open the provider's plain entry point and use Copy or Download instead. Pasting also shares all included Skill, Knowledge, and dependency content with that provider, which handles it under its own policies. Only share content you are authorized to send there.
+            </p>
+            <label className="field" htmlFor="launch-package-content">
+              <span>Complete Launch Package (manual copy fallback)</span>
+              <textarea
+                id="launch-package-content"
+                rows={14}
+                readOnly
+                value={prepared.markdown}
+                onFocus={(event) => event.currentTarget.select()}
+              />
+            </label>
           </section>
         )}
       </section>
@@ -303,13 +328,13 @@ export default function Playground({ artifactId, version }: { artifactId: string
 
 function describeLoadError(error: unknown, timedOut: boolean): string {
   if (timedOut) return "Loading the source or dependency content timed out. Check the API connection and try again.";
-  if (error instanceof PlaygroundContentError) return error.message;
+  if (error instanceof LaunchPackageError) return `${error.message} No Launch Package was prepared.`;
   if (error instanceof DraftRequestError) {
     if (error.status === 401) return "PearlHub rejected the developer bearer token. Check it and try again.";
     if (error.status === 403) return "Only the source Artifact owner or an authorized writer can resolve dependencies.";
     if (error.status === 404 || error.status === 410) return "The source or a required Artifact Version is not currently available.";
-    if (error.status === 409 || error.code === "VERSION_CONTENT_UNAVAILABLE") return "Source or dependency Version content is unavailable; testing is blocked.";
-    if (error.code === "DEPENDENCY_RESOLUTION_FAILED") return "A direct dependency could not be resolved or is not currently readable. No target details are disclosed.";
+    if (error.status === 409 || error.code === "VERSION_CONTENT_UNAVAILABLE") return "Source or dependency Version content is unavailable; package preparation is blocked.";
+    if (error.code === "DEPENDENCY_RESOLUTION_FAILED") return "A direct dependency could not be resolved or is not currently readable. No target details are disclosed and no Launch Package was prepared.";
     if (error.status === 0) return "Could not reach PearlHub. Check the API connection and try again.";
   }
   return "Could not load the source Version, resolution manifest, or exact dependency content.";

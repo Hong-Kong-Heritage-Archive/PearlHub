@@ -142,12 +142,15 @@ Portability is a core PearlHub principle.
 
 PearlHub is an open-source, forever-free, consumer/community-first platform.
 
-### Playground API-key rule
+### External AI Playground hand-off
 
-For Playground testing:
+The External AI Playground prepares a Launch Package for a user-selected regular chat with an external provider:
 
-- the user supplies their own Gemini API key
-- PearlHub does not store the user's Gemini API key
+- PearlHub does not collect a Gemini API key or other provider credentials
+- the user's conversation and any provider-native interactions take place in the provider's own UI
+- the Launch Package pins the selected Artifact Version and exact resolved dependency Versions
+
+Any future direct model-API integration requires a separate product/security decision. If approved, user-supplied API keys must remain user-owned and must not be stored by PearlHub.
 
 ---
 
