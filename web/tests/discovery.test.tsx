@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ArtifactDiscovery from "../components/artifact-discovery";
+import { FirebaseSessionContext, type FirebaseSession } from "../components/firebase-auth-provider";
+import { getCurrentFirebaseIdToken } from "../lib/firebase-auth";
 import {
   buildDiscoveryUrl,
   type ArtifactSummary,
@@ -14,6 +16,16 @@ const filters: DiscoveryFilters = {
   order: "asc",
   limit: 50,
   visibility: "public",
+};
+
+const signedInSession: FirebaseSession = {
+  status: "signed-in",
+  user: { uid: "firebase-uid", email: "owner@example.test" },
+  error: null,
+  signInWithGoogle: async () => {},
+  signInWithEmail: async () => {},
+  createAccount: async () => {},
+  signOut: async () => {},
 };
 
 afterEach(() => {
@@ -94,26 +106,27 @@ describe("Artifact discovery page", () => {
     expect(screen.queryByText(/total results/i)).not.toBeInTheDocument();
   });
 
-  it("uses an optional owner token to list private Artifacts", async () => {
+  it("uses the current Firebase session to list private Artifacts", async () => {
     const mock = installFetch((_url, init) => new Headers(init.headers).has("authorization")
       ? jsonResponse({
         items: [{ ...artifact("owner-private", "My private Pearl"), visibility: "private" }],
         nextCursor: null,
       })
       : jsonResponse({ items: [], nextCursor: null }));
-    render(<ArtifactDiscovery />);
-    expect(await screen.findByRole("heading", { name: "No Artifacts found" })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply bearer token" }));
+    vi.mocked(getCurrentFirebaseIdToken).mockResolvedValue("owner-token");
+    render(
+      <FirebaseSessionContext.Provider value={signedInSession}>
+        <ArtifactDiscovery />
+      </FirebaseSessionContext.Provider>,
+    );
 
     expect(await screen.findByRole("heading", { name: "My private Pearl" })).toBeInTheDocument();
     const ownerRequest = mock.mock.calls.find(([, init]) =>
       new Headers(init?.headers).get("authorization") === "Bearer owner-token");
     expect(ownerRequest).toBeDefined();
-    expect(screen.getByLabelText(/Developer bearer token/)).toHaveAttribute("type", "password");
   });
 
-  it("lists an owner's unlisted Artifacts only when the owner token and Unlisted filter are applied", async () => {
+  it("lists an owner's unlisted Artifacts only when signed in and the Unlisted filter is applied", async () => {
     const mock = installFetch((url, init) => {
       const isOwner = new Headers(init.headers).get("authorization") === "Bearer owner-token";
       if (isOwner && url.searchParams.get("visibility") === "unlisted") {
@@ -124,9 +137,13 @@ describe("Artifact discovery page", () => {
       }
       return jsonResponse({ items: [], nextCursor: null });
     });
-    render(<ArtifactDiscovery />);
+    vi.mocked(getCurrentFirebaseIdToken).mockResolvedValue("owner-token");
+    render(
+      <FirebaseSessionContext.Provider value={signedInSession}>
+        <ArtifactDiscovery />
+      </FirebaseSessionContext.Provider>,
+    );
     expect(await screen.findByRole("heading", { name: "No Artifacts found" })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
     fireEvent.click(screen.getByRole("button", { name: "Show my unlisted Artifacts" }));
     expect(await screen.findByRole("heading", { name: "My unlisted Pearl" })).toBeInTheDocument();
     expect(mock.mock.calls.some(([input, init]) => {
@@ -136,15 +153,18 @@ describe("Artifact discovery page", () => {
     })).toBe(true);
   });
 
-  it("explains rejected owner tokens", async () => {
+  it("shows a sign-in error when the API rejects the Firebase session", async () => {
+    vi.mocked(getCurrentFirebaseIdToken).mockResolvedValue("owner-token");
     installFetch(() => jsonResponse({
       error: { code: "UNAUTHENTICATED", message: "Authentication is required.", details: {} },
     }, 401));
-    render(<ArtifactDiscovery />);
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "invalid-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply bearer token" }));
+    render(
+      <FirebaseSessionContext.Provider value={signedInSession}>
+        <ArtifactDiscovery />
+      </FirebaseSessionContext.Provider>,
+    );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("The bearer token was rejected.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Your PearlHub session was rejected.");
   });
 
   it("shows a useful API validation message for a 400 response", async () => {

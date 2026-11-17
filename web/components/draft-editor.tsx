@@ -13,7 +13,6 @@ const tagPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export default function DraftEditor({ draftId }: DraftEditorProps) {
   const router = useRouter();
-  const [token, setToken] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
@@ -92,7 +91,7 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
   async function loadDraft() {
     if (!draftId) return;
     await perform(async () => {
-      const loaded = await getDraft(draftId, token);
+      const loaded = await getDraft(draftId);
       loadIntoForm(loaded);
       setMessage("Draft loaded. It is still unpublished.");
     });
@@ -101,15 +100,14 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await perform(async () => {
-      if (!token.trim()) throw new Error("Enter a developer bearer token to use the authenticated API.");
       const input = currentInput();
       if (!draft) {
-        const created = await createDraft(input, token);
+        const created = await createDraft(input);
         loadIntoForm(created);
         setMessage("Draft saved. It is not published.");
         return;
       }
-      const saved = await updateDraft({ ...input, id: draft.id, revision: draft.revision }, token);
+      const saved = await updateDraft({ ...input, id: draft.id, revision: draft.revision });
       loadIntoForm(saved);
       setMessage("Draft saved.");
     });
@@ -118,7 +116,7 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
   async function publish() {
     if (!draft) return;
     await perform(async () => {
-      const result = await publishDraft(draft, token);
+      const result = await publishDraft(draft);
       setMessage(`Published ${result.artifact.name} ${result.version.version}.`);
       router.push(`/artifacts/${encodeURIComponent(result.artifact.id)}/versions/${encodeURIComponent(result.version.version)}`);
     });
@@ -146,7 +144,7 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
         <h2 id="draft-editor-title">Draft — not published</h2>
         {draftId && !draft && (
           <div className="create-form">
-            <button className="primary-button" type="button" onClick={loadDraft} disabled={busy || !token.trim()}>
+            <button className="primary-button" type="button" onClick={loadDraft} disabled={busy}>
               {busy ? "Loading Draft…" : "Load Draft"}
             </button>
           </div>
@@ -158,12 +156,8 @@ export default function DraftEditor({ draftId }: DraftEditorProps) {
             Saved Draft: <Link href={`/draft/${encodeURIComponent(draft.id)}`}>open this Draft</Link> or <Link href="/drafts">find it in My Drafts</Link>.
           </p>
         )}
+        <p className="field-help">Sign in above to create, edit, or publish a Draft.</p>
         <form className="create-form" onSubmit={submit} noValidate>
-          <label className="field" htmlFor="draft-token">
-            <span>Developer bearer token <span className="required-mark">(required)</span></span>
-            <input id="draft-token" type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} disabled={busy} />
-            <span className="field-help">Temporary in-memory token for the configured API. It is never saved in browser storage and is not a login flow.</span>
-          </label>
           <label className="field" htmlFor="draft-name">
             <span>Name <span className="required-mark">(required)</span></span>
             <input id="draft-name" required maxLength={200} value={name} disabled={busy || Boolean(editingExistingArtifact)} onChange={(event) => setName(event.target.value)} />

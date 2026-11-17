@@ -38,7 +38,6 @@ interface HandoffMessage {
 
 export default function Playground({ artifactId, version }: { artifactId: string; version: string }) {
   const requestId = useRef(0);
-  const [token, setToken] = useState("");
   const [source, setSource] = useState<PublishedVersion | null>(null);
   const [dependencyHistory, setDependencyHistory] = useState<ArtifactVersionDependencies | null>(null);
   const [prepared, setPrepared] = useState<PreparedLaunch | null>(null);
@@ -51,11 +50,6 @@ export default function Playground({ artifactId, version }: { artifactId: string
   }, []);
 
   async function prepareLaunchPackage() {
-    if (!token.trim()) {
-      setLoadError("Enter the source Artifact owner's developer bearer token to resolve dependencies.");
-      return;
-    }
-
     const currentRequestId = ++requestId.current;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60_000);
@@ -68,8 +62,8 @@ export default function Playground({ artifactId, version }: { artifactId: string
 
     try {
       const [published, history] = await Promise.all([
-        getPublishedVersion(artifactId, version, token, controller.signal),
-        getVersionDependencies(artifactId, version, token, controller.signal),
+        getPublishedVersion(artifactId, version, controller.signal),
+        getVersionDependencies(artifactId, version, controller.signal),
       ]);
       if (currentRequestId !== requestId.current) return;
       setSource(published);
@@ -80,14 +74,13 @@ export default function Playground({ artifactId, version }: { artifactId: string
         return;
       }
 
-      const resolution = await resolveVersionDependencies(artifactId, version, token, controller.signal);
+      const resolution = await resolveVersionDependencies(artifactId, version, controller.signal);
       if (currentRequestId !== requestId.current) return;
       const resolvedDependencies = await Promise.all(resolution.dependencies.map(async (manifest) => ({
         manifest,
         published: await getPublishedVersion(
           manifest.targetArtifactId,
           manifest.resolvedVersion,
-          token,
           controller.signal,
         ),
       })));
@@ -206,17 +199,7 @@ export default function Playground({ artifactId, version }: { artifactId: string
         <h2>Selected Artifact Version</h2>
         <p>Artifact ID: <code>{artifactId}</code></p>
         <p>Exact Version: <code>{version}</code></p>
-        <label className="field" htmlFor="playground-token">
-          <span>Developer bearer token</span>
-          <input
-            id="playground-token"
-            type="password"
-            autoComplete="off"
-            value={token}
-            onChange={(event) => setToken(event.target.value)}
-          />
-          <span className="field-help">Used only with PearlHub's access-checked API to load this Version and resolve its direct dependencies. It is not included in the Launch Package.</span>
-        </label>
+        <p className="field-help">Sign in above to load this Version and resolve its direct dependencies.</p>
         <button className="primary-button" type="button" onClick={() => void prepareLaunchPackage()} disabled={loading}>
           {loading ? "Preparing Launch Package…" : "Prepare Launch Package"}
         </button>
@@ -330,7 +313,7 @@ function describeLoadError(error: unknown, timedOut: boolean): string {
   if (timedOut) return "Loading the source or dependency content timed out. Check the API connection and try again.";
   if (error instanceof LaunchPackageError) return `${error.message} No Launch Package was prepared.`;
   if (error instanceof DraftRequestError) {
-    if (error.status === 401) return "PearlHub rejected the developer bearer token. Check it and try again.";
+    if (error.status === 401) return "PearlHub rejected the current session. Sign in again and retry.";
     if (error.status === 403) return "Only the source Artifact owner or an authorized writer can resolve dependencies.";
     if (error.status === 404 || error.status === 410) return "The source or a required Artifact Version is not currently available.";
     if (error.status === 409 || error.code === "VERSION_CONTENT_UNAVAILABLE") return "Source or dependency Version content is unavailable; package preparation is blocked.";

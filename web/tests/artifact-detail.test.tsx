@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ArtifactDetail from "../components/artifact-detail";
+import { getCurrentFirebaseIdToken } from "../lib/firebase-auth";
 
 afterEach(() => {
   cleanup();
@@ -78,7 +79,7 @@ describe("Artifact detail page", () => {
     expect(screen.queryByRole("heading", { name: "Fork lineage" })).not.toBeInTheDocument();
   });
 
-  it("uses the in-memory bearer token for owner-authorized reads and supports retry", async () => {
+  it("uses the current Firebase ID token for owner-authorized reads", async () => {
     const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (!new Headers(init?.headers).has("authorization")) {
         return response({ error: { code: "ARTIFACT_NOT_FOUND", message: "Not visible.", details: {} } }, 404);
@@ -90,11 +91,9 @@ describe("Artifact detail page", () => {
     });
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "http://localhost:8080");
     vi.stubGlobal("fetch", fetch);
+    vi.mocked(getCurrentFirebaseIdToken).mockResolvedValue("temporary-token");
 
     render(<ArtifactDetail artifactId="child-id" />);
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText(/bearer token/i), { target: { value: "temporary-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Load with token" }));
 
     expect(await screen.findByRole("heading", { name: "Forked Artifact" })).toBeInTheDocument();
     expect(await screen.findByText("No visible Fork lineage.")).toBeInTheDocument();

@@ -81,6 +81,7 @@ export interface UserIdentity {
 export interface UserIdentityRepository {
   findUserId(provider: string, subject: string): Promise<string | null>;
   create(identity: UserIdentity): Promise<void>;
+  resolveOrCreateUserId(provider: string, subject: string): Promise<string>;
 }
 
 export interface ProvenanceRepository {

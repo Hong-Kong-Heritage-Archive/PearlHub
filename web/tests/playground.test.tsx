@@ -176,7 +176,6 @@ beforeEach(() => {
 async function startPreparing(options: Parameters<typeof stubPlaygroundApi>[0] = {}) {
   const api = stubPlaygroundApi(options);
   render(<Playground artifactId="source-artifact" version="1.0.0" />);
-  fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
   fireEvent.click(screen.getByRole("button", { name: "Prepare Launch Package" }));
   return api;
 }
@@ -321,7 +320,6 @@ describe("External AI Playground", () => {
     cleanup();
     stubPlaygroundApi({ resolveStatus: 400 });
     render(<Playground artifactId="source-artifact" version="1.0.0" />);
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "owner-token" } });
     fireEvent.click(screen.getByRole("button", { name: "Prepare Launch Package" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/no Launch Package was prepared/i);
     expect(screen.queryByText("target-version")).not.toBeInTheDocument();

@@ -5,7 +5,6 @@ import { useState } from "react";
 import { DraftRequestError, listVersions, type PublishedVersion } from "../lib/drafts";
 
 export default function ArtifactVersions({ artifactId }: { artifactId: string }) {
-  const [token, setToken] = useState("");
   const [versions, setVersions] = useState<PublishedVersion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -14,7 +13,7 @@ export default function ArtifactVersions({ artifactId }: { artifactId: string })
     setLoading(true);
     setError(null);
     try {
-      setVersions(await listVersions(artifactId, token));
+      setVersions(await listVersions(artifactId));
     } catch (caught: unknown) {
       setError(caught instanceof DraftRequestError ? caught.message : "Could not load published versions.");
     } finally {
@@ -34,11 +33,7 @@ export default function ArtifactVersions({ artifactId }: { artifactId: string })
         <p className="intro-copy">Only published versions appear here. Drafts remain private to their owner.</p>
       </section>
       <section className="create-panel">
-        <label className="field" htmlFor="versions-token">
-          <span>Developer bearer token (optional for public Artifacts)</span>
-          <input id="versions-token" type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} />
-          <span className="field-help">Temporary in-memory token only; no login flow is available.</span>
-        </label>
+        <p className="field-help">Sign in above to include Artifacts that are private to your account.</p>
         <button className="primary-button" type="button" onClick={load} disabled={loading}>{loading ? "Loading…" : "Load versions"}</button>
         {error && <p className="create-error" role="alert">{error}</p>}
         {versions && versions.length === 0 && <p role="status">No published versions yet.</p>}
