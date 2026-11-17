@@ -32,7 +32,7 @@ describe("API configuration", () => {
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "");
     vi.stubGlobal("fetch", fetch);
 
-    await expect(listDrafts("temporary-token"))
+    await expect(listDrafts())
       .rejects.toMatchObject({ code: "API_URL_NOT_CONFIGURED" });
     expect(fetch).not.toHaveBeenCalled();
   });

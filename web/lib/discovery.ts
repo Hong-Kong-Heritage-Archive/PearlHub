@@ -60,13 +60,19 @@ export async function requestArtifacts(
   filters: DiscoveryFilters,
   cursor: string | null,
   signal: AbortSignal,
-  token?: string,
 ): Promise<ArtifactDiscoveryPage> {
   const baseUrl = process.env.NEXT_PUBLIC_PEARLHUB_API_BASE_URL;
   if (!baseUrl?.trim()) {
     throw new DiscoveryRequestError("The PearlHub API base URL is not configured.", 0);
   }
   const headers = new Headers({ Accept: "application/json" });
+  let token: string | null;
+  try {
+    token = await getCurrentFirebaseIdToken();
+  } catch {
+    notifyFirebaseAuthenticationRejected();
+    throw new DiscoveryRequestError("Your Firebase session could not be refreshed. Sign in again.", 401);
+  }
   if (token?.trim()) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(buildDiscoveryUrl(baseUrl, filters, cursor), {
     headers,
@@ -82,7 +88,8 @@ export async function requestArtifacts(
       throw new DiscoveryRequestError("Artifact discovery is temporarily unavailable. Please try again.", 503);
     }
     if (response.status === 401) {
-      throw new DiscoveryRequestError("The bearer token was rejected. Check it and try again.", 401);
+      notifyFirebaseAuthenticationRejected();
+      throw new DiscoveryRequestError("Your PearlHub session was rejected. Sign in again to continue.", 401);
     }
     if (response.status === 403) {
       throw new DiscoveryRequestError("You do not have permission to view these Artifacts.", 403);
@@ -156,3 +163,4 @@ function isVisibility(value: unknown): value is ArtifactVisibility {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+import { getCurrentFirebaseIdToken, notifyFirebaseAuthenticationRejected } from "./firebase-auth";

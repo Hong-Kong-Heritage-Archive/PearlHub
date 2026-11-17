@@ -836,7 +836,8 @@ describe("PostgreSQL persistence hardening", () => {
   });
 
   it("maps provider-subject identities without guessing legacy providers", async () => {
-    const identities = new PostgresUserIdentityRepository(pool!);
+    const transactions = new PostgresTransactionManager(pool!);
+    const identities = new PostgresUserIdentityRepository(transactions.database, transactions);
     const legacy = await pool!.query<{ id: string; external_subject: string }>(
       "SELECT id,external_subject FROM users WHERE id=$1",
       [owners[0]],
@@ -856,6 +857,25 @@ describe("PostgreSQL persistence hardening", () => {
     expect(await identities.findUserId("firebase", "other-subject")).toBe(otherUser);
     await expect(identities.create({ id: randomUUID(), userId: otherUser, provider: "firebase", subject: "same-subject", createdAt }))
       .rejects.toMatchObject({ code: "INVALID_REQUEST", details: {} });
+  });
+
+  it("transactionally creates one internal user for concurrent first-time Firebase identities", async () => {
+    const transactions = new PostgresTransactionManager(pool!);
+    const identities = new PostgresUserIdentityRepository(transactions.database, transactions);
+
+    const userIds = await Promise.all([
+      identities.resolveOrCreateUserId("firebase", "concurrent-firebase-uid"),
+      identities.resolveOrCreateUserId("firebase", "concurrent-firebase-uid"),
+    ]);
+
+    expect(userIds[0]).toBe(userIds[1]);
+    const mappedIdentity = await identities.findUserId("firebase", "concurrent-firebase-uid");
+    expect(mappedIdentity).toBe(userIds[0]);
+    const users = await pool!.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM users WHERE id = $1 AND external_subject IS NULL",
+      [userIds[0]],
+    );
+    expect(users.rows[0]?.count).toBe("1");
   });
 
   async function createArtifact(ownerId: string = owners[0]!, slug: string = randomUUID(), visibility: string = "public", status: string = "active"): Promise<string> {

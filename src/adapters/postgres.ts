@@ -483,7 +483,14 @@ export class PostgresLineageRepository implements LineageRepository {
 }
 
 export class PostgresUserIdentityRepository implements UserIdentityRepository {
-  constructor(private readonly db: Queryable) { this.db = translateConstraints(db); }
+  private readonly db: Queryable;
+
+  constructor(
+    db: Queryable,
+    private readonly transactions: TransactionManager,
+  ) {
+    this.db = translateConstraints(db);
+  }
 
   async findUserId(provider: string, subject: string): Promise<string | null> {
     const result = await this.db.query<{ user_id: string }>(
@@ -498,6 +505,31 @@ export class PostgresUserIdentityRepository implements UserIdentityRepository {
       "INSERT INTO user_identities (id,user_id,provider,subject,created_at) VALUES ($1,$2,$3,$4,$5)",
       [identity.id, identity.userId, identity.provider, identity.subject, identity.createdAt],
     );
+  }
+
+  async resolveOrCreateUserId(provider: string, subject: string): Promise<string> {
+    const mappedUserId = await this.findUserId(provider, subject);
+    if (mappedUserId) return mappedUserId;
+
+    return this.transactions.run(async () => {
+      const currentUserId = await this.findUserId(provider, subject);
+      if (currentUserId) return currentUserId;
+
+      const newUserId = randomUUID();
+      await this.db.query("INSERT INTO users (id) VALUES ($1)", [newUserId]);
+      const inserted = await this.db.query<{ user_id: string }>(
+        "INSERT INTO user_identities (id,user_id,provider,subject,created_at) VALUES ($1,$2,$3,$4,now()) ON CONFLICT (provider,subject) DO NOTHING RETURNING user_id",
+        [randomUUID(), newUserId, provider, subject],
+      );
+      if (inserted.rows[0]) return inserted.rows[0].user_id;
+
+      const winningUserId = await this.findUserId(provider, subject);
+      if (!winningUserId) {
+        throw new Error("A concurrent identity mapping could not be resolved.");
+      }
+      await this.db.query("DELETE FROM users WHERE id=$1", [newUserId]);
+      return winningUserId;
+    });
   }
 }
 

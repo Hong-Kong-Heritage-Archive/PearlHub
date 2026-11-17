@@ -12,12 +12,33 @@ set -a && . ./.env && set +a
 docker compose up -d postgres
 npm install
 npm run db:migrate
-npm start
 ```
 
 For an existing or manually migrated database, follow the backend's [development environment guide](../docs/backend/DEV_ENVIRONMENT_SETUP.md) before running migrations.
 
-The backend needs the local development fake-auth variables in `.env` to start. Discovery is anonymous by default; owners can enter a temporary bearer token to include their private Artifacts. This fake authenticator is development-only and is not a PearlHub login flow.
+The backend requires an explicit authentication mode. For normal browser
+sign-in, configure the Firebase Web app in `web/.env.local` with
+`NEXT_PUBLIC_FIREBASE_API_KEY`, `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`,
+`NEXT_PUBLIC_FIREBASE_PROJECT_ID`, and `NEXT_PUBLIC_FIREBASE_APP_ID`. These are
+public client settings, not secrets. Enable Google and Email/Password in the
+confirmed Firebase project, then start the backend with
+`PEARLHUB_AUTH_MODE=firebase` and `FIREBASE_PROJECT_ID` set to that same project.
+The backend uses Application Default Credentials; see the [backend setup
+guide](../docs/backend/DEV_ENVIRONMENT_SETUP.md). Firebase project access and
+provider enablement are not verified by this repository.
+
+The backend's development fake mode remains available for local API/manual
+testing, but the web UI no longer accepts developer-entered bearer tokens. That
+fake mode cannot authenticate the Firebase browser session.
+
+Start the backend with the selected local mode. For Firebase browser sign-in:
+
+```sh
+PEARLHUB_AUTH_MODE=firebase FIREBASE_PROJECT_ID="$FIREBASE_PROJECT_ID" npm start
+```
+
+For local API/manual testing with the development fake, use the local values
+from `.env` and `npm start`; the web UI does not accept a developer token.
 
 In a second terminal:
 
@@ -64,11 +85,12 @@ The value is a public API origin/base path, not a credential. In development mod
 - The package uses the current single-instructions Skill representation and includes direct dependencies only; it does not expand transitive dependencies.
 - No Gemini API key or other provider credential is collected by PearlHub for this flow. Optional Gem or Custom GPT setup must be done manually in the provider's own UI; regular chat launch does not create or save those configurations.
 - Import supports pasted Markdown/Skill content and a GitHub raw URL through `POST /api/v1/imports/github`; both return an editable Draft and GitHub provenance is shown in the Draft editor.
-- The owner can create a work-copy from a selected version.
-- The Artifact detail page includes an owner-only visibility editor. It compares `GET /api/v1/me`'s authenticated caller identity with the Artifact's `ownerId`; the API independently enforces owner authorization for `PATCH /api/v1/artifacts/{artifactId}`. The developer bearer token remains temporary, in-memory, and development-only. It is never decoded or persisted by the UI.
+- - The owner can create a work-copy from a selected version.
+- The Artifact detail page includes an owner-only visibility editor. It compares `GET /api/v1/me`'s authenticated caller identity with the Artifact's `ownerId`; the API independently enforces owner authorization for `PATCH /api/v1/artifacts/{artifactId}`.
 - My Drafts supports deleting an unpublished Draft with confirmation. Published-version views support tombstoning an Artifact with confirmation; the backend enforces ownership, preserves history, and makes repeat deletion return `410 ARTIFACT_GONE`.
-- Authenticated operations require a bearer token entered into a temporary developer-only password field. The token stays in component memory, is sent only to the configured API URL, and is never persisted in browser storage. It is not a production login flow.
-- No production authentication or login flow is available. The developer token field is not a login system; the backend remains responsible for authentication and ownership.
+- Sign-in supports Google and email/password through Firebase Authentication. Firebase SDK `browserLocalPersistence` manages the session; API requests retrieve the current ID token for each request and send it only to the configured API origin. The application does not manually persist or render ID tokens.
+- PearlHub uses Firebase Auth only. The Firebase package also installs its unused Firestore client, so the web package pins its transitive `@grpc/grpc-js` dependency to patched version `1.13.6`.
+- A PearlHub API 401 signs out the Firebase session and returns the UI to the sign-in state. Public discovery remains available without signing in; owner permissions continue to be enforced by the backend.
 - Direct `POST /api/v1/artifacts` is retired with HTTP 410 so a new Artifact cannot exist without its first version.
 - All MVP Drafts and published snapshots are PostgreSQL-backed. Legacy versions created before migration 005 may have no recoverable complete content snapshot because the former content store was in-memory; those versions remain listed in persistence but cannot be read as full content or used for work-copy.
 - Visibility and access control remain server-side. Drafts are private to their owner and never appear in discovery.

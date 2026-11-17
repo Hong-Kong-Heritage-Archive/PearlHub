@@ -1,27 +1,11 @@
 import { serve } from "@hono/node-server";
 import { MemoryArtifactContentStore } from "./adapters/content-store.js";
+import { resolveServerAuthenticationConfig } from "./authentication-config.js";
 import { parseDevelopmentCorsOrigins } from "./http/development-cors.js";
-import { DevelopmentOnlyFakeAuthenticator } from "./http/testing/development-fake-authenticator.js";
 import { createPostgresRuntime, requireDatabaseUrl } from "./runtime.js";
 
 const environment = process.env.NODE_ENV ?? "development";
-if (environment === "production") {
-  throw new Error("No production authenticator is configured; refusing to start the HTTP server.");
-}
-if (process.env.PEARLHUB_AUTH_MODE !== "development-fake") {
-  throw new Error("Set PEARLHUB_AUTH_MODE=development-fake only for local development.");
-}
-
-const userId = process.env.DEV_AUTH_USER_ID;
-const token = process.env.DEV_AUTH_TOKEN;
-if (!userId || !token) {
-  throw new Error("DEV_AUTH_USER_ID and DEV_AUTH_TOKEN are required for development authentication.");
-}
-const secondUserId = process.env.DEV_AUTH_USER_ID_2;
-const secondToken = process.env.DEV_AUTH_TOKEN_2;
-if (Boolean(secondUserId) !== Boolean(secondToken)) {
-  throw new Error("DEV_AUTH_USER_ID_2 and DEV_AUTH_TOKEN_2 must be configured together.");
-}
+const authentication = resolveServerAuthenticationConfig(process.env);
 
 const portText = process.env.PORT ?? "8080";
 const port = Number(portText);
@@ -35,11 +19,7 @@ const corsOrigins = environment === "development"
 
 const runtime = await createPostgresRuntime({
   databaseUrl: requireDatabaseUrl(),
-  authenticator: new DevelopmentOnlyFakeAuthenticator(
-    userId,
-    token,
-    secondUserId && secondToken ? [{ userId: secondUserId, token: secondToken }] : [],
-  ),
+  ...authentication,
   contentStore: new MemoryArtifactContentStore(),
   ...(corsOrigins === undefined ? {} : { corsOrigins }),
 });

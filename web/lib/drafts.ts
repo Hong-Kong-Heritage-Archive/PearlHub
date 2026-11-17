@@ -155,42 +155,39 @@ export class DraftRequestError extends Error {
   }
 }
 
-export async function createDraft(input: DraftInput, token: string, signal?: AbortSignal): Promise<Draft> {
-  const response = await request("/drafts", "POST", input, token, signal);
+export async function createDraft(input: DraftInput, signal?: AbortSignal): Promise<Draft> {
+  const response = await request("/drafts", "POST", input, signal);
   return readDraft(response);
 }
 
 export async function createForkDraft(
   artifactId: string,
   input: { sourceVersion: string; name: string; slug: string; visibility: ArtifactVisibility },
-  token: string,
 ): Promise<Draft> {
-  return readDraft(await request(`/artifacts/${encodeURIComponent(artifactId)}/fork`, "POST", input, token));
+  return readDraft(await request(`/artifacts/${encodeURIComponent(artifactId)}/fork`, "POST", input));
 }
 
 export async function createCloneDraft(
   artifactId: string,
   input: { sourceVersion: string; name: string; slug: string; visibility: ArtifactVisibility },
-  token: string,
 ): Promise<Draft> {
-  return readDraft(await request(`/artifacts/${encodeURIComponent(artifactId)}/clone`, "POST", input, token));
+  return readDraft(await request(`/artifacts/${encodeURIComponent(artifactId)}/clone`, "POST", input));
 }
 
 export async function createImportDraft(
   input:
     | { sourceType: "pasted"; name: string; slug: string; visibility: ArtifactVisibility; content: string }
     | { sourceType: "github"; name: string; slug: string; visibility: ArtifactVisibility; sourceUrl: string },
-  token: string,
 ): Promise<Draft> {
-  return readDraft(await request("/imports/github", "POST", input, token));
+  return readDraft(await request("/imports/github", "POST", input));
 }
 
-export async function getDraft(draftId: string, token: string, signal?: AbortSignal): Promise<Draft> {
-  return readDraft(await request(`/drafts/${encodeURIComponent(draftId)}`, "GET", undefined, token, signal));
+export async function getDraft(draftId: string, signal?: AbortSignal): Promise<Draft> {
+  return readDraft(await request(`/drafts/${encodeURIComponent(draftId)}`, "GET", undefined, signal));
 }
 
-export async function listDrafts(token: string, signal?: AbortSignal): Promise<DraftSummary[]> {
-  const response = await request("/drafts", "GET", undefined, token, signal);
+export async function listDrafts(signal?: AbortSignal): Promise<DraftSummary[]> {
+  const response = await request("/drafts", "GET", undefined, signal);
   let payload: unknown;
   try {
     payload = await response.json();
@@ -203,28 +200,28 @@ export async function listDrafts(token: string, signal?: AbortSignal): Promise<D
   return payload;
 }
 
-export async function updateDraft(draft: DraftInput & { revision: number; id: string }, token: string, signal?: AbortSignal): Promise<Draft> {
+export async function updateDraft(draft: DraftInput & { revision: number; id: string }, signal?: AbortSignal): Promise<Draft> {
   const { id, ...body } = draft;
-  return readDraft(await request(`/drafts/${encodeURIComponent(id)}`, "PUT", body, token, signal));
+  return readDraft(await request(`/drafts/${encodeURIComponent(id)}`, "PUT", body, signal));
 }
 
-export async function discardDraft(draft: Pick<Draft, "id" | "revision">, token: string): Promise<void> {
-  const response = await request(`/drafts/${encodeURIComponent(draft.id)}?revision=${draft.revision}`, "DELETE", undefined, token);
+export async function discardDraft(draft: Pick<Draft, "id" | "revision">): Promise<void> {
+  const response = await request(`/drafts/${encodeURIComponent(draft.id)}?revision=${draft.revision}`, "DELETE", undefined);
   if (response.status !== 204) throw await readError(response);
 }
 
-export async function tombstoneArtifact(artifactId: string, token: string): Promise<void> {
-  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}`, "DELETE", undefined, token);
+export async function tombstoneArtifact(artifactId: string): Promise<void> {
+  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}`, "DELETE", undefined);
   if (response.status !== 204) throw await readError(response);
 }
 
-export async function publishDraft(draft: Pick<Draft, "id" | "revision">, token: string): Promise<PublishedVersion> {
-  const response = await request(`/drafts/${encodeURIComponent(draft.id)}/publish`, "POST", { revision: draft.revision }, token);
+export async function publishDraft(draft: Pick<Draft, "id" | "revision">): Promise<PublishedVersion> {
+  const response = await request(`/drafts/${encodeURIComponent(draft.id)}/publish`, "POST", { revision: draft.revision });
   return readPublishedVersion(response);
 }
 
-export async function listVersions(artifactId: string, token?: string): Promise<PublishedVersion[]> {
-  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}/versions`, "GET", undefined, token);
+export async function listVersions(artifactId: string): Promise<PublishedVersion[]> {
+  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}/versions`, "GET", undefined);
   let payload: unknown;
   try {
     payload = await response.json();
@@ -240,14 +237,12 @@ export async function listVersions(artifactId: string, token?: string): Promise<
 export async function getPublishedVersion(
   artifactId: string,
   version: string,
-  token?: string,
   signal?: AbortSignal,
 ): Promise<PublishedVersion> {
   return readPublishedVersion(await request(
     `/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}`,
     "GET",
     undefined,
-    token,
     signal,
   ));
 }
@@ -255,14 +250,12 @@ export async function getPublishedVersion(
 export async function getVersionDependencies(
   artifactId: string,
   version: string,
-  token?: string,
   signal?: AbortSignal,
 ): Promise<ArtifactVersionDependencies> {
   const response = await request(
     `/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/dependencies`,
     "GET",
     undefined,
-    token,
     signal,
   );
   return readArtifactVersionDependencies(response);
@@ -271,13 +264,11 @@ export async function getVersionDependencies(
 export async function getVersionCompatibilityReports(
   artifactId: string,
   version: string,
-  token?: string,
 ): Promise<CompatibilityReport[]> {
   const response = await request(
     `/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/compatibility`,
     "GET",
     undefined,
-    token,
   );
   return readCompatibilityReports(response);
 }
@@ -285,26 +276,24 @@ export async function getVersionCompatibilityReports(
 export async function resolveVersionDependencies(
   artifactId: string,
   version: string,
-  token: string,
   signal?: AbortSignal,
 ): Promise<DependencyResolutionRun> {
   const response = await request(
     `/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/dependency-resolutions`,
     "POST",
     undefined,
-    token,
     signal,
   );
   return readDependencyResolutionRun(response);
 }
 
-export async function getArtifact(artifactId: string, token?: string, signal?: AbortSignal): Promise<ArtifactMetadata> {
-  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}`, "GET", undefined, token, signal);
+export async function getArtifact(artifactId: string, signal?: AbortSignal): Promise<ArtifactMetadata> {
+  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}`, "GET", undefined, signal);
   return readArtifactMetadata(response);
 }
 
-export async function getCurrentUser(token: string, signal?: AbortSignal): Promise<CurrentUser> {
-  const response = await request("/me", "GET", undefined, token, signal);
+export async function getCurrentUser(signal?: AbortSignal): Promise<CurrentUser> {
+  const response = await request("/me", "GET", undefined, signal);
   let payload: unknown;
   try {
     payload = await response.json();
@@ -320,20 +309,18 @@ export async function getCurrentUser(token: string, signal?: AbortSignal): Promi
 export async function updateArtifactVisibility(
   artifactId: string,
   visibility: ArtifactVisibility,
-  token: string,
   signal?: AbortSignal,
 ): Promise<ArtifactMetadata> {
   return readArtifactMetadata(await request(
     `/artifacts/${encodeURIComponent(artifactId)}`,
     "PATCH",
     { visibility },
-    token,
     signal,
   ));
 }
 
-export async function getArtifactLineage(artifactId: string, token?: string, signal?: AbortSignal): Promise<ArtifactLineage> {
-  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}/lineage`, "GET", undefined, token, signal);
+export async function getArtifactLineage(artifactId: string, signal?: AbortSignal): Promise<ArtifactLineage> {
+  const response = await request(`/artifacts/${encodeURIComponent(artifactId)}/lineage`, "GET", undefined, signal);
   let payload: unknown;
   try {
     payload = await response.json();
@@ -346,14 +333,21 @@ export async function getArtifactLineage(artifactId: string, token?: string, sig
   return payload;
 }
 
-export async function createWorkCopy(artifactId: string, version: string, token: string): Promise<Draft> {
-  return readDraft(await request(`/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/work-copy`, "POST", undefined, token));
+export async function createWorkCopy(artifactId: string, version: string): Promise<Draft> {
+  return readDraft(await request(`/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(version)}/work-copy`, "POST", undefined));
 }
 
-async function request(path: string, method: string, body: unknown, token?: string, signal?: AbortSignal): Promise<Response> {
+async function request(path: string, method: string, body: unknown, signal?: AbortSignal): Promise<Response> {
   const url = buildApiUrl(path);
   const headers = new Headers({ Accept: "application/json" });
-  if (token?.trim()) headers.set("Authorization", `Bearer ${token.trim()}`);
+  let token: string | null;
+  try {
+    token = await getCurrentFirebaseIdToken();
+  } catch {
+    notifyFirebaseAuthenticationRejected();
+    throw new DraftRequestError("Your Firebase session could not be refreshed. Sign in again.", 401, "UNAUTHENTICATED");
+  }
+  if (token) headers.set("Authorization", `Bearer ${token}`);
   if (body !== undefined) headers.set("Content-Type", "application/json");
   let response: Response;
   try {
@@ -367,6 +361,7 @@ async function request(path: string, method: string, body: unknown, token?: stri
     if (error instanceof Error && error.name === "AbortError") throw error;
     throw new DraftRequestError("Could not reach the PearlHub API. Check your connection and try again.", 0, "NETWORK_ERROR");
   }
+  if (response.status === 401) notifyFirebaseAuthenticationRejected();
   if (!response.ok) throw await readError(response);
   return response;
 }
@@ -683,3 +678,4 @@ function isDateTime(value: unknown): value is string {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
+import { getCurrentFirebaseIdToken, notifyFirebaseAuthenticationRejected } from "./firebase-auth";

@@ -5,7 +5,6 @@ import { useState } from "react";
 import { discardDraft, DraftRequestError, listDrafts, type DraftSummary } from "../lib/drafts";
 
 export default function MyDrafts() {
-  const [token, setToken] = useState("");
   const [drafts, setDrafts] = useState<DraftSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -14,15 +13,11 @@ export default function MyDrafts() {
   const [deletingDraftId, setDeletingDraftId] = useState<string | null>(null);
 
   async function load() {
-    if (!token.trim()) {
-      setError("Enter a developer bearer token to find your Drafts.");
-      return;
-    }
     setLoading(true);
     setError(null);
     setStatus(null);
     try {
-      setDrafts(await listDrafts(token));
+      setDrafts(await listDrafts());
     } catch (caught: unknown) {
       setError(caught instanceof DraftRequestError ? caught.message : "Could not load your Drafts.");
     } finally {
@@ -31,15 +26,11 @@ export default function MyDrafts() {
   }
 
   async function deleteDraft(draft: DraftSummary) {
-    if (!token.trim()) {
-      setError("Enter a developer bearer token to delete your Draft.");
-      return;
-    }
     setDeletingDraftId(draft.id);
     setError(null);
     setStatus(null);
     try {
-      await discardDraft(draft, token);
+      await discardDraft(draft);
       setDrafts((current) => current?.filter(({ id }) => id !== draft.id) ?? null);
       setConfirmingDraftId(null);
       setStatus(`Draft "${draft.name}" was deleted.`);
@@ -69,11 +60,7 @@ export default function MyDrafts() {
       <section className="create-panel" aria-labelledby="draft-list-title">
         <h2 id="draft-list-title">Your unpublished Drafts</h2>
         <div className="create-form">
-          <label className="field" htmlFor="drafts-token">
-            <span>Developer bearer token <span className="required-mark">(required)</span></span>
-            <input id="drafts-token" type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} disabled={loading} />
-            <span className="field-help">Temporary in-memory token only; it is never saved in browser storage.</span>
-          </label>
+          <p className="field-help">Sign in above to load and manage your private Drafts.</p>
           <div className="draft-editor-actions">
             <button className="primary-button" type="button" onClick={load} disabled={loading}>
               {loading ? "Loading Drafts…" : "Load My Drafts"}

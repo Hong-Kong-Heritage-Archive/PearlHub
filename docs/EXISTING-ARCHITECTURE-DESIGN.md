@@ -1,8 +1,8 @@
 # PearlHub — Existing Architecture Design (As-Is)
 
-**Reviewed:** 2026-11-08  
-**Branch:** `main`  
-**Reviewed HEAD:** `7547bdb594f3263b42e4a6e4f9b4efa28e52f9d9`  
+**Baseline reviewed:** 2026-11-08
+**Current implementation branch:** `firebase-auth`
+**Implementation base HEAD:** `43098fffd6e9596fad77db203f4c1f8d1b155d7d` (Firebase changes are in the working tree)
 **Purpose:** Record the architecture that exists in the repository today, not a proposed redesign.
 
 > Checked-in source, SQL migrations, OpenAPI, tests and accepted decisions are authoritative. Refresh this document when implementation changes.
@@ -178,18 +178,16 @@ Compatibility responses require `availability: available | redacted`. Redacted r
 Implemented:
 - `Authenticator` in `src/http/authentication.ts` accepts request headers and returns an `AuthenticatedPrincipal` containing internal `userId`, or null.
 - Protected handlers require a principal.
-- Development-only fake authenticator supports local identities.
+- `FirebaseAuthenticator` verifies Firebase ID tokens through the Firebase Admin SDK using the configured expected project ID. The Admin SDK uses Application Default Credentials and validates access to them at startup.
+- `PEARLHUB_AUTH_MODE=firebase` selects Firebase explicitly; `FIREBASE_PROJECT_ID` is required. The development fake authenticator is available only in explicit non-production mode; production never falls back to it.
 - `user_identities` stores provider-neutral `(provider, subject)` mapping to internal `users.id`.
+- Firebase UID is stored as `subject` under stable provider key `firebase`. A missing identity receives a new internal user and mapping in one transaction; uniqueness conflicts resolve to the winning mapping. Email is not used for identity resolution or account linking, and legacy `users.external_subject` values remain untouched.
 - Internal `users.id` remains authoritative.
+- Firebase Admin checks ID-token revocation and disabled-user status on each request (`verifyIdToken(token, true)`). This adds an Auth-service lookup and latency; if that check cannot be completed, authentication fails closed.
 
-Not implemented:
-- No Firebase Admin SDK token verifier / Firebase `Authenticator` adapter is present.
-- `src/server.ts` explicitly refuses `NODE_ENV=production`.
-- The only server auth mode is `PEARLHUB_AUTH_MODE=development-fake`.
-- Frontend bearer-token field is a temporary developer tool, not login.
-- No production account-linking or verified legacy identity backfill flow exists.
-
-Firebase Authentication is the confirmed target provider, not an already completed integration. Legacy `users.external_subject` values must not be assigned a provider by guesswork or email matching.
+Not verified or provisioned:
+- Firebase project, enabled providers, production Application Default Credentials/service identity, IAM access, Cloud Run, Cloud SQL, Secret Manager and frontend hosting remain owner/deployment concerns.
+- No production account-linking or legacy identity backfill flow exists; neither is part of the current slice.
 
 ## 6. Frontend — current implementation
 
@@ -203,9 +201,9 @@ Firebase Authentication is the confirmed target provider, not an already complet
 - Visibility editor, My Drafts, Draft discard, work-copy and Artifact tombstone.
 - Loading, empty, validation, API error and retry states.
 
-The UI calls the configured API origin directly. The temporary bearer token is held in component memory, not browser storage. The UI does not decode the token; the API owns authentication and authorization.
+The UI calls the configured API origin directly. Firebase Authentication supports Google and email/password, observes Firebase ID-token changes, and uses Firebase SDK `browserLocalPersistence`. Each API request obtains the current token from the SDK; the UI neither manually persists nor renders raw tokens. API 401 responses clear the frontend session and require sign-in again. Backend ownership and authorization remain authoritative.
 
-Frontend gaps: no Firebase login/session flow; no Version-level dependency/compatibility views documented as implemented; no complete user-facing Playground; no production frontend hosting/pipeline evidenced in the repository.
+Frontend gaps: Firebase project configuration and live end-to-end sign-in are not verified; no production frontend hosting/pipeline is evidenced in the repository.
 
 ## 7. Local development and CI
 
@@ -228,11 +226,11 @@ GitHub Actions checks backend build/unit, PostgreSQL integration and frontend ch
 |---|---|---|
 | Backend runtime | Google Cloud Run | Not deployed/configured |
 | Database | Cloud SQL for PostgreSQL | Local PostgreSQL Compose only |
-| Authentication | Firebase Authentication | Identity mapping table exists; token verification and UI login absent |
+| Authentication | Firebase Authentication | Local Firebase adapter and UI exist; production project/identity configuration is unverified |
 | Frontend | Next.js 16 | Local app exists; production hosting/pipeline absent |
 | Content store | Provider-neutral port | In-memory adapter; no GCS adapter evidenced |
 
-No production Dockerfile, Cloud Run config, Cloud SQL connection setup, Firebase client/server config, Secret Manager wiring or production deployment workflow was found in the reviewed tree. Verify GCP project, IAM, Firebase project, Cloud SQL instance, Artifact Registry and deployment access; do not infer resource existence from technology selection.
+No production Dockerfile, Cloud Run config, Cloud SQL connection setup, production Firebase project/IAM configuration, Secret Manager wiring or production deployment workflow was found in the reviewed tree. Verify GCP project, IAM, Firebase project, Cloud SQL instance, Artifact Registry and deployment access; do not infer resource existence from technology selection.
 
 ## 9. Constraints for future changes
 

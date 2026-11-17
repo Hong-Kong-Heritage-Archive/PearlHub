@@ -102,6 +102,57 @@ a {
   background: var(--mint);
 }
 
+.auth-panel {
+  width: min(100% - 40px, 1040px);
+  margin: 16px auto 0;
+  padding: 14px 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.auth-signed-in,
+.auth-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.auth-signed-in p {
+  margin: 0;
+}
+
+.auth-signed-out,
+.auth-email-form {
+  display: grid;
+  gap: 12px;
+}
+
+.auth-email-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+}
+
+.auth-actions {
+  grid-column: 1 / -1;
+}
+
+.auth-mode-button {
+  border: 0;
+  padding: 8px 0;
+  color: var(--green-dark);
+  background: transparent;
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+@media (max-width: 640px) {
+  .auth-email-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 .site-nav .nav-create-link {
   border: 1px solid var(--green);
 }

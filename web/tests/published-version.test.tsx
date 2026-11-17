@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import PublishedVersionView from "../components/published-version";
+import { getCurrentFirebaseIdToken } from "../lib/firebase-auth";
 
 const routerPush = vi.hoisted(() => vi.fn());
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush }) }));
@@ -71,7 +72,6 @@ describe("published version view", () => {
     vi.stubGlobal("fetch", mock);
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
     render(<PublishedVersionView artifactId="artifact-1" version="0.1.0" />);
-    fireEvent.change(screen.getByLabelText(/bearer token/), { target: { value: "owner-token" } });
     fireEvent.click(screen.getByRole("button", { name: "Load published version" }));
 
     expect(await screen.findByRole("heading", { name: "Pearl — 0.1.0" })).toBeInTheDocument();
@@ -120,7 +120,6 @@ describe("published version view", () => {
     vi.stubGlobal("fetch", mock);
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
     render(<PublishedVersionView artifactId="source-id" version="2.3.1" />);
-    fireEvent.change(screen.getByLabelText(/bearer token/i), { target: { value: "cloner-token" } });
     fireEvent.click(screen.getByRole("button", { name: "Load published version" }));
     expect(await screen.findByRole("heading", { name: "Source — 2.3.1" })).toBeInTheDocument();
     await screen.findByText("No compatibility reports are available for this version.");
@@ -162,7 +161,6 @@ describe("published version view", () => {
     vi.stubGlobal("fetch", mock);
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
     render(<PublishedVersionView artifactId="source-id" version="1.0.0" />);
-    fireEvent.change(screen.getByLabelText(/bearer token/i), { target: { value: "cloner-token" } });
     fireEvent.click(screen.getByRole("button", { name: "Load published version" }));
     expect(await screen.findByRole("heading", { name: "Source — 1.0.0" })).toBeInTheDocument();
     await screen.findByText("No compatibility reports are available for this version.");
@@ -273,8 +271,8 @@ describe("published version view", () => {
     });
     vi.stubGlobal("fetch", fetch);
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
+    vi.mocked(getCurrentFirebaseIdToken).mockResolvedValue("owner-token");
     render(<PublishedVersionView artifactId="artifact-1" version="0.1.0" />);
-    fireEvent.change(screen.getByLabelText(/bearer token/), { target: { value: "owner-token" } });
     fireEvent.click(screen.getByRole("button", { name: "Load published version" }));
     expect(await screen.findByRole("heading", { name: "Pearl — 0.1.0" })).toBeInTheDocument();
     await screen.findByText("No compatibility reports are available for this version.");

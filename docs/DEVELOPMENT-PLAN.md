@@ -149,8 +149,7 @@ The `web/` directory contains a Next.js 16 App Router + TypeScript application w
 
 Current limitations documented in `web/README.md`:
 
-- Authentication is a temporary development-only bearer-token input, not a production login flow.
-- Firebase Authentication is not integrated into the UI.
+- Firebase Authentication now has a local implementation for Google and email/password sign-in, Firebase ID-token verification, and internal identity mapping. A live Firebase project and end-to-end sign-in are not yet verified.
 - Production deployment and target-environment smoke testing are not evidenced; GCP project and resource access remain to be verified.
 - The Playground is a developer ThinUI, not the eventual end-user UI. Provider chat availability, account requirements, context limits, and native interactive UI are controlled by each external provider.
 
@@ -168,7 +167,7 @@ Not yet evidenced in the repository:
 - Backend production Dockerfile / OCI image build definition.
 - Production Cloud Run service configuration and deployment workflow.
 - Cloud SQL instance provisioning, connectivity configuration and operational migration job.
-- Firebase project/client configuration and production token-verification adapter.
+- Firebase project/client configuration, production service identity/IAM setup and live token-verification evidence.
 - Secret Manager integration and production secret/IAM setup.
 - Production frontend hosting/deployment decision and pipeline.
 - Deployed environment smoke tests, monitoring, alerting and backup/restore runbook.
@@ -228,13 +227,16 @@ The next development increment is a coordinated catch-up against the Backend cap
 #### A3. Production sign-in experience
 
 - Replace the developer-only bearer-token entry as the normal user experience with Firebase Authentication.
-- Support the agreed Firebase sign-in provider(s); do not assume a provider list beyond the project decision.
+- The project owner confirmed Google and email/password sign-in; do not enable other providers without a separate decision.
 - Keep the Firebase client SDK in the frontend boundary.
 - Send Firebase ID tokens as bearer tokens to the PearlHub API.
 - Keep internal PearlHub `users.id` as the authoritative owner identity.
 - Do not use email as an automatic account-linking key.
 - Preserve the provider-neutral `(provider, subject)` identity mapping.
 - Retain the development fake authenticator only for explicitly local development; it must never be a production fallback.
+- Use Firebase SDK local persistence, retrieve the current ID token for each API request, and sign out after an API 401. Raw ID tokens are not manually persisted or rendered.
+
+**Local implementation status:** Frontend sign-in/session UI and backend token verification/identity mapping are implemented on the feature branch. Production Firebase project configuration and live end-to-end verification remain pending.
 
 **Acceptance:**
 - Sign-in, sign-out, token refresh/expiry and unauthenticated UI states work.
@@ -303,6 +305,8 @@ The next development increment is a coordinated catch-up against the Backend cap
 - Preserve existing internal user IDs and do not guess a provider for legacy `external_subject` records.
 - Keep authorization in Application/Domain policy, not in Firebase-specific code.
 - Add tests for invalid/expired tokens, unknown identity, existing identity, duplicate mapping and provider isolation.
+
+**Local implementation status:** Firebase Admin verification uses the configured expected project and validates Application Default Credentials at startup; the Firebase UID maps under provider key `firebase`. First-use identity creation is transactional and concurrency-safe. Revocation and disabled-user checks run on each request, adding a Firebase Auth lookup and latency; authentication fails closed if the check cannot complete.
 
 **Acceptance:**
 - A valid Firebase ID token resolves to the correct internal PearlHub user.
@@ -435,21 +439,35 @@ Every hand-off should state:
 
 **Backend:** Core content-management and discovery foundation is implemented; dependency resolution and compatibility read paths are now present. Continue with small, reviewed increments rather than restarting or regenerating the backend.
 
-**Frontend:** Existing Thin UI now includes read-only Version dependency history and compatibility views aligned with the latest redaction contract. Firebase Authentication has not been integrated; the developer-only bearer-token experience remains.
+**Frontend:** Existing Thin UI includes read-only Version dependency history and compatibility views aligned with the latest redaction contract. Firebase Google and email/password sign-in, SDK-managed local session persistence and current-token API requests are implemented locally; live project configuration and end-to-end sign-in remain unverified.
+
+**Backend authentication:** Firebase ID-token verification, explicit auth-mode selection, provider-neutral Firebase UID mapping, and transactional just-in-time internal-user creation are implemented locally. The development fake remains local-only, and production does not fall back to it. Revocation checks are disabled on each request; see the backend setup guide for the operational tradeoff.
 
 **Deployment:** Local PostgreSQL and CI are in place. Production GCP deployment is not yet evidenced. GCP + Firebase Authentication + Cloud SQL for PostgreSQL is the confirmed direction; resource access and provisioning must be verified.
 
+### Firebase / GCP readiness inventory
+
+| Item | Status |
+|---|---|
+| Sign-in providers | Owner confirmed Google and Email/Password; Firebase console enablement is unverified |
+| Firebase project ID and Web app configuration | Pending owner confirmation; no values are recorded in the repository |
+| Local/production Application Default Credentials and service identity | Not verified |
+| GCP project and required IAM access | Pending verification |
+| Cloud SQL instance, connectivity and migration operation | Pending verification |
+| Cloud Run service, Artifact Registry and Secret Manager | Pending verification |
+| Next.js-compatible production frontend hosting and exact origins | Pending decision/verification |
+
 **Playground:** The developer ThinUI prepares an immutable, version-pinned Launch Package and opens Gemini, ChatGPT, Claude or Grok on explicit click, with copy/download fallback. Claude and Grok use best-effort `q` prompt links based on user-reported signed-in manual tests; ChatGPT's `prompt` candidate remains disabled. Signed-out → sign-in → return behavior is not yet verified. No provider API key is collected, no provider conversation is hosted, and no new run-history persistence is introduced. Native provider UI and model context limits are outside PearlHub's control.
 
-### Next increment — Authentication and deployment readiness
+### Next increment — Deployment readiness
 
-The dependency/compatibility UI and Playground slices are locally implemented. Continue with the remaining catch-up work:
+The dependency/compatibility UI, Playground and local Firebase Authentication implementation are in place. Complete remaining validation, then continue with deployment readiness:
 
-1. Verify GCP project, Firebase and Cloud SQL access; record resource/IAM status and enabled sign-in providers.
-2. Implement Firebase Authentication end to end (frontend token acquisition + backend verification + internal identity mapping), preserving the production fail-closed guard until verified.
-3. Containerize and deploy the backend to Cloud Run with Cloud SQL connectivity after resource access is confirmed.
+1. Finish frontend/backend test suites and review authentication security; run PostgreSQL integration tests when `TEST_DATABASE_URL` is available.
+2. Verify GCP project, Firebase and Cloud SQL access; record resource/IAM status and confirm the selected providers are enabled.
+3. Containerize and deploy the backend to Cloud Run with Cloud SQL connectivity only after resource access is confirmed.
 4. Deploy the frontend to the selected GCP hosting arrangement and configure API origin/CORS.
-5. Validate the External AI Playground in the intended browser/provider accounts; provider sign-in, availability and native UI remain provider-owned.
+5. Validate Firebase sign-in and the External AI Playground in the intended environment; provider sign-in, availability and native UI remain provider-owned.
 6. Run end-to-end smoke tests and update this plan with actual deployed URLs/resource references (never secrets).
 
 ### External AI Playground refactor
@@ -473,5 +491,6 @@ The ordering above is a practical dependency order for the catch-up work, not a 
 | 2026-11-10 | Working tree | Added Version-level dependency history and compatibility views with strict response validation and redaction handling. Frontend tests, lint, typecheck, production build, backend build, and focused OpenAPI/HTTP tests passed; production deployment remains unverified. |
 | 2026-11-15 | `d89b6ce` + working tree | Replaced the one-shot Gemini API Playground with an external-provider Launch Package flow. Backend build/unit tests and frontend lint/typecheck/tests/build pass; PostgreSQL integration remains blocked by missing `TEST_DATABASE_URL`. |
 | 2026-11-16 | `b7a7444` + working tree | ChatGPT `prompt` remains disabled after signed-out navigation failed. After the user reported signed-in manual testing at 23:35 AEDT, enabled Claude/Grok `q`; sign-in-return results remain unverified. Frontend lint/typecheck, all 63 tests, and production build pass; baseline CI #35 passed on `b7a7444`, but the updated worktree still needs CI. Do not mark the slice complete until remaining QA and CI pass. No API or database changes. |
+| Working tree | `firebase-auth` | Added Google and email/password Firebase sign-in, Firebase ID-token verification with revocation/disabled-user checks, transactional UID identity mapping, and removal of developer token inputs. Backend build and 192 unit tests pass; frontend lint, typecheck, 67 tests and Next.js 16.4.6 production build pass. Backend and frontend dependency audits report zero vulnerabilities; Firebase's unused Firestore gRPC transport is pinned to patched version 1.13.6. PostgreSQL integration is blocked by missing `TEST_DATABASE_URL`; production Firebase/GCP configuration and deployment are unverified. |
 
 Update this log after each accepted vertical slice. Do not mark a task complete based only on code being present; record the relevant test and deployment evidence.
