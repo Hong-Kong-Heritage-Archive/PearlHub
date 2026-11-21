@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getVersionCompatibilityReports, getVersionDependencies } from "../lib/drafts";
+import { getCurrentFirebaseIdToken } from "../lib/firebase-auth";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -36,12 +37,13 @@ describe("Artifact Version read API", () => {
     });
     vi.stubGlobal("fetch", fetch);
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
+    vi.mocked(getCurrentFirebaseIdToken).mockResolvedValue("firebase-id-token");
 
-    await expect(getVersionDependencies("source-artifact", "1.2.3", "temporary-token")).resolves.toEqual(dependencies);
+    await expect(getVersionDependencies("source-artifact", "1.2.3")).resolves.toEqual(dependencies);
     const [url, options] = fetch.mock.calls[0]!;
     expect(new URL(url instanceof Request ? url.url : String(url)).pathname)
       .toBe("/api/v1/artifacts/source-artifact/versions/1.2.3/dependencies");
-    expect(new Headers(options?.headers).get("authorization")).toBe("Bearer temporary-token");
+    expect(new Headers(options?.headers).get("authorization")).toBe("Bearer firebase-id-token");
   });
 
   it("accepts an empty dependency list and rejects malformed dependency data", async () => {

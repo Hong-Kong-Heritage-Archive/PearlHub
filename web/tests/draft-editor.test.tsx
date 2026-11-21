@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import DraftEditor from "../components/draft-editor";
+import { getCurrentFirebaseIdToken } from "../lib/firebase-auth";
 
 const routerPush = vi.hoisted(() => vi.fn());
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush }) }));
@@ -57,8 +58,8 @@ function installFetch() {
 describe("Draft editor", () => {
   it("creates, edits, previews, then publishes with one Publish API request", async () => {
     const { mock, requests } = installFetch();
+    vi.mocked(getCurrentFirebaseIdToken).mockResolvedValue("temporary-token");
     render(<DraftEditor />);
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "temporary-token" } });
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: "Pearl" } });
     fireEvent.change(screen.getByLabelText(/^Slug/), { target: { value: "pearl" } });
     fireEvent.change(screen.getByLabelText(/Instructions/), { target: { value: "Instructions" } });
@@ -112,12 +113,10 @@ describe("Draft editor", () => {
     vi.stubGlobal("fetch", fetch);
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
     render(<DraftEditor draftId="draft-123" />);
-    fireEvent.change(screen.getByLabelText(/Developer bearer token/), { target: { value: "token" } });
     fireEvent.click(screen.getByRole("button", { name: "Load Draft" }));
     fireEvent.change(await screen.findByLabelText(/Instructions/), { target: { value: "Unsaved change" } });
     fireEvent.click(screen.getByRole("button", { name: "Save Draft" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("changed elsewhere");
     expect(screen.getByLabelText(/Instructions/)).toHaveValue("Unsaved change");
-    expect(screen.getByLabelText(/Developer bearer token/)).toHaveValue("token");
   });
 });

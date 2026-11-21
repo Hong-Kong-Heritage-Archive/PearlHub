@@ -12,6 +12,7 @@ import {
   type ArtifactVisibility,
   type DiscoveryFilters,
 } from "../lib/discovery";
+import { useFirebaseSession } from "./firebase-auth-provider";
 
 const defaultFilters: DiscoveryFilters = {
   q: "",
@@ -46,10 +47,9 @@ const initialState: DiscoveryState = {
 };
 
 export default function ArtifactDiscovery() {
+  const { status: authStatus, user: authUser } = useFirebaseSession();
   const [filters, setFilters] = useState(defaultFilters);
   const [state, setState] = useState(initialState);
-  const [tokenInput, setTokenInput] = useState("");
-  const [token, setToken] = useState("");
   const [tagDraft, setTagDraft] = useState("");
   const [tagError, setTagError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
@@ -68,7 +68,7 @@ export default function ArtifactDiscovery() {
     });
 
     const timeout = window.setTimeout(() => {
-      void requestArtifacts(filters, null, controller.signal, token)
+      void requestArtifacts(filters, null, controller.signal)
         .then((page) => {
           if (!controller.signal.aborted) setState(makeLoadedState(page));
         })
@@ -84,7 +84,7 @@ export default function ArtifactDiscovery() {
       loadMoreController.current?.abort();
       loadMoreController.current = null;
     };
-  }, [filters, retryCount, token]);
+  }, [authStatus, authUser?.uid, filters, retryCount]);
 
   function updateFilters(update: Partial<DiscoveryFilters>) {
     loadMoreController.current?.abort();
@@ -143,7 +143,7 @@ export default function ArtifactDiscovery() {
     loadMoreController.current = controller;
     setState((current) => ({ ...current, loadingMore: true, error: null, unavailable: false }));
     try {
-      const page = await requestArtifacts(filters, state.nextCursor, controller.signal, token);
+      const page = await requestArtifacts(filters, state.nextCursor, controller.signal);
       if (!controller.signal.aborted) setState((current) => appendPage(current, page));
     } catch (error: unknown) {
       if (!controller.signal.aborted) {
@@ -179,36 +179,14 @@ export default function ArtifactDiscovery() {
         </p>
       </section>
 
-      <section className="filter-panel" aria-label="Optional owner access">
-        <label className="field" htmlFor="discovery-token">
-          <span>Developer bearer token (optional)</span>
-          <input
-            id="discovery-token"
-            type="password"
-            autoComplete="off"
-            value={tokenInput}
-            onChange={(event) => setTokenInput(event.target.value)}
-            disabled={state.loading}
-          />
-          <span className="field-help">Enter your token to include your private Artifacts. Unlisted Artifacts require an explicit owner request. The token stays in memory and is sent only to the configured API.</span>
-        </label>
+      <section className="filter-panel" aria-label="Account-specific access">
+        <p className="field-help">Sign in above to include private Artifacts owned by your account. Visibility filters never grant access.</p>
         <div className="filter-actions">
           <button
             className="secondary-button"
             type="button"
-            onClick={() => setToken(tokenInput.trim())}
+            onClick={() => updateFilters({ visibility: "unlisted" })}
             disabled={state.loading}
-          >
-            Apply bearer token
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={() => {
-              setToken(tokenInput.trim());
-              updateFilters({ visibility: "unlisted" });
-            }}
-            disabled={state.loading || !tokenInput.trim()}
           >
             Show my unlisted Artifacts
           </button>
@@ -312,7 +290,7 @@ export default function ArtifactDiscovery() {
           </label>
         </div>
         <p className="field-help visibility-help">
-          Filters only narrow what the API allows you to see; they never grant access. Unlisted Artifacts are excluded by default and require your owner token plus the Unlisted filter.
+          Filters only narrow what the API allows you to see; they never grant access. Unlisted Artifacts are excluded by default and require owner access plus the Unlisted filter.
         </p>
         <div className="filter-actions">
           <button className="secondary-button" type="button" onClick={clearFilters}>Clear filters</button>

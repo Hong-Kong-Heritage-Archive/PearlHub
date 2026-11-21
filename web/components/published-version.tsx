@@ -11,7 +11,6 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
   const forkPending = useRef(false);
   const clonePending = useRef(false);
   const tombstonePending = useRef(false);
-  const [token, setToken] = useState("");
   const [published, setPublished] = useState<PublishedVersion | null>(null);
   const [versionDependencies, setVersionDependencies] = useState<ArtifactVersionDependencies | null>(null);
   const [compatibilityReports, setCompatibilityReports] = useState<CompatibilityReport[] | null>(null);
@@ -44,12 +43,12 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
     setCompatibilityError(null);
     setTombstoned(false);
     try {
-      setPublished(await getPublishedVersion(artifactId, version, token));
+      setPublished(await getPublishedVersion(artifactId, version));
       setDependenciesLoading(true);
       setCompatibilityLoading(true);
       const [dependenciesResult, compatibilityResult] = await Promise.allSettled([
-        getVersionDependencies(artifactId, version, token),
-        getVersionCompatibilityReports(artifactId, version, token),
+        getVersionDependencies(artifactId, version),
+        getVersionCompatibilityReports(artifactId, version),
       ]);
       if (dependenciesResult.status === "fulfilled") {
         setVersionDependencies(dependenciesResult.value);
@@ -72,15 +71,11 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
 
   async function tombstone() {
     if (tombstonePending.current) return;
-    if (!token.trim()) {
-      setError("Enter the Artifact owner's developer bearer token to tombstone this Artifact.");
-      return;
-    }
     tombstonePending.current = true;
     setTombstoning(true);
     setError(null);
     try {
-      await tombstoneArtifact(artifactId, token);
+      await tombstoneArtifact(artifactId);
       setPublished(null);
       setConfirmingTombstone(false);
       setTombstoned(true);
@@ -95,10 +90,6 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
   async function fork(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (forkPending.current) return;
-    if (!token.trim()) {
-      setError("Enter a developer bearer token to create a Fork Draft.");
-      return;
-    }
     forkPending.current = true;
     setForking(true);
     setError(null);
@@ -108,7 +99,7 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
         name: forkName.trim(),
         slug: forkSlug,
         visibility: forkVisibility,
-      }, token);
+      });
       router.push(`/draft/${encodeURIComponent(draft.id)}`);
     } catch (caught: unknown) {
       setError(caught instanceof DraftRequestError ? caught.message : "Could not create a Fork Draft.");
@@ -121,10 +112,6 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
   async function clone(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (clonePending.current) return;
-    if (!token.trim()) {
-      setError("Enter a developer bearer token to create a Clone Draft.");
-      return;
-    }
     clonePending.current = true;
     setCloning(true);
     setError(null);
@@ -134,7 +121,7 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
         name: cloneName.trim(),
         slug: cloneSlug,
         visibility: cloneVisibility,
-      }, token);
+      });
       router.push(`/draft/${encodeURIComponent(draft.id)}`);
     } catch (caught: unknown) {
       setError(caught instanceof DraftRequestError ? caught.message : "Could not create a Clone Draft.");
@@ -150,7 +137,7 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
     setLoading(true);
     setError(null);
     try {
-      const draft = await createWorkCopy(artifactId, version, token);
+      const draft = await createWorkCopy(artifactId, version);
       router.push(`/draft/${encodeURIComponent(draft.id)}`);
     } catch (caught: unknown) {
       setError(caught instanceof DraftRequestError ? caught.message : "Could not create a work-copy.");
@@ -172,11 +159,7 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
         <p className="intro-copy">Published content is read-only. Create a work-copy to make later edits.</p>
       </section>
       <section className="create-panel">
-        <label className="field" htmlFor="version-token">
-          <span>Developer bearer token (optional for public Artifacts)</span>
-          <input id="version-token" type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} />
-          <span className="field-help">Temporary in-memory token only; no login flow is available.</span>
-        </label>
+        <p className="field-help">Sign in above to manage your Artifacts or create Fork, Clone, and work-copy Drafts.</p>
         <button className="primary-button" type="button" onClick={load} disabled={loading || tombstoning}>{loading ? "Loading…" : "Load published version"}</button>
         {error && <p className="create-error" role="alert">{error}</p>}
         {tombstoned && (
@@ -333,7 +316,7 @@ export default function PublishedVersionView({ artifactId, version }: { artifact
 
 function getVersionReadError(error: unknown, resource: string): string {
   if (error instanceof DraftRequestError && error.status === 401) {
-    return `Authentication was rejected while loading ${resource}. Check the developer bearer token and retry.`;
+    return `Authentication was rejected while loading ${resource}. Sign in again and retry.`;
   }
   if (error instanceof DraftRequestError && error.status === 403) {
     return `You do not have permission to read ${resource}.`;

@@ -97,9 +97,48 @@ schema on completion.
 
 ## Run the API locally
 
-The local server requires a migrated database and explicitly opted-in development
-authentication. Provision the configured internal user once in the migrated
-application database:
+The server requires a migrated database and an explicit authentication mode.
+Choose one of the following local modes; neither is a production deployment.
+
+### Firebase sign-in
+
+Configure the Firebase Web app's public values in `web/.env.local` using
+`NEXT_PUBLIC_FIREBASE_API_KEY`, `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`,
+`NEXT_PUBLIC_FIREBASE_PROJECT_ID` and `NEXT_PUBLIC_FIREBASE_APP_ID`. These are
+public client configuration values, not server credentials. Enable Google and
+Email/Password in the Firebase Authentication project; the actual project's
+setup and provider enablement must be verified by its owner.
+
+Set up Application Default Credentials outside the repository, then start the
+backend in Firebase mode with the same project ID used by the web app:
+
+```sh
+gcloud auth application-default login
+PEARLHUB_AUTH_MODE=firebase FIREBASE_PROJECT_ID="$FIREBASE_PROJECT_ID" npm start
+```
+
+`FIREBASE_PROJECT_ID` must be supplied from the confirmed Firebase project
+configuration; do not commit it or any credential files. The Firebase Admin SDK
+uses ADC, not a checked-in service-account key, and obtains an ADC access token
+at startup so missing credentials fail before the server accepts requests. The
+server verifies ID tokens against this expected project and resolves the verified UID through
+`user_identities(provider, subject)` using provider key `firebase`. A first
+verified UID receives a new internal user and identity mapping transactionally;
+email is not used to find, link or merge accounts. Existing
+`users.external_subject` values remain untouched.
+
+The web client uses Firebase SDK `browserLocalPersistence`; it does not manually
+store raw ID tokens. API requests obtain the current ID token from the SDK.
+Backend verification checks token revocation and disabled-user status on every
+request (`verifyIdToken(token, true)`), which adds an Auth-service lookup and
+latency. If that check cannot complete, authentication fails closed. A 401
+clears the frontend session and requires sign-in again.
+
+### Development fake authentication
+
+Use the development fake only for local API/manual testing that does not use the
+Firebase browser sign-in UI. Provision the configured internal user once in the
+migrated application database:
 
 ```sh
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
@@ -108,8 +147,8 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
 
 Keep `PEARLHUB_AUTH_MODE=development-fake` and `DEV_AUTH_TOKEN` local-only. The
 development authenticator uses `DEV_AUTH_USER_ID` as the internal owner ID. The
-server refuses to start in production because production authentication is not
-implemented; it never enables fake authentication as a production fallback.
+server rejects this mode in production and never enables fake authentication as
+a fallback.
 For local owner/non-owner workflow checks, configure the optional pair
 `DEV_AUTH_USER_ID_2` and `DEV_AUTH_TOKEN_2` together, using a different token
 and an existing internal user ID. For example, provision the second local test
@@ -120,8 +159,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
   "INSERT INTO users (id) VALUES ('00000000-0000-4000-8000-000000000002') ON CONFLICT (id) DO NOTHING"
 ```
 
-Both credentials remain development-only. This does not add a production login
-flow; the server still refuses production startup without a real authenticator.
+Both credentials remain development-only.
 In development, CORS allows `http://localhost:3000` and `http://127.0.0.1:3000`
 by default for the Thin UI. Override this with `PEARLHUB_DEV_CORS_ORIGINS`, a
 comma-separated list of exact HTTP(S) origins without paths or credentials. An
@@ -140,8 +178,13 @@ The local endpoint is `http://localhost:8080/api/v1/artifacts`; pass
 `DEV_AUTH_USER_ID_2`, `DEV_AUTH_TOKEN_2`, and `PEARLHUB_DEV_CORS_ORIGINS`.
 Connection settings are never logged.
 
-Firebase Authentication remains a future provider adapter; the route receives only
-the provider-neutral verified internal user ID.
+The authentication adapter returns only the provider-neutral verified internal
+user ID. Runtime configuration uses `DATABASE_URL`, `PORT`,
+`PEARLHUB_AUTH_MODE`, and either Firebase `FIREBASE_PROJECT_ID` or the
+development-only `DEV_AUTH_USER_ID` and `DEV_AUTH_TOKEN` (optionally
+`DEV_AUTH_USER_ID_2` and `DEV_AUTH_TOKEN_2`). `PEARLHUB_DEV_CORS_ORIGINS`
+optionally overrides the development origin list. Connection settings and
+credentials are never logged.
 
 ## Stop PostgreSQL
 

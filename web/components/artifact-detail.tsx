@@ -13,10 +13,10 @@ import {
   type ArtifactMetadata,
   type CurrentUser,
 } from "../lib/drafts";
+import { useFirebaseSession } from "./firebase-auth-provider";
 
 interface DetailState {
   artifactId: string | null;
-  token: string;
   artifact: ArtifactMetadata | null;
   lineage: ArtifactLineage | null;
   error: string | null;
@@ -25,7 +25,6 @@ interface DetailState {
 
 const initialState: DetailState = {
   artifactId: null,
-  token: "",
   artifact: null,
   lineage: null,
   error: null,
@@ -35,27 +34,25 @@ const initialState: DetailState = {
 const visibilityOptions: ArtifactVisibility[] = ["private", "unlisted", "public"];
 
 export default function ArtifactDetail({ artifactId }: { artifactId: string }) {
-  const [tokenInput, setTokenInput] = useState("");
-  const [token, setToken] = useState("");
   const [retryCount, setRetryCount] = useState(0);
-  const [identityRetryCount, setIdentityRetryCount] = useState(0);
-  const [currentUser, setCurrentUser] = useState<(CurrentUser & { token: string }) | null>(null);
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [identityLoading, setIdentityLoading] = useState(false);
   const [visibilitySelection, setVisibilitySelection] = useState<ArtifactVisibility>("private");
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [visibilityMessage, setVisibilityMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const saveController = useRef<AbortController | null>(null);
   const [state, setState] = useState(initialState);
+  const { status: authStatus, user: firebaseUser } = useFirebaseSession();
 
   useEffect(() => {
     const controller = new AbortController();
-    setState({ artifactId, token, artifact: null, lineage: null, error: null, loading: true });
+    setState({ artifactId, artifact: null, lineage: null, error: null, loading: true });
     void Promise.all([
-      getArtifact(artifactId, token, controller.signal),
-      getArtifactLineage(artifactId, token, controller.signal),
+      getArtifact(artifactId, controller.signal),
+      getArtifactLineage(artifactId, controller.signal),
     ]).then(([artifact, lineage]) => {
       if (!controller.signal.aborted) {
-        setState({ artifactId, token, artifact, lineage, error: null, loading: false });
+        setState({ artifactId, artifact, lineage, error: null, loading: false });
         setVisibilitySelection(artifact.visibility);
         setVisibilityMessage(null);
       }
@@ -63,7 +60,6 @@ export default function ArtifactDetail({ artifactId }: { artifactId: string }) {
       if (controller.signal.aborted) return;
       setState({
         artifactId,
-        token,
         artifact: null,
         lineage: null,
         error: getDetailError(error),
@@ -71,40 +67,38 @@ export default function ArtifactDetail({ artifactId }: { artifactId: string }) {
       });
     });
     return () => controller.abort();
-  }, [artifactId, retryCount, token]);
+  }, [artifactId, retryCount]);
 
   useEffect(() => {
     const controller = new AbortController();
     setCurrentUser(null);
-    if (!token) {
+    if (authStatus !== "signed-in" || !firebaseUser) {
       setIdentityLoading(false);
       return () => controller.abort();
     }
 
     setIdentityLoading(true);
-    void getCurrentUser(token, controller.signal).then((user) => {
-      if (!controller.signal.aborted) setCurrentUser({ ...user, token });
+    void getCurrentUser(controller.signal).then((user) => {
+      if (!controller.signal.aborted) setCurrentUser(user);
     }).catch(() => {
       if (!controller.signal.aborted) setCurrentUser(null);
     }).finally(() => {
       if (!controller.signal.aborted) setIdentityLoading(false);
     });
     return () => controller.abort();
-  }, [identityRetryCount, token]);
+  }, [authStatus, firebaseUser]);
 
-  useEffect(() => () => saveController.current?.abort(), [artifactId, token]);
+  useEffect(() => () => saveController.current?.abort(), [artifactId]);
 
-  const displayedArtifact = state.artifactId === artifactId && state.token === token ? state.artifact : null;
+  const displayedArtifact = state.artifactId === artifactId ? state.artifact : null;
   const detailLoading = displayedArtifact === null && state.error === null
-    || (state.artifactId === artifactId && state.token === token && state.loading);
-  const detailError = state.artifactId === artifactId && state.token === token ? state.error : null;
+    || (state.artifactId === artifactId && state.loading);
+  const detailError = state.artifactId === artifactId ? state.error : null;
   const canEditVisibility = displayedArtifact !== null
     && displayedArtifact.status === "active"
-    && token.length > 0
-    && tokenInput.trim() === token
+    && authStatus === "signed-in"
     && !identityLoading
-    && currentUser?.token === token
-    && currentUser.userId === displayedArtifact.ownerId;
+    && currentUser?.userId === displayedArtifact.ownerId;
 
   async function saveVisibility() {
     if (!canEditVisibility || !displayedArtifact) return;
@@ -113,9 +107,9 @@ export default function ArtifactDetail({ artifactId }: { artifactId: string }) {
     setVisibilitySaving(true);
     setVisibilityMessage(null);
     try {
-      const updated = await updateArtifactVisibility(displayedArtifact.id, visibilitySelection, token, controller.signal);
+      const updated = await updateArtifactVisibility(displayedArtifact.id, visibilitySelection, controller.signal);
       if (controller.signal.aborted) return;
-      setState((current) => current.artifactId === artifactId && current.token === token && current.artifact
+      setState((current) => current.artifactId === artifactId && current.artifact
         ? { ...current, artifact: updated }
         : current);
       setVisibilitySelection(updated.visibility);
@@ -148,41 +142,7 @@ export default function ArtifactDetail({ artifactId }: { artifactId: string }) {
       </section>
 
       <section className="create-panel" aria-label="Artifact access">
-        <label className="field" htmlFor="artifact-detail-token">
-          <span>Developer bearer token (optional for public Artifacts)</span>
-          <input
-            id="artifact-detail-token"
-            type="password"
-            autoComplete="off"
-            value={tokenInput}
-            onChange={(event) => {
-              const nextToken = event.target.value.trim();
-              setTokenInput(event.target.value);
-              if (nextToken !== token) {
-                setCurrentUser(null);
-                setIdentityLoading(false);
-                setVisibilityMessage(null);
-                if (token) setToken("");
-              }
-            }}
-          />
-          <span className="field-help">Temporary in-memory token only; no login flow is available.</span>
-        </label>
-        <button
-          className="secondary-button"
-          type="button"
-          disabled={state.loading && state.token === token}
-          onClick={() => {
-            const nextToken = tokenInput.trim();
-            setCurrentUser(null);
-            setIdentityLoading(Boolean(nextToken));
-            setVisibilityMessage(null);
-            setToken(nextToken);
-            setIdentityRetryCount((count) => count + 1);
-          }}
-        >
-          Load with token
-        </button>
+        <p className="field-help">Sign in above to load account-specific visibility and owner controls.</p>
       </section>
 
       {detailLoading && <p className="status-panel" role="status">Loading Artifact details…</p>}
@@ -291,7 +251,7 @@ function getDetailError(error: unknown): string {
 
 function getVisibilityError(error: unknown): string {
   if (error instanceof DraftRequestError) {
-    if (error.status === 401) return "Your bearer token could not be authenticated. Reload with a valid token and retry.";
+    if (error.status === 401) return "Your PearlHub session was rejected. Sign in again and retry.";
     if (error.status === 403) return "Only the Artifact owner can change visibility.";
     if (error.status === 410) return "This Artifact has been tombstoned and cannot be changed.";
     return error.message;

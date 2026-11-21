@@ -61,7 +61,6 @@ describe("Fork and Import Thin UI", () => {
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
     render(<PublishedVersionView artifactId="source-artifact" version="2.3.1" />);
 
-    fireEvent.change(screen.getByLabelText(/bearer token/i), { target: { value: "owner-token" } });
     fireEvent.click(screen.getByRole("button", { name: "Load published version" }));
     expect(await screen.findByRole("heading", { name: "Source Pearl — 2.3.1" })).toBeInTheDocument();
     await screen.findByText("No compatibility reports are available for this version.");
@@ -99,7 +98,6 @@ describe("Fork and Import Thin UI", () => {
     vi.stubGlobal("fetch", fetch);
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
     render(<ImportForm />);
-    fireEvent.change(screen.getByLabelText(/developer bearer token/i), { target: { value: "importer-token" } });
     fireEvent.change(screen.getByLabelText("Artifact name"), { target: { value: "Imported Pearl" } });
     fireEvent.change(screen.getByLabelText("Artifact slug"), { target: { value: "imported-pearl" } });
 
@@ -127,7 +125,6 @@ describe("Fork and Import Thin UI", () => {
     vi.stubGlobal("fetch", fetch);
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
     render(<ImportForm />);
-    fireEvent.change(screen.getByLabelText(/developer bearer token/i), { target: { value: "token" } });
     fireEvent.change(screen.getByLabelText("Artifact name"), { target: { value: "Imported Pearl" } });
     fireEvent.change(screen.getByLabelText("Artifact slug"), { target: { value: "imported-pearl" } });
     fireEvent.change(screen.getByRole("textbox", { name: /Markdown\/Skill content/ }), { target: { value: "Markdown" } });
@@ -143,7 +140,6 @@ describe("Fork and Import Thin UI", () => {
     vi.stubGlobal("fetch", fetch);
     vi.stubEnv("NEXT_PUBLIC_PEARLHUB_API_BASE_URL", "https://api.example.test");
     render(<ImportForm />);
-    fireEvent.change(screen.getByLabelText(/developer bearer token/i), { target: { value: "token" } });
     fireEvent.change(screen.getByLabelText("Artifact name"), { target: { value: "Imported Pearl" } });
     fireEvent.change(screen.getByLabelText("Artifact slug"), { target: { value: "imported-pearl" } });
     fireEvent.change(screen.getByRole("textbox", { name: /Markdown\/Skill content/ }), { target: { value: "Markdown" } });
@@ -153,7 +149,7 @@ describe("Fork and Import Thin UI", () => {
       fireEvent.click(submit);
       fireEvent.click(submit);
     });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     await act(async () => resolveResponse(mockResponse(draftResponse(), 201)));
     await vi.waitFor(() => expect(routerPush).toHaveBeenCalledTimes(1));
   });

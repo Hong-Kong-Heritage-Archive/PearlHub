@@ -11,7 +11,6 @@ const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export default function ImportForm() {
   const router = useRouter();
   const pendingRef = useRef(false);
-  const [token, setToken] = useState("");
   const [sourceType, setSourceType] = useState<"pasted" | "github">("pasted");
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
@@ -24,10 +23,6 @@ export default function ImportForm() {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (pendingRef.current) return;
-    if (!token.trim()) {
-      setError("Enter a developer bearer token to create an Import Draft.");
-      return;
-    }
     if (!slugPattern.test(slug)) {
       setError("Slug must use lowercase letters and numbers separated by single hyphens.");
       return;
@@ -42,8 +37,8 @@ export default function ImportForm() {
     setError(null);
     try {
       const draft = sourceType === "pasted"
-        ? await createImportDraft({ sourceType, name: name.trim(), slug, visibility, content }, token)
-        : await createImportDraft({ sourceType, name: name.trim(), slug, visibility, sourceUrl: sourceUrl.trim() }, token);
+        ? await createImportDraft({ sourceType, name: name.trim(), slug, visibility, content })
+        : await createImportDraft({ sourceType, name: name.trim(), slug, visibility, sourceUrl: sourceUrl.trim() });
       router.push(`/draft/${encodeURIComponent(draft.id)}`);
     } catch (caught: unknown) {
       setError(caught instanceof DraftRequestError ? caught.message : "Could not create an Import Draft.");
@@ -68,11 +63,7 @@ export default function ImportForm() {
       </section>
       <section className="create-panel" aria-label="Import form">
         <form className="create-form" onSubmit={submit}>
-          <label className="field" htmlFor="import-token">
-            <span>Developer bearer token <span className="required-mark">(required)</span></span>
-            <input id="import-token" type="password" autoComplete="off" value={token} disabled={pending} onChange={(event) => setToken(event.target.value)} />
-            <span className="field-help">Temporary in-memory token for the configured API. It is never saved in browser storage and is not a login flow.</span>
-          </label>
+          <p className="field-help">Sign in above to create a private Import Draft.</p>
           <fieldset className="draft-editor-list">
             <legend>Import source</legend>
             <label><input type="radio" name="import-source" value="pasted" checked={sourceType === "pasted"} disabled={pending} onChange={() => setSourceType("pasted")} /> Pasted Markdown/Skill content</label>

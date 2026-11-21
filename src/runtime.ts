@@ -3,6 +3,7 @@ import { RebuildArtifactDiscoveryIndexService, ListArtifactsService } from "./ap
 import { DeleteArtifactService, DraftWorkflowService, ImportDraftService, UpdateArtifactMetadataService } from "./application/services.js";
 import { ResolveSourceVersionDependenciesService } from "./application/source-version-dependency-resolution.js";
 import { assertPostgresMigrationsCurrent } from "./adapters/postgres-migrations.js";
+import { FirebaseAuthenticator, createFirebaseAdminIdTokenVerifier } from "./adapters/firebase-authenticator.js";
 import {
   PostgresArtifactDiscoveryRepository,
   PostgresDraftRepository,
@@ -14,19 +15,24 @@ import {
   PostgresLineageRepository,
   PostgresProvenanceRepository,
   PostgresTransactionManager,
+  PostgresUserIdentityRepository,
 } from "./adapters/postgres.js";
 import { SafeGitHubRawSource } from "./adapters/github-raw-source.js";
 import { createHttpApp } from "./http/app.js";
 import type { Authenticator } from "./http/authentication.js";
 import type { ArtifactContentStore } from "./ports/repositories.js";
 
-export interface PostgresRuntimeOptions {
+interface PostgresRuntimeBaseOptions {
   databaseUrl: string;
-  authenticator: Authenticator;
   contentStore: ArtifactContentStore;
   pool?: Pool;
   corsOrigins?: string[];
 }
+
+export type PostgresRuntimeOptions = PostgresRuntimeBaseOptions & (
+  | { authenticator: Authenticator; firebaseProjectId?: never }
+  | { authenticator?: never; firebaseProjectId: string }
+);
 
 export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
   validateDatabaseUrl(options.databaseUrl);
@@ -36,6 +42,11 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
   try {
     await assertPostgresMigrationsCurrent(pool);
     const transactions = new PostgresTransactionManager(pool);
+    const identityRepository = new PostgresUserIdentityRepository(transactions.database, transactions);
+    const authenticator = options.authenticator ?? new FirebaseAuthenticator(
+      await createFirebaseAdminIdTokenVerifier(options.firebaseProjectId),
+      identityRepository,
+    );
     const artifacts = new PostgresArtifactRepository(transactions.database);
     const versions = new PostgresArtifactVersionRepository(transactions.database);
     const lineage = new PostgresLineageRepository(transactions.database);
@@ -94,7 +105,7 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
         updateArtifactMetadata,
         importDraft,
         listArtifacts,
-        authenticator: options.authenticator,
+        authenticator,
         ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),
       }),
       resolveSourceVersionDependencies,

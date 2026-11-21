@@ -105,6 +105,30 @@ describe("GET /api/v1/artifacts", () => {
       });
     });
 
+    it("logs useful diagnostics for unexpected errors without logging credentials or query values", async () => {
+      const error = Object.assign(new Error("Database query failed"), { code: "XX000" });
+      const logError = vi.spyOn(console, "error").mockImplementation(() => {});
+      const listExecute = vi.fn(async () => {
+        throw error;
+      });
+      const response = await makeApp(listExecute).request(
+        "/api/v1/artifacts?q=private-query-value&limit=20&sort=createdAt&order=desc",
+        { headers: { authorization: `Bearer ${authToken}` } },
+      );
+
+      expect(response.status).toBe(500);
+      expect(logError).toHaveBeenCalledWith("Unhandled HTTP error", expect.objectContaining({
+        method: "GET",
+        path: "/api/v1/artifacts",
+        errorName: "Error",
+        errorCode: "XX000",
+        message: "Database query failed",
+      }));
+      const loggedDetails = JSON.stringify(logError.mock.calls);
+      expect(loggedDetails).not.toContain(authToken);
+      expect(loggedDetails).not.toContain("private-query-value");
+    });
+
     it.each([
       "/api/v1/artifacts?q=%20%20",
       "/api/v1/artifacts?q=ab&limit=0",
