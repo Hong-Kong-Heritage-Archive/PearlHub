@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/src/server.js",
+    "start": "node --env-file .env dist/src/server.js",
     "db:migrate": "npm run build && node dist/src/migrate.js",
     "db:migrate:baseline": "npm run build && node dist/src/migrate.js --baseline",
     "test": "vitest run",

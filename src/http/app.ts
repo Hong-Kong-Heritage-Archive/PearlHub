@@ -810,7 +810,11 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
   app.onError((error, context) => {
     const mapped = mapHttpError(error);
     if (mapped.status === 500) {
-      console.error("Unhandled HTTP error");
+      console.error("Unhandled HTTP error", {
+        method: context.req.method,
+        path: new URL(context.req.url).pathname,
+        ...getHttpErrorLogDetails(error),
+      });
     }
     return context.json(mapped.body, mapped.status);
   });
@@ -828,6 +832,26 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
   });
 
   return app;
+}
+
+function getHttpErrorLogDetails(error: unknown) {
+  const errorCode = getErrorCode(error);
+  const details = {
+    errorName: error instanceof Error ? error.name : typeof error,
+    ...(errorCode === undefined ? {} : { errorCode }),
+  };
+  if (!(error instanceof Error) || process.env.NODE_ENV === "production") return details;
+
+  return {
+    ...details,
+    message: error.message.slice(0, 1_000),
+    ...(error.stack === undefined ? {} : { stack: error.stack.slice(0, 5_000) }),
+  };
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  return typeof error.code === "string" ? error.code.slice(0, 64) : undefined;
 }
 
 function toDraftResponse(draft: import("../domain/draft.js").Draft) {
