@@ -69,7 +69,7 @@ Historical planning documents that say framework selection is deferred are super
 - External identities map by `(provider, subject)` through `user_identities`.
 - Never trust client-supplied owner IDs or auto-link accounts by matching email.
 - Never infer a provider for legacy `users.external_subject` values.
-- Current server uses development fake authentication and explicitly refuses production startup. Do not remove this fail-closed guard until a real production authenticator exists and is tested.
+- `PEARLHUB_AUTH_MODE=firebase` is the production authenticator; Firebase Admin uses ADC and rejects production startup with development fake auth or missing/invalid configuration.
 - Firebase provider-specific verification belongs in an Infrastructure adapter.
 - Never commit credentials, ID tokens, API keys or service-account keys; do not log bearer tokens or secrets.
 - Redaction is a security boundary; do not expose hidden target-derived data.
