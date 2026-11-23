@@ -1,0 +1,14 @@
+.git
+.github
+.vscode
+.env
+.env.*
+node_modules
+dist
+coverage
+test
+tests
+web
+*.log
+Dockerfile*
+.dockerignore

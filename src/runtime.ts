@@ -106,6 +106,9 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
         importDraft,
         listArtifacts,
         authenticator,
+        readinessCheck: async () => {
+          await pool.query("SELECT 1");
+        },
         ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),
       }),
       resolveSourceVersionDependencies,

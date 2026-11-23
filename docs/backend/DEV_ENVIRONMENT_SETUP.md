@@ -178,6 +178,29 @@ The local endpoint is `http://localhost:8080/api/v1/artifacts`; pass
 `DEV_AUTH_USER_ID_2`, `DEV_AUTH_TOKEN_2`, and `PEARLHUB_DEV_CORS_ORIGINS`.
 Connection settings are never logged.
 
+## Build the production backend container
+
+The backend has an OCI Dockerfile for local verification and a future Cloud Run
+deployment. It uses a Node 22 build/runtime image, `npm ci`, a separate production
+dependency stage and the non-root `node` user.
+
+```sh
+docker build --tag pearlhub-backend:local .
+docker run --rm \
+  -p 8080:8080 \
+  -e NODE_ENV=production \
+  -e PEARLHUB_AUTH_MODE=firebase \
+  -e FIREBASE_PROJECT_ID="<confirmed-project-id>" \
+  -e DATABASE_URL="<postgresql-connection-url>" \
+  pearlhub-backend:local
+```
+
+Do not bake environment values or credentials into the image. The `/healthz`
+endpoint reports liveness. The `/readyz` endpoint verifies PostgreSQL
+connectivity and returns a generic unavailable response without exposing database
+details. Migrations are not run by application startup or container entrypoint;
+run `npm run db:migrate` as a separate serialized release step.
+
 The authentication adapter returns only the provider-neutral verified internal
 user ID. Runtime configuration uses `DATABASE_URL`, `PORT`,
 `PEARLHUB_AUTH_MODE`, and either Firebase `FIREBASE_PROJECT_ID` or the

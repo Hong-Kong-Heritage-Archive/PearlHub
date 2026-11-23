@@ -13,20 +13,20 @@
     "test:integration": "vitest run tests/integration"
   },
   "dependencies": {
-    "@hono/node-server": "^2.1.5",
+    "@hono/node-server": "^2.1.11",
     "@hono/zod-openapi": "^1.6.3",
     "firebase-admin": "^14.5.1",
-    "hono": "^4.10.0",
+    "hono": "^4.13.21",
     "pg": "^8.23.1",
-    "semver": "^7.7.2",
+    "semver": "^7.8.6",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.19.0",
+    "@types/node": "^26.6.6",
     "@types/pg": "^8.15.5",
     "@types/semver": "^7.7.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.5",
+    "vitest": "^5.1.1",
     "yaml": "^2.9.1"
   }
 }
