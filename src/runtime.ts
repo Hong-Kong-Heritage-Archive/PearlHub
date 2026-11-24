@@ -37,7 +37,12 @@ export type PostgresRuntimeOptions = PostgresRuntimeBaseOptions & (
 export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
   validateDatabaseUrl(options.databaseUrl);
   const ownsPool = options.pool === undefined;
-  const pool = options.pool ?? new Pool({ connectionString: options.databaseUrl });
+  const pool = options.pool ?? new Pool({
+    connectionString: options.databaseUrl,
+    max: readPositiveIntegerEnvironment(process.env.PG_POOL_MAX, 10),
+    idleTimeoutMillis: readPositiveIntegerEnvironment(process.env.PG_IDLE_TIMEOUT_MS, 30_000),
+    connectionTimeoutMillis: readPositiveIntegerEnvironment(process.env.PG_CONNECTION_TIMEOUT_MS, 10_000),
+  });
 
   try {
     await assertPostgresMigrationsCurrent(pool);
@@ -106,6 +111,10 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
         importDraft,
         listArtifacts,
         authenticator,
+        readinessCheck: async () => {
+          const result = await pool.query("SELECT 1");
+          return result.rowCount === 1;
+        },
         ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),
       }),
       resolveSourceVersionDependencies,
@@ -135,7 +144,21 @@ function validateDatabaseUrl(databaseUrl: string): void {
   } catch {
     throw new Error("DATABASE_URL must be a valid PostgreSQL connection URL.");
   }
-  if (!["postgres:", "postgresql:"].includes(parsed.protocol) || !parsed.hostname || parsed.pathname.length < 2) {
-    throw new Error("DATABASE_URL must include a PostgreSQL protocol, host, and database name.");
+  const socketHost = parsed.searchParams.get("host");
+  if (
+    !["postgres:", "postgresql:"].includes(parsed.protocol)
+    || (!parsed.hostname && !socketHost?.startsWith("/"))
+    || parsed.pathname.length < 2
+  ) {
+    throw new Error("DATABASE_URL must include a PostgreSQL protocol, host or socket path, and database name.");
   }
+}
+
+function readPositiveIntegerEnvironment(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error("PostgreSQL pool environment values must be positive integers.");
+  }
+  return parsed;
 }

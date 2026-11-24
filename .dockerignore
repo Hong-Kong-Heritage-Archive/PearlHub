@@ -1,0 +1,12 @@
+.git
+.github
+.env
+.env.*
+!.env.gcp.example
+node_modules
+web
+dist
+tests
+test
+coverage
+*.log

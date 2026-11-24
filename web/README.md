@@ -1,6 +1,6 @@
 # PearlHub Thin UI
 
-This isolated `web/` application is a small Next.js 16 App Router + TypeScript client for Artifact discovery and the Draft-to-publish content workflow. Next.js requires Node.js 20.9 or newer; frontend CI currently runs Node.js 26, while backend CI runs Node.js 22. Frontend dependencies and the npm lockfile are kept separate from the backend.
+This isolated `web/` application is a small Next.js 16 App Router + TypeScript client for Artifact discovery and the Draft-to-publish content workflow. Next.js requires Node.js 26 or newer; frontend CI currently runs Node.js 26, while backend CI runs Node.js 22. Frontend dependencies and the npm lockfile are kept separate from the backend.
 
 ## Local development
 

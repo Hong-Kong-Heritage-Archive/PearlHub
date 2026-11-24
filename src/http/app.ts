@@ -555,6 +555,7 @@ type HttpEnvironment = {
 
 export interface HttpAppDependencies {
   listArtifacts: Pick<ListArtifactsService, "execute">;
+  readinessCheck?: () => Promise<boolean>;
   artifactReads?: ArtifactReadService;
   artifactVersionDependencies?: Pick<DraftWorkflowService, "getVersionDependencies">;
   artifactVersionCompatibilityReports?: Pick<DraftWorkflowService, "getVersionCompatibilityReports">;
@@ -574,6 +575,17 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
         throw new DomainError("INVALID_REQUEST", "Request body is invalid.");
       }
     },
+  });
+
+  app.get("/healthz", (context) => context.body(null, 200));
+  app.get("/readyz", async (context) => {
+    if (!dependencies.readinessCheck) return context.body(null, 200);
+    try {
+      if (await dependencies.readinessCheck()) return context.body(null, 200);
+    } catch {
+      // Readiness is intentionally generic and must not expose database details.
+    }
+    return context.body(null, 503);
   });
 
   if (dependencies.corsOrigins !== undefined) {
