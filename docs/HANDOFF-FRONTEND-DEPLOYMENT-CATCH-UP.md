@@ -7,6 +7,16 @@
 
 > Start the next development chat from this handoff. First verify current HEAD because this SHA may have moved.
 
+## 2026-11-22 production-readiness status
+
+- Firebase Authentication, Google and Email/Password client sign-in, Firebase Admin token verification and transactional internal identity mapping are merged on `main` at `53cef1fcd3e985c76da28a245fc3d6cd72627b96`.
+- CI run #43 for that merge commit passed backend build/unit/application/contract tests, PostgreSQL integration tests and frontend lint/typecheck/tests/build.
+- Live Firebase project configuration and live sign-in are unverified.
+- GCP resources and production deployment are unverified.
+- The backend now has a locally tested OCI Dockerfile and generic `/healthz`/`/readyz` endpoints. Secret/Cloud Run deployment configuration remains pending.
+- `MemoryArtifactContentStore` is process-local. Complete Draft and published-Version snapshots are PostgreSQL-backed; legacy version content availability requires an explicit assessment before production reliance.
+- Claude/Grok signed-in manual testing is user-reported only; signed-out -> sign-in -> return is unverified. ChatGPT prefill remains disabled.
+
 ## 1. Next chat objective
 
 Catch the existing Frontend and Deployment up with current Backend capabilities using **Incremental / Vertical-slice Development**.
@@ -53,10 +63,10 @@ Deployment foundations: local PostgreSQL 16 in `compose.yaml`, `.env.example`, `
 ### Authentication
 
 - `Authenticator` currently returns an internal PearlHub `userId`.
-- `src/server.ts` configures development fake authentication and explicitly refuses `NODE_ENV=production`.
+- `src/server.ts` resolves explicit auth modes; production requires Firebase and refuses development fake auth.
 - Frontend auth is a temporary developer-only in-memory bearer-token field.
 - `user_identities(provider, subject)` exists and maps external identity to internal `users.id`.
-- Firebase Authentication is the confirmed direction, but Firebase token verification and frontend sign-in are not implemented.
+- Firebase Authentication, frontend Google/email-password sign-in and backend Firebase Admin token verification are implemented locally. Live project configuration and end-to-end sign-in remain unverified.
 - Legacy `users.external_subject` values have no inferred provider. Never auto-map by email or guessed Firebase UID.
 
 Do not remove the production fail-closed guard until a real production authenticator is implemented and tested.
@@ -245,8 +255,8 @@ Work in the existing PearlHub repository. Catch up Frontend and Deployment again
 - Compatibility GET responses require `availability: available | redacted`.
 - Redaction must not leak target Version IDs or target-derived report data.
 - `Authenticator` returns the internal PearlHub user ID.
-- `src/server.ts` currently refuses production startup and configures development fake auth only.
-- Firebase token verification and frontend Firebase login are not yet implemented.
+- `src/server.ts` requires explicit auth mode; production uses Firebase and rejects development fake auth.
+- Firebase Admin token verification and frontend Firebase login are implemented locally. Live Firebase project configuration and end-to-end login remain unverified.
 - `user_identities(provider, subject)` exists; do not infer provider for legacy `users.external_subject`.
 - `MemoryArtifactContentStore` is process-local, not durable production storage.
 - New complete Draft and published-Version snapshots are persisted in PostgreSQL; legacy content may be unavailable.

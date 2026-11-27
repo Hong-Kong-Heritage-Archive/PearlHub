@@ -230,7 +230,15 @@ GitHub Actions checks backend build/unit, PostgreSQL integration and frontend ch
 | Frontend | Next.js 16 | Local app exists; production hosting/pipeline absent |
 | Content store | Provider-neutral port | In-memory adapter; no GCS adapter evidenced |
 
-No production Dockerfile, Cloud Run config, Cloud SQL connection setup, production Firebase project/IAM configuration, Secret Manager wiring or production deployment workflow was found in the reviewed tree. Verify GCP project, IAM, Firebase project, Cloud SQL instance, Artifact Registry and deployment access; do not infer resource existence from technology selection.
+A production Dockerfile exists for local OCI verification and future Cloud Run use. Cloud Run config, Cloud SQL connection setup, production Firebase project/IAM configuration, Secret Manager wiring and a production deployment workflow remain unverified. Verify GCP project, IAM, Firebase project, Cloud SQL instance, Artifact Registry and deployment access; do not infer resource existence from technology selection.
+
+### 2026-11-22 production-readiness status
+
+- Firebase Authentication and Google/email-password sign-in implementation are merged at main HEAD `53cef1fcd3e985c76da28a245fc3d6cd72627b96`.
+- A multi-stage backend Dockerfile and `.dockerignore` now provide a locally tested OCI build. The runtime runs as the `node` user and binds `0.0.0.0:$PORT`.
+- `/healthz` is liveness-only; `/readyz` verifies PostgreSQL connectivity with a generic `503` response on failure.
+- Application startup requires the migration ledger to match migrations `001`–`009`; migrations remain an explicit separate runner operation.
+- Live Firebase project configuration, ADC identity, GCP resources, deployment and frontend hosting remain unverified.
 
 ## 9. Constraints for future changes
 

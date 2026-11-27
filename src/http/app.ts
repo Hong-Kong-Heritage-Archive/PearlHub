@@ -566,6 +566,7 @@ export interface HttpAppDependencies {
   importDraft?: Pick<ImportDraftService, "execute">;
   authenticator: Authenticator;
   corsOrigins?: string[];
+  readinessCheck?: () => Promise<void>;
 }
 
 export function createHttpApp(dependencies: HttpAppDependencies) {
@@ -597,6 +598,19 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
       maxAge: 600,
     }));
   }
+
+  app.get("/healthz", (context) => context.json({ status: "ok" }, 200));
+  app.get("/readyz", async (context) => {
+    if (dependencies.readinessCheck) {
+      try {
+        await dependencies.readinessCheck();
+      } catch {
+        console.error("Readiness check failed.");
+        return context.json({ status: "unavailable" }, 503);
+      }
+    }
+    return context.json({ status: "ready" }, 200);
+  });
 
   app.use("/api/v1/artifacts", async (context, next) => {
     if (context.req.method !== "POST" || context.req.path !== "/api/v1/artifacts") {

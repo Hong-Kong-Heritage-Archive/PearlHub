@@ -24,7 +24,7 @@ const runtime = await createPostgresRuntime({
   ...(corsOrigins === undefined ? {} : { corsOrigins }),
 });
 const server = serve(
-  { fetch: runtime.app.fetch, port },
+  { fetch: runtime.app.fetch, port, hostname: "0.0.0.0" },
   ({ port: boundPort }) => console.log(`PearlHub HTTP server listening on port ${boundPort}.`),
 );
 
