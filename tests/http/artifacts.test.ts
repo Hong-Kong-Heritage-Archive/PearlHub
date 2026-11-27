@@ -49,7 +49,7 @@ describe("deployment health endpoints", () => {
     const app = createHttpApp({
       listArtifacts: { execute: async () => ({ items: [], nextCursor: null }) },
       authenticator,
-      readinessCheck: async () => true,
+      readinessCheck: async () => {},
     });
     const response = await app.request("/readyz");
     expect(response.status).toBe(200);

@@ -112,8 +112,7 @@ export async function createPostgresRuntime(options: PostgresRuntimeOptions) {
         listArtifacts,
         authenticator,
         readinessCheck: async () => {
-          const result = await pool.query("SELECT 1");
-          return result.rowCount === 1;
+          await pool.query("SELECT 1");
         },
         ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),
       }),
