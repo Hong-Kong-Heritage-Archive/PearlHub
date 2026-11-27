@@ -587,6 +587,7 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
   }
 
   app.get("/healthz", (context) => context.json({ status: "ok" }, 200));
+  app.get("/health", (context) => context.json({ status: "ok" }, 200));
   app.get("/readyz", async (context) => {
     if (dependencies.readinessCheck) {
       try {

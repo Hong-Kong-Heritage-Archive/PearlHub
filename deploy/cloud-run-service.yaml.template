@@ -1,0 +1,52 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: <CLOUD_RUN_SERVICE>
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+        run.googleapis.com/cloudsql-instances: "<CLOUD_SQL_INSTANCE>"
+    spec:
+      serviceAccountName: "<CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT>"
+      containerConcurrency: 20
+      timeoutSeconds: 300
+      containers:
+        - image: "<REGION>-docker.pkg.dev/<GCP_PROJECT_ID>/<ARTIFACT_REGISTRY_REPOSITORY>/<ARTIFACT_REGISTRY_IMAGE>:<IMAGE_DIGEST>"
+          ports:
+            - name: http1
+              containerPort: 8080
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PEARLHUB_AUTH_MODE
+              value: "firebase"
+            - name: FIREBASE_PROJECT_ID
+              value: "<FIREBASE_PROJECT_ID>"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "<CLOUD_SQL_DATABASE_URL_SECRET>"
+                  key: latest
+            - name: PG_POOL_MAX
+              value: "10"
+            - name: PG_IDLE_TIMEOUT_MS
+              value: "30000"
+            - name: PG_CONNECTION_TIMEOUT_MS
+              value: "10000"
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3

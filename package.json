@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "start": "node --env-file .env dist/src/server.js",
+    "start": "node dist/src/server.js",
     "db:migrate": "npm run build && node dist/src/migrate.js",
     "db:migrate:baseline": "npm run build && node dist/src/migrate.js --baseline",
     "test": "vitest run",
@@ -21,12 +21,15 @@
     "semver": "^7.8.6",
     "zod": "^4.0.0"
   },
+  "engines": {
+    "node": ">=26"
+  },
   "devDependencies": {
-    "@types/node": "^26.6.6",
+    "@types/node": "^26.6.11",
     "@types/pg": "^8.15.5",
     "@types/semver": "^7.7.1",
-    "typescript": "^7.0.2",
-    "vitest": "^5.1.1",
+    "typescript": "^6.0.3",
+    "vitest": "^5.1.2",
     "yaml": "^2.9.1"
   }
 }

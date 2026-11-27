@@ -39,6 +39,33 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("deployment health endpoints", () => {
+  it("returns process liveness without dependencies", async () => {
+    const response = await makeApp().request("/health");
+    expect(response.status).toBe(200);
+  });
+
+  it("returns readiness success when PostgreSQL is reachable", async () => {
+    const app = createHttpApp({
+      listArtifacts: { execute: async () => ({ items: [], nextCursor: null }) },
+      authenticator,
+      readinessCheck: async () => {},
+    });
+    const response = await app.request("/readyz");
+    expect(response.status).toBe(200);
+  });
+
+  it("returns generic readiness failure when PostgreSQL is unreachable", async () => {
+    const app = createHttpApp({
+      listArtifacts: { execute: async () => ({ items: [], nextCursor: null }) },
+      authenticator,
+      readinessCheck: async () => { throw new Error("database details must stay private"); },
+    });
+    const response = await app.request("/readyz");
+    expect(response.status).toBe(503);
+  });
+});
+
 describe("POST /api/v1/artifacts", () => {
   it("retires direct Artifact creation so all new identities publish atomically", async () => {
     const response = await postArtifact(makeApp(), JSON.stringify(requestBody));
