@@ -140,9 +140,13 @@ export function requireDatabaseUrl(environment: NodeJS.ProcessEnv = process.env)
 function validateDatabaseUrl(databaseUrl: string): void {
   let parsed: URL;
   try {
-    parsed = new URL(databaseUrl);
+    const urlForValidation = databaseUrl.replace(
+      /^(postgres(?:ql)?:\/\/[^/?#]*)@\/(?=[^?]*(?:\?|$))/,
+      "$1@localhost/",
+    );
+    parsed = new URL(urlForValidation);
   } catch {
-    throw new Error("DATABASE_URL must be a valid PostgreSQL connection URL.");
+    throw new Error("DATABASE_URL must be a valid PostgreSQL connection URL with reserved credentials URL-encoded.");
   }
   const socketHost = parsed.searchParams.get("host");
   if (

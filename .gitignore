@@ -1,4 +1,5 @@
 .env
+.env.gcp
 web/.env.local
 .DS_Store
 node_modules/
@@ -7,3 +8,5 @@ coverage/
 web/.next/
 web/out/
 web/*.tsbuildinfo
+docs/task/
+docs/audit/

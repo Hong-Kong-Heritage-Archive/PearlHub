@@ -41,7 +41,7 @@ afterEach(() => {
 
 describe("deployment health endpoints", () => {
   it("returns process liveness without dependencies", async () => {
-    const response = await makeApp().request("/healthz");
+    const response = await makeApp().request("/health");
     expect(response.status).toBe(200);
   });
 

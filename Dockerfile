@@ -1,3 +1,4 @@
+# The deployment scripts target linux/amd64 for Cloud Run.
 FROM node:26-slim AS build
 WORKDIR /app
 

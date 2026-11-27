@@ -578,6 +578,7 @@ export function createHttpApp(dependencies: HttpAppDependencies) {
   });
 
   app.get("/healthz", (context) => context.body(null, 200));
+  app.get("/health", (context) => context.body(null, 200));
   app.get("/readyz", async (context) => {
     if (!dependencies.readinessCheck) return context.body(null, 200);
     try {
